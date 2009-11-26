@@ -5640,8 +5640,7 @@ cputime_t task_stime(struct task_struct *p)
 #else
 
 #ifndef nsecs_to_cputime
-# define nsecs_to_cputime(__nsecs) \
-	msecs_to_cputime(div_u64((__nsecs), NSEC_PER_MSEC))
+# define nsecs_to_cputime(__nsecs)	nsecs_to_jiffies(__nsecs)
 #endif
 
 cputime_t task_utime(struct task_struct *p)
