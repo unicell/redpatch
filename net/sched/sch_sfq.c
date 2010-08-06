@@ -506,6 +506,12 @@ static unsigned long sfq_get(struct Qdisc *sch, u32 classid)
 	return 0;
 }
 
+static unsigned long sfq_bind(struct Qdisc *sch, unsigned long parent,
+			      u32 classid)
+{
+	return 0;
+}
+
 static struct tcf_proto **sfq_find_tcf(struct Qdisc *sch, unsigned long cl)
 {
 	struct sfq_sched_data *q = qdisc_priv(sch);
@@ -561,6 +567,7 @@ static const struct Qdisc_class_ops sfq_class_ops = {
 	.leaf		=	sfq_leaf,
 	.get		=	sfq_get,
 	.tcf_chain	=	sfq_find_tcf,
+	.bind_tcf	=	sfq_bind,
 	.dump		=	sfq_dump_class,
 	.dump_stats	=	sfq_dump_class_stats,
 	.walk		=	sfq_walk,
