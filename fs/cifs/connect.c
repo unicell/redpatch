@@ -453,27 +453,19 @@ incomplete_rcv:
 			   an error on SMB negprot response */
 			cFYI(1, "Negative RFC1002 Session Response Error 0x%x)",
 				pdu_length);
-			if (server->tcpStatus == CifsNew) {
-				/* if nack on negprot (rather than
-				ret of smb negprot error) reconnecting
-				not going to help, ret error to mount */
-				break;
-			} else {
-				/* give server a second to
-				clean up before reconnect attempt */
-				msleep(1000);
-				/* always try 445 first on reconnect
-				since we get NACK on some if we ever
-				connected to port 139 (the NACK is
-				since we do not begin with RFC1001
-				session initialize frame) */
-				cifs_set_port((struct sockaddr *)
-						&server->addr.sockAddr, CIFS_PORT);
-				cifs_reconnect(server);
-				csocket = server->ssocket;
-				wake_up(&server->response_q);
-				continue;
-			}
+			/* give server a second to clean up  */
+			msleep(1000);
+			/* always try 445 first on reconnect since we get NACK
+			 * on some if we ever connected to port 139 (the NACK
+			 * is since we do not begin with RFC1001 session
+			 * initialize frame)
+			 */
+			cifs_set_port((struct sockaddr *)
+					&server->addr.sockAddr, CIFS_PORT);
+			cifs_reconnect(server);
+			csocket = server->ssocket;
+			wake_up(&server->response_q);
+			continue;
 		} else if (temp != (char) 0) {
 			cERROR(1, "Unknown RFC 1002 frame");
 			cifs_dump_mem(" Received Data: ", (char *)smb_buffer,
@@ -1457,15 +1449,6 @@ cifs_find_tcp_session(struct sockaddr *addr, struct smb_vol *vol)
 
 	write_lock(&cifs_tcp_ses_lock);
 	list_for_each_entry(server, &cifs_tcp_ses_list, tcp_ses_list) {
-		/*
-		 * the demux thread can exit on its own while still in CifsNew
-		 * so don't accept any sockets in that state. Since the
-		 * tcpStatus never changes back to CifsNew it's safe to check
-		 * for this without a lock.
-		 */
-		if (server->tcpStatus == CifsNew)
-			continue;
-
 		if (!match_address(server, addr))
 			continue;
 
