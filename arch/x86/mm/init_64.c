@@ -104,11 +104,10 @@ __setup("noexec32=", nonx32_setup);
  */
 static void sync_global_pgds(unsigned long start, unsigned long end)
 {
-	unsigned long flags;
 	struct page *page;
 	unsigned long addr;
 
-	spin_lock_irqsave(&pgd_lock, flags);
+	spin_lock(&pgd_lock);
 	for (addr = start; addr < end; addr += PGDIR_SIZE) {
 		pgd_t *ref_pgd = pgd_offset_k(addr);
 		list_for_each_entry(page, &pgd_list, lru) {
@@ -116,6 +115,7 @@ static void sync_global_pgds(unsigned long start, unsigned long end)
 			pgd_t *pgd_base = page_address(page);
 			pgd_t *pgd = pgd_base + pgd_index(addr);
 
+			/* the pgt_lock only for Xen */
 			pgt_lock = &pgd_page_get_mm(page)->page_table_lock;
 			spin_lock(pgt_lock);
 
@@ -130,7 +130,7 @@ static void sync_global_pgds(unsigned long start, unsigned long end)
 			spin_unlock(pgt_lock);
 		}
 	}
-	spin_unlock_irqrestore(&pgd_lock, flags);
+	spin_unlock(&pgd_lock);
 }
 
 /*
