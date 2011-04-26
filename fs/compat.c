@@ -1351,6 +1351,10 @@ static int compat_count(compat_uptr_t __user *argv, int max)
 			argv++;
 			if (i++ >= max)
 				return -E2BIG;
+
+			if (fatal_signal_pending(current))
+				return -ERESTARTNOHAND;
+			cond_resched();
 		}
 	}
 	return i;
@@ -1391,6 +1395,12 @@ static int compat_copy_strings(int argc, compat_uptr_t __user *argv,
 
 		while (len > 0) {
 			int offset, bytes_to_copy;
+
+			if (fatal_signal_pending(current)) {
+				ret = -ERESTARTNOHAND;
+				goto out;
+			}
+			cond_resched();
 
 			offset = pos % PAGE_SIZE;
 			if (offset == 0)
