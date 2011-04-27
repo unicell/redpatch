@@ -23,8 +23,10 @@
  */
 
 #include "drmP.h"
+
 #include "nouveau_drv.h"
 #include "nouveau_i2c.h"
+#include "nouveau_connector.h"
 #include "nouveau_encoder.h"
 
 static int
@@ -271,12 +273,36 @@ nouveau_dp_link_train(struct drm_encoder *encoder)
 {
 	struct drm_device *dev = encoder->dev;
 	struct nouveau_encoder *nv_encoder = nouveau_encoder(encoder);
-	uint8_t config[4];
-	uint8_t status[3];
+	struct nouveau_connector *nv_connector;
+	struct bit_displayport_encoder_table *dpe;
+	int dpe_headerlen;
+	uint8_t config[4], status[3];
 	bool cr_done, cr_max_vs, eq_done;
 	int ret = 0, i, tries, voltage;
 
 	NV_DEBUG_KMS(dev, "link training!!\n");
+
+	nv_connector = nouveau_encoder_connector_get(nv_encoder);
+	if (!nv_connector)
+		return false;
+
+	dpe = nouveau_bios_dp_table(dev, nv_encoder->dcb, &dpe_headerlen);
+	if (!dpe) {
+		NV_ERROR(dev, "SOR-%d: no DP encoder table!\n", nv_encoder->or);
+		return false;
+	}
+
+	/* disable hotplug detect, this flips around on some panels during
+	 * link training.
+	 */
+	nv50_gpio_irq_enable(dev, nv_connector->dcb->gpio_tag, false);
+
+	if (dpe->script0) {
+		NV_DEBUG_KMS(dev, "SOR-%d: running DP script 0\n", nv_encoder->or);
+		nouveau_bios_run_init_table(dev, le16_to_cpu(dpe->script0),
+					    nv_encoder->dcb);
+	}
+
 train:
 	cr_done = eq_done = false;
 
@@ -289,7 +315,8 @@ train:
 		return false;
 
 	config[0] = nv_encoder->dp.link_nr;
-	if (nv_encoder->dp.dpcd_version >= 0x11)
+	if (nv_encoder->dp.dpcd_version >= 0x11 &&
+	    nv_encoder->dp.enhanced_frame)
 		config[0] |= DP_LANE_COUNT_ENHANCED_FRAME_EN;
 
 	ret = nouveau_dp_lane_count_set(encoder, config[0]);
@@ -403,6 +430,15 @@ stop:
 		}
 	}
 
+	if (dpe->script1) {
+		NV_DEBUG_KMS(dev, "SOR-%d: running DP script 1\n", nv_encoder->or);
+		nouveau_bios_run_init_table(dev, le16_to_cpu(dpe->script1),
+					    nv_encoder->dcb);
+	}
+
+	/* re-enable hotplug detect */
+	nv50_gpio_irq_enable(dev, nv_connector->dcb->gpio_tag, true);
+
 	return eq_done;
 }
 
@@ -431,9 +467,11 @@ nouveau_dp_detect(struct drm_encoder *encoder)
 	    !nv_encoder->dcb->dpconf.link_bw)
 		nv_encoder->dp.link_bw = DP_LINK_BW_1_62;
 
-	nv_encoder->dp.link_nr = dpcd[2] & 0xf;
+	nv_encoder->dp.link_nr = dpcd[2] & DP_MAX_LANE_COUNT_MASK;
 	if (nv_encoder->dp.link_nr > nv_encoder->dcb->dpconf.link_nr)
 		nv_encoder->dp.link_nr = nv_encoder->dcb->dpconf.link_nr;
+
+	nv_encoder->dp.enhanced_frame = (dpcd[2] & DP_ENHANCED_FRAME_CAP);
 
 	return true;
 }
