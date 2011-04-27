@@ -155,6 +155,17 @@ ifeq ($(KBUILD_SRC),)
 else
 	SCRIPTS_DIR := $(KBUILD_SRC)/scripts
 endif
+SIGN_MODULES := 1
+else
+SIGN_MODULES := 0
+endif
+
+# only sign if it's an in-tree module
+ifneq ($(KBUILD_EXTMOD),)
+SIGN_MODULES := 0
+endif
+
+ifeq ($(SIGN_MODULES),1)
 quiet_cmd_sign_ko_ko_unsigned = SIGN [M] $@
       cmd_sign_ko_ko_unsigned = \
 		scripts/mod/mod-extract $< $@.digest && \
