@@ -6252,6 +6252,9 @@ static int __devinit ixgbe_probe(struct pci_dev *pdev,
 		goto err_sw_init;
 	}
 
+	/* check module options */
+	ixgbe_check_options(adapter);
+
 	ixgbe_probe_vf(adapter, ii);
 
 	netdev->features = NETIF_F_SG |
