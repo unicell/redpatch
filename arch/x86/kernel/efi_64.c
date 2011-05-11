@@ -27,6 +27,7 @@
 #include <linux/uaccess.h>
 #include <linux/io.h>
 #include <linux/reboot.h>
+#include <linux/memory.h>
 
 #include <asm/setup.h>
 #include <asm/page.h>
@@ -163,6 +164,25 @@ static pte_t *fill_pte(pmd_t *pmd, unsigned long vaddr)
 	return pte_offset_kernel(pmd, vaddr);
 }
 
+#define EFI_CALLBACK_PRI	3	/* lower than node and SLAB */
+#ifdef CONFIG_MEMORY_HOTPLUG
+static int efi_memory_callback(struct notifier_block *self,
+			       unsigned long action, void *arg)
+{
+	switch (action) {
+		case MEM_GOING_ONLINE: /* fall through */
+		case MEM_GOING_OFFLINE:
+			clone_pgd_range(efi_pgd + KERNEL_PGD_BOUNDARY,
+					swapper_pg_dir + KERNEL_PGD_BOUNDARY, KERNEL_PGD_PTRS);
+			break;
+		default:
+			break;
+	}
+
+	return NOTIFY_OK;
+}
+#endif
+
 void __init efi_pagetable_init(void)
 {
 	efi_memory_desc_t *md;
@@ -197,8 +217,7 @@ void __init efi_pagetable_init(void)
 				set_pte(pte, pfn_pte(pfn, PAGE_KERNEL));
 		}
 	}
-	pgd = efi_pgd + pgd_index(PAGE_OFFSET);
-	set_pgd(pgd, *pgd_offset_k(PAGE_OFFSET));
-	pgd = efi_pgd + pgd_index(__START_KERNEL_map);
-	set_pgd(pgd, *pgd_offset_k(__START_KERNEL_map));
+	clone_pgd_range(efi_pgd + KERNEL_PGD_BOUNDARY,
+	                swapper_pg_dir + KERNEL_PGD_BOUNDARY, KERNEL_PGD_PTRS);
+	hotplug_memory_notifier(efi_memory_callback, EFI_CALLBACK_PRI);
 }
