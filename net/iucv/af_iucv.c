@@ -198,7 +198,6 @@ static int afiucv_pm_freeze(struct device *dev)
  */
 static int afiucv_pm_restore_thaw(struct device *dev)
 {
-	struct iucv_sock *iucv;
 	struct sock *sk;
 	struct hlist_node *node;
 
@@ -207,7 +206,6 @@ static int afiucv_pm_restore_thaw(struct device *dev)
 #endif
 	read_lock(&iucv_sk_list.lock);
 	sk_for_each(sk, node, &iucv_sk_list.head) {
-		iucv = iucv_sk(sk);
 		switch (sk->sk_state) {
 		case IUCV_CONNECTED:
 			sk->sk_err = EPIPE;
@@ -490,8 +488,6 @@ static void iucv_sock_close(struct sock *sk)
 			sk->sk_state_change(sk);
 		}
 	case IUCV_DISCONN:
-		err = 0;
-
 		sk->sk_state = IUCV_CLOSING;
 		sk->sk_state_change(sk);
 
