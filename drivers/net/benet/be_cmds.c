@@ -77,14 +77,24 @@ static int be_mcc_compl_process(struct be_adapter *adapter,
 			netdev_stats_update(adapter);
 			adapter->stats_ioctl_sent = false;
 		}
-	} else if ((compl_status != MCC_STATUS_NOT_SUPPORTED) &&
-		   (compl->tag0 != OPCODE_COMMON_NTWK_MAC_QUERY)) {
-		extd_status = (compl->status >> CQE_STATUS_EXTD_SHIFT) &
-				CQE_STATUS_EXTD_MASK;
-		dev_warn(&adapter->pdev->dev,
-		"Error in cmd completion - opcode %d, compl %d, extd %d\n",
-			compl->tag0, compl_status, extd_status);
+	} else {
+		if (compl_status == MCC_STATUS_NOT_SUPPORTED ||
+			compl_status == MCC_STATUS_ILLEGAL_REQUEST)
+			goto done;
+
+		if (compl_status == MCC_STATUS_UNAUTHORIZED_REQUEST) {
+			dev_warn(&adapter->pdev->dev, "This domain(VM) is not "
+				"permitted to execute this cmd (opcode %d)\n",
+				compl->tag0);
+		} else {
+			extd_status = (compl->status >> CQE_STATUS_EXTD_SHIFT) &
+					CQE_STATUS_EXTD_MASK;
+			dev_err(&adapter->pdev->dev, "Cmd (opcode %d) failed:"
+				"status %d, extd-status %d\n",
+				compl->tag0, compl_status, extd_status);
+		}
 	}
+done:
 	return compl_status;
 }
 
@@ -1898,5 +1908,44 @@ int be_cmd_set_qos(struct be_adapter *adapter, u32 bps, u32 domain)
 
 err:
 	spin_unlock_bh(&adapter->mcc_lock);
+	return status;
+}
+
+/* Uses mbox */
+int be_cmd_check_native_mode(struct be_adapter *adapter)
+{
+	struct be_mcc_wrb *wrb;
+	struct be_cmd_req_set_func_cap *req;
+	int status;
+
+	if (mutex_lock_interruptible(&adapter->mbox_lock))
+		return -1;
+
+	wrb = wrb_from_mbox(adapter);
+	if (!wrb) {
+		status = -EBUSY;
+		goto err;
+	}
+
+	req = embedded_payload(wrb);
+
+	be_wrb_hdr_prepare(wrb, sizeof(*req), true, 0,
+		OPCODE_COMMON_SET_DRIVER_FUNCTION_CAP);
+
+	be_cmd_hdr_prepare(&req->hdr, CMD_SUBSYSTEM_COMMON,
+		OPCODE_COMMON_SET_DRIVER_FUNCTION_CAP, sizeof(*req));
+
+	req->valid_cap_flags = cpu_to_le32(CAPABILITY_SW_TIMESTAMPS |
+				CAPABILITY_BE3_NATIVE_ERX_API);
+	req->cap_flags = cpu_to_le32(CAPABILITY_BE3_NATIVE_ERX_API);
+
+	status = be_mbox_notify_wait(adapter);
+	if (!status) {
+		struct be_cmd_resp_set_func_cap *resp = embedded_payload(wrb);
+		adapter->be3_native = le32_to_cpu(resp->cap_flags) &
+					CAPABILITY_BE3_NATIVE_ERX_API;
+	}
+err:
+	mutex_unlock(&adapter->mbox_lock);
 	return status;
 }

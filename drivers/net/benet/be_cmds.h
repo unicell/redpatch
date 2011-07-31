@@ -51,17 +51,12 @@ struct be_mcc_wrb {
 
 /* Completion Status */
 enum {
-	MCC_STATUS_SUCCESS = 0x0,
-/* The client does not have sufficient privileges to execute the command */
-	MCC_STATUS_INSUFFICIENT_PRIVILEGES = 0x1,
-/* A parameter in the command was invalid. */
-	MCC_STATUS_INVALID_PARAMETER = 0x2,
-/* There are insufficient chip resources to execute the command */
-	MCC_STATUS_INSUFFICIENT_RESOURCES = 0x3,
-/* The command is completing because the queue was getting flushed */
-	MCC_STATUS_QUEUE_FLUSHING = 0x4,
-/* The command is completing with a DMA error */
-	MCC_STATUS_DMA_FAILED = 0x5,
+	MCC_STATUS_SUCCESS = 0,
+	MCC_STATUS_FAILED = 1,
+	MCC_STATUS_ILLEGAL_REQUEST = 2,
+	MCC_STATUS_ILLEGAL_FIELD = 3,
+	MCC_STATUS_INSUFFICIENT_BUFFER = 4,
+	MCC_STATUS_UNAUTHORIZED_REQUEST = 5,
 	MCC_STATUS_NOT_SUPPORTED = 66
 };
 
@@ -189,6 +184,7 @@ struct be_mcc_mailbox {
 #define OPCODE_COMMON_GET_BEACON_STATE			70
 #define OPCODE_COMMON_READ_TRANSRECV_DATA		73
 #define OPCODE_COMMON_GET_PHY_DETAILS			102
+#define OPCODE_COMMON_SET_DRIVER_FUNCTION_CAP		103
 
 #define OPCODE_ETH_RSS_CONFIG				1
 #define OPCODE_ETH_ACPI_CONFIG				2
@@ -1007,6 +1003,24 @@ struct be_cmd_resp_set_qos {
 	u32 rsvd;
 };
 
+/*********************** Set driver function ***********************/
+#define CAPABILITY_SW_TIMESTAMPS	2
+#define CAPABILITY_BE3_NATIVE_ERX_API	4
+
+struct be_cmd_req_set_func_cap {
+	struct be_cmd_req_hdr hdr;
+	u32 valid_cap_flags;
+	u32 cap_flags;
+	u8 rsvd[212];
+};
+
+struct be_cmd_resp_set_func_cap {
+	struct be_cmd_resp_hdr hdr;
+	u32 valid_cap_flags;
+	u32 cap_flags;
+	u8 rsvd[212];
+};
+
 extern int be_pci_fnum_get(struct be_adapter *adapter);
 extern int be_cmd_POST(struct be_adapter *adapter);
 extern int be_cmd_mac_addr_query(struct be_adapter *adapter, u8 *mac_addr,
@@ -1091,3 +1105,5 @@ extern int be_cmd_get_phy_info(struct be_adapter *adapter,
 		struct be_dma_mem *cmd);
 extern int be_cmd_set_qos(struct be_adapter *adapter, u32 bps, u32 domain);
 extern void be_detect_dump_ue(struct be_adapter *adapter);
+extern int be_cmd_check_native_mode(struct be_adapter *adapter);
+

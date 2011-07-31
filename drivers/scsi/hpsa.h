@@ -127,10 +127,12 @@ struct ctlr_info {
 };
 #define HPSA_ABORT_MSG 0
 #define HPSA_DEVICE_RESET_MSG 1
-#define HPSA_BUS_RESET_MSG 2
-#define HPSA_HOST_RESET_MSG 3
+#define HPSA_RESET_TYPE_CONTROLLER 0x00
+#define HPSA_RESET_TYPE_BUS 0x01
+#define HPSA_RESET_TYPE_TARGET 0x03
+#define HPSA_RESET_TYPE_LUN 0x04
 #define HPSA_MSG_SEND_RETRY_LIMIT 10
-#define HPSA_MSG_SEND_RETRY_INTERVAL_MSECS 1000
+#define HPSA_MSG_SEND_RETRY_INTERVAL_MSECS (10000)
 
 /* Maximum time in seconds driver will wait for command completions
  * when polling before giving up.
@@ -155,7 +157,7 @@ struct ctlr_info {
  * HPSA_BOARD_READY_ITERATIONS are derived from those.
  */
 #define HPSA_BOARD_READY_WAIT_SECS (120)
-#define HPSA_BOARD_NOT_READY_WAIT_SECS (10)
+#define HPSA_BOARD_NOT_READY_WAIT_SECS (120)
 #define HPSA_BOARD_READY_POLL_INTERVAL_MSECS (100)
 #define HPSA_BOARD_READY_POLL_INTERVAL \
 	((HPSA_BOARD_READY_POLL_INTERVAL_MSECS * HZ) / 1000)
