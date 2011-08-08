@@ -29,7 +29,7 @@
 
 #include <net/iucv/af_iucv.h>
 
-#define VERSION "1.1"
+#define VERSION "1.2"
 
 static char iucv_userid[80];
 
@@ -564,6 +564,10 @@ static struct sock *iucv_sock_alloc(struct socket *sock, int proto, gfp_t prio)
 	iucv->path = NULL;
 	iucv->sk_txnotify = afiucv_hs_callback_txnotify;
 	memset(&iucv->src_user_id , 0, 32);
+	if (pr_iucv)
+		iucv->transport = AF_IUCV_TRANS_IUCV;
+	else
+		iucv->transport = AF_IUCV_TRANS_HIPER;
 
 	sk->sk_destruct = iucv_sock_destruct;
 	sk->sk_sndtimeo = IUCV_CONN_TIMEOUT;
