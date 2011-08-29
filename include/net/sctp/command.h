@@ -107,6 +107,7 @@ typedef enum {
 	SCTP_CMD_T1_RETRAN,	 /* Mark for retransmission after T1 timeout  */
 	SCTP_CMD_UPDATE_INITTAG, /* Update peer inittag */
 	SCTP_CMD_SEND_MSG,	 /* Send the whole use message */
+	SCTP_CMD_SET_ASOC,	 /* Set current association */
 	SCTP_CMD_LAST
 } sctp_verb_t;
 

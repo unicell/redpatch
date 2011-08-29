@@ -1650,6 +1650,9 @@ static int sctp_cmd_interpreter(sctp_event_t event_type,
 			}
 			error = sctp_cmd_send_msg(asoc, cmd->obj.msg);
 			break;
+		case SCTP_CMD_SET_ASOC:
+			asoc = cmd->obj.asoc;
+			break;
 		default:
 			printk(KERN_WARNING "Impossible command: %u, %p\n",
 			       cmd->verb, cmd->obj.ptr);
