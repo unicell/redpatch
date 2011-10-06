@@ -6030,7 +6030,6 @@ int ext4_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	struct inode *inode = file->f_path.dentry->d_inode;
 	struct address_space *mapping = inode->i_mapping;
 	handle_t *handle;
-	get_block_t *get_block;
 	int retries = 0;
 
 	/*
@@ -6046,7 +6045,7 @@ int ext4_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 			ret = __block_page_mkwrite(vma, vmf,
 						   ext4_da_get_block_prep);
 		} while (ret == -ENOSPC &&
-		       ext4_should_retry_alloc(inode->i_sb, &retries));
+			ext4_should_retry_alloc(inode->i_sb, &retries));
 		goto out_ret;
 	}
 
@@ -6070,25 +6069,19 @@ int ext4_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if (page_has_buffers(page)) {
 		if (!walk_page_buffers(NULL, page_buffers(page), 0, len, NULL,
 					ext4_bh_unmapped)) {
-			/* Wait so that we don't change page under IO */
-			wait_on_page_writeback(page);
 			ret = VM_FAULT_LOCKED;
 			goto out;
 		}
 	}
 	unlock_page(page);
 	/* OK, we need to fill the hole... */
-	if (ext4_should_dioread_nolock(inode))
-		get_block = ext4_get_block_write;
-	else
-		get_block = ext4_get_block;
 retry_alloc:
 	handle = ext4_journal_start(inode, ext4_writepage_trans_blocks(inode));
 	if (IS_ERR(handle)) {
 		ret = VM_FAULT_SIGBUS;
 		goto out;
 	}
-	ret = __block_page_mkwrite(vma, vmf, get_block);
+	ret = __block_page_mkwrite(vma, vmf, ext4_get_block);
 	if (!ret && ext4_should_journal_data(inode)) {
 		if (walk_page_buffers(handle, page_buffers(page), 0,
 			  PAGE_CACHE_SIZE, NULL, do_journal_get_write_access)) {
@@ -6104,5 +6097,5 @@ retry_alloc:
 out_ret:
 	ret = block_page_mkwrite_return(ret);
 out:
-	return ret;
+        return ret;
 }
