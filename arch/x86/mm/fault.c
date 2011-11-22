@@ -18,8 +18,6 @@
 #include <asm/pgalloc.h>		/* pgd_*(), ...			*/
 #include <asm/kmemcheck.h>		/* kmemcheck_*(), ...		*/
 
-#include <xen/xen.h>			/* xen_pv_domain()		*/
-
 /*
  * Page fault error code bits:
  *
@@ -237,18 +235,7 @@ void vmalloc_sync_all(void)
 
 		spin_lock_irqsave(&pgd_lock, flags);
 		list_for_each_entry(page, &pgd_list, lru) {
-			struct mm_struct *mm;
-			pmd_t *ret;
-
-			mm = pgd_page_get_mm(page);
-
-			if (mm)
-				spin_lock(&mm->page_table_lock);
-			ret = vmalloc_sync_one(page_address(page), address);
-			if (mm)
-				spin_unlock(&mm->page_table_lock);
-
-			if (!ret)
+			if (!vmalloc_sync_one(page_address(page), address))
 				break;
 		}
 		spin_unlock_irqrestore(&pgd_lock, flags);
@@ -360,21 +347,12 @@ void vmalloc_sync_all(void)
 		spin_lock_irqsave(&pgd_lock, flags);
 		list_for_each_entry(page, &pgd_list, lru) {
 			pgd_t *pgd;
-			struct mm_struct *mm;
-
 			pgd = (pgd_t *)page_address(page) + pgd_index(address);
-
-			mm = pgd_page_get_mm(page);
-			if (mm)
-				spin_lock(&mm->page_table_lock);
 
 			if (pgd_none(*pgd))
 				set_pgd(pgd, *pgd_ref);
 			else
 				BUG_ON(pgd_page_vaddr(*pgd) != pgd_page_vaddr(*pgd_ref));
-
-			if (mm)
-				spin_unlock(&mm->page_table_lock);
 		}
 		spin_unlock_irqrestore(&pgd_lock, flags);
 	}

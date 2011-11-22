@@ -81,9 +81,6 @@ extern struct list_head pgd_list;
 
 #endif	/* CONFIG_PARAVIRT */
 
-#define pgd_page_get_mm(__page) \
-	((struct mm_struct *)(xen_pv_domain() ? (__page)->index : 0))
-
 /*
  * The following only work if pte_present() is true.
  * Undefined behaviour if not..
