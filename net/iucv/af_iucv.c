@@ -2290,9 +2290,16 @@ static void afiucv_hs_callback_txnotify(struct sk_buff *skb,
 	}
 	spin_unlock_irqrestore(&list->lock, flags);
 
+	if (sk->sk_state == IUCV_CLOSING) {
+		if (skb_queue_empty(&iucv_sk(sk)->send_skb_q)) {
+			sk->sk_state = IUCV_CLOSED;
+			sk->sk_state_change(sk);
+		}
+	}
 out_unlock:
 	bh_unlock_sock(sk);
 }
+
 static const struct proto_ops iucv_sock_ops = {
 	.family		= PF_IUCV,
 	.owner		= THIS_MODULE,
