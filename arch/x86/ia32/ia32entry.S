@@ -216,8 +216,10 @@ sysexit_from_sys_call:
 	TRACE_IRQS_ON
 	sti
 	movl %eax,%esi		/* second arg, syscall return value */
-	cmpl $0,%eax		/* is it < 0? */
-	setl %al		/* 1 if so, 0 if not */
+	cmpl $-MAX_ERRNO,%eax	/* is it an error ? */
+	jbe 1f
+	movslq %eax, %rsi	/* if error sign extend to 64 bits */
+1:	setbe %al		/* 1 if error, 0 if not */
 	movzbl %al,%edi		/* zero-extend that into %edi */
 	inc %edi /* first arg, 0->1(AUDITSC_SUCCESS), 1->2(AUDITSC_FAILURE) */
 	call audit_syscall_exit
