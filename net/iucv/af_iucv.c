@@ -166,8 +166,6 @@ static int afiucv_pm_freeze(struct device *dev)
 	read_lock(&iucv_sk_list.lock);
 	sk_for_each(sk, node, &iucv_sk_list.head) {
 		iucv = iucv_sk(sk);
-		skb_queue_purge(&iucv->send_skb_q);
-		skb_queue_purge(&iucv->backlog_skb_q);
 		switch (sk->sk_state) {
 		case IUCV_DISCONN:
 		case IUCV_CLOSING:
