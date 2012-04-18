@@ -1740,6 +1740,7 @@ int iwl_mac_add_interface(struct ieee80211_hw *hw,
 #endif
 	struct iwl_rxon_context *tmp, *ctx = NULL;
 	int err = 0;
+	bool reset = false;
 
 #if 0 /* Not in RHEL6... */
 	IWL_DEBUG_MAC80211(priv, "enter: type %d\n", vif->type);
@@ -1760,6 +1761,11 @@ int iwl_mac_add_interface(struct ieee80211_hw *hw,
 			tmp->interface_modes | tmp->exclusive_interface_modes;
 
 		if (tmp->vif) {
+			if (tmp->vif == conf->vif) {
+				reset = true;
+				ctx = tmp;
+				break;
+			}
 			/* check if this busy context is exclusive */
 			if (tmp->exclusive_interface_modes &
 						BIT(tmp->vif->type)) {
@@ -1817,7 +1823,7 @@ int iwl_mac_add_interface(struct ieee80211_hw *hw,
 
 	err = iwl_set_mode(priv, conf->vif);
 #endif
-	if (err) {
+	if (err && !reset) {
 		if (!ctx->always_active)
 			ctx->is_active = false;
 		goto out_err;

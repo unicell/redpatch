@@ -3208,15 +3208,12 @@ static void iwl_bg_restart(struct work_struct *data)
 		return;
 
 	if (test_and_clear_bit(STATUS_FW_ERROR, &priv->status)) {
-		struct iwl_rxon_context *ctx;
 		bool bt_sco, bt_full_concurrent;
 		u8 bt_ci_compliance;
 		u8 bt_load;
 		u8 bt_status;
 
 		mutex_lock(&priv->mutex);
-		for_each_context(priv, ctx)
-			ctx->vif = NULL;
 		priv->is_open = 0;
 
 		/*
