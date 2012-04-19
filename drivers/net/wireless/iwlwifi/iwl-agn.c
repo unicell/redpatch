@@ -4791,3 +4791,6 @@ MODULE_PARM_DESC(plcp_check, "Check plcp health (default: 1 [enabled])");
 
 module_param_named(ack_check, iwlagn_mod_params.ack_check, bool, S_IRUGO);
 MODULE_PARM_DESC(ack_check, "Check ack health (default: 0 [disabled])");
+
+module_param_named(5ghz_disable, iwlagn_mod_params.disable_5ghz, int, S_IRUGO);
+MODULE_PARM_DESC(5ghz_disable, "disable 5GHz band");

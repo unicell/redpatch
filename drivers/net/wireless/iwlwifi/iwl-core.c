@@ -299,6 +299,9 @@ int iwlcore_init_geos(struct iwl_priv *priv)
 		priv->cfg->sku &= ~IWL_SKU_A;
 	}
 
+	if (priv->cfg->mod_params->disable_5ghz)
+		priv->bands[IEEE80211_BAND_5GHZ].n_channels = 0;
+
 	IWL_INFO(priv, "Tunable channels: %d 802.11bg, %d 802.11a channels\n",
 		   priv->bands[IEEE80211_BAND_2GHZ].n_channels,
 		   priv->bands[IEEE80211_BAND_5GHZ].n_channels);
