@@ -773,13 +773,16 @@ done:
 static int iucv_sock_autobind(struct sock *sk)
 {
 	struct iucv_sock *iucv = iucv_sk(sk);
+	char query_buffer[80];
 	char name[12];
 	int err = 0;
 
-	if (unlikely(!pr_iucv))
+	/* Set the userid and name */
+	cpcmd("QUERY USERID", query_buffer, sizeof(query_buffer), &err);
+	if (unlikely(err))
 		return -EPROTO;
 
-	memcpy(iucv->src_user_id, iucv_userid, 8);
+	memcpy(iucv->src_user_id, query_buffer, 8);
 
 	write_lock_bh(&iucv_sk_list.lock);
 
