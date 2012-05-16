@@ -65,6 +65,11 @@ static int snd_pcm_oss_get_rate(struct snd_pcm_oss_file *pcm_oss_file);
 static int snd_pcm_oss_get_channels(struct snd_pcm_oss_file *pcm_oss_file);
 static int snd_pcm_oss_get_format(struct snd_pcm_oss_file *pcm_oss_file);
 
+static inline struct snd_pcm_substream2 *oss_substream(struct snd_pcm_substream *substream)
+{
+	return (struct snd_pcm_substream2 *)substream;
+}
+
 static inline mm_segment_t snd_enter_user(void)
 {
 	mm_segment_t fs = get_fs();
@@ -725,8 +730,8 @@ static int snd_pcm_oss_period_size(struct snd_pcm_substream *substream,
 			oss_buffer_size = runtime->oss.mmap_bytes;
 	}
 
-	if (substream->oss.setup.period_size > 16)
-		oss_period_size = substream->oss.setup.period_size;
+	if (oss_substream(substream)->oss.setup.period_size > 16)
+		oss_period_size = oss_substream(substream)->oss.setup.period_size;
 	else if (runtime->oss.fragshift) {
 		oss_period_size = 1 << runtime->oss.fragshift;
 		if (oss_period_size > oss_buffer_size / 2)
@@ -768,8 +773,8 @@ static int snd_pcm_oss_period_size(struct snd_pcm_substream *substream,
 
 	oss_periods = oss_buffer_size / oss_period_size;
 
-	if (substream->oss.setup.periods > 1)
-		oss_periods = substream->oss.setup.periods;
+	if (oss_substream(substream)->oss.setup.periods > 1)
+		oss_periods = oss_substream(substream)->oss.setup.periods;
 
 	s = snd_pcm_hw_param_value_max(slave_params, SNDRV_PCM_HW_PARAM_PERIODS, NULL);
 	if (runtime->oss.maxfrags && s > runtime->oss.maxfrags)
@@ -861,7 +866,7 @@ static int snd_pcm_oss_change_params(struct snd_pcm_substream *substream)
 	if (atomic_read(&substream->mmap_count))
 		direct = 1;
 	else
-		direct = substream->oss.setup.direct;
+		direct = oss_substream(substream)->oss.setup.direct;
 
 	_snd_pcm_hw_params_any(sparams);
 	_snd_pcm_hw_param_setinteger(sparams, SNDRV_PCM_HW_PARAM_PERIODS);
@@ -999,7 +1004,7 @@ static int snd_pcm_oss_change_params(struct snd_pcm_substream *substream)
 	sw_params->avail_min = substream->stream == SNDRV_PCM_STREAM_PLAYBACK ?
 		1 : runtime->period_size;
 	if (atomic_read(&substream->mmap_count) ||
-	    substream->oss.setup.nosilence) {
+	    oss_substream(substream)->oss.setup.nosilence) {
 		sw_params->silence_threshold = 0;
 		sw_params->silence_size = 0;
 	} else {
@@ -1384,7 +1389,7 @@ static ssize_t snd_pcm_oss_write1(struct snd_pcm_substream *substream, const cha
 			buf += tmp;
 			bytes -= tmp;
 			xfer += tmp;
-			if (substream->oss.setup.partialfrag ||
+			if (oss_substream(substream)->oss.setup.partialfrag ||
 			    runtime->oss.buffer_used == runtime->oss.period_bytes) {
 				tmp = snd_pcm_oss_write2(substream, runtime->oss.buffer + runtime->oss.period_ptr, 
 							 runtime->oss.buffer_used - runtime->oss.period_ptr, 1);
@@ -1783,7 +1788,7 @@ static int snd_pcm_oss_get_formats(struct snd_pcm_oss_file *pcm_oss_file)
 	if (atomic_read(&substream->mmap_count))
 		direct = 1;
 	else
-		direct = substream->oss.setup.direct;
+		direct = oss_substream(substream)->oss.setup.direct;
 	if (!direct)
 		return AFMT_MU_LAW | AFMT_U8 |
 		       AFMT_S16_LE | AFMT_S16_BE |
@@ -2130,7 +2135,7 @@ static int snd_pcm_oss_get_ptr(struct snd_pcm_oss_file *pcm_oss_file, int stream
 	} else {
 		delay = snd_pcm_oss_bytes(substream, delay);
 		if (stream == SNDRV_PCM_STREAM_PLAYBACK) {
-			if (substream->oss.setup.buggyptr)
+			if (oss_substream(substream)->oss.setup.buggyptr)
 				info.blocks = (runtime->oss.buffer_bytes - delay - fixup) / runtime->oss.period_bytes;
 			else
 				info.blocks = (delay + fixup) / runtime->oss.period_bytes;
@@ -2253,7 +2258,7 @@ static void snd_pcm_oss_release_substream(struct snd_pcm_substream *substream)
 #ifdef CONFIG_SND_PCM_OSS_PLUGINS
 	snd_pcm_oss_plugin_clear(substream);
 #endif
-	substream->oss.oss = 0;
+	oss_substream(substream)->oss.oss = 0;
 }
 
 static void snd_pcm_oss_init_substream(struct snd_pcm_substream *substream,
@@ -2262,8 +2267,8 @@ static void snd_pcm_oss_init_substream(struct snd_pcm_substream *substream,
 {
 	struct snd_pcm_runtime *runtime;
 
-	substream->oss.oss = 1;
-	substream->oss.setup = *setup;
+	oss_substream(substream)->oss.oss = 1;
+	oss_substream(substream)->oss.setup = *setup;
 	if (setup->nonblock)
 		substream->f_flags |= O_NONBLOCK;
 	else if (setup->block)
