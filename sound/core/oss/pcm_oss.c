@@ -75,6 +75,11 @@ static inline struct snd_pcm_substream2 *oss_substream(struct snd_pcm_substream 
 	return (struct snd_pcm_substream2 *)substream;
 }
 
+static inline struct snd_pcm2 *oss_pcm(struct snd_pcm *pcm)
+{
+	return (struct snd_pcm2 *)pcm;
+}
+
 static inline mm_segment_t snd_enter_user(void)
 {
 	mm_segment_t fs = get_fs();
@@ -2240,9 +2245,9 @@ static void snd_pcm_oss_look_for_setup(struct snd_pcm *pcm, int stream,
 {
 	struct snd_pcm_oss_setup *setup;
 
-	mutex_lock(&pcm->streams[stream].oss.setup_mutex);
+	mutex_lock(&oss_pcm(pcm)->streams[stream].oss.setup_mutex);
 	do {
-		for (setup = pcm->streams[stream].oss.setup_list; setup;
+		for (setup = oss_pcm(pcm)->streams[stream].oss.setup_list; setup;
 		     setup = setup->next) {
 			if (!strcmp(setup->task_name, task_name))
 				goto out;
@@ -2251,7 +2256,7 @@ static void snd_pcm_oss_look_for_setup(struct snd_pcm *pcm, int stream,
  out:
 	if (setup)
 		*rsetup = *setup;
-	mutex_unlock(&pcm->streams[stream].oss.setup_mutex);
+	mutex_unlock(&oss_pcm(pcm)->streams[stream].oss.setup_mutex);
 }
 
 static void snd_pcm_oss_release_substream(struct snd_pcm_substream *substream)
@@ -2970,7 +2975,7 @@ static void snd_pcm_oss_proc_done(struct snd_pcm *pcm)
 {
 	int stream;
 	for (stream = 0; stream < 2; ++stream) {
-		struct snd_pcm_str *pstr = &pcm->streams[stream];
+		struct snd_pcm_str *pstr = &oss_pcm(pcm)->streams[stream];
 		snd_info_free_entry(pstr->oss.proc_entry);
 		pstr->oss.proc_entry = NULL;
 		snd_pcm_oss_proc_free_setup_list(pstr);
@@ -3012,7 +3017,7 @@ static void register_oss_dsp(struct snd_pcm *pcm, int index)
 
 static int snd_pcm_oss_register_minor(struct snd_pcm *pcm)
 {
-	pcm->oss.reg = 0;
+	oss_pcm(pcm)->oss.reg = 0;
 	if (dsp_map[pcm->card->number] == (int)pcm->device) {
 		char name[128];
 		int duplex;
@@ -3026,16 +3031,16 @@ static int snd_pcm_oss_register_minor(struct snd_pcm *pcm)
 				      pcm->card->number,
 				      name);
 #endif
-		pcm->oss.reg++;
-		pcm->oss.reg_mask |= 1;
+		oss_pcm(pcm)->oss.reg++;
+		oss_pcm(pcm)->oss.reg_mask |= 1;
 	}
 	if (adsp_map[pcm->card->number] == (int)pcm->device) {
 		register_oss_dsp(pcm, 1);
-		pcm->oss.reg++;
-		pcm->oss.reg_mask |= 2;
+		oss_pcm(pcm)->oss.reg++;
+		oss_pcm(pcm)->oss.reg_mask |= 2;
 	}
 
-	if (pcm->oss.reg)
+	if (oss_pcm(pcm)->oss.reg)
 		snd_pcm_oss_proc_init(pcm);
 
 	return 0;
@@ -3043,14 +3048,14 @@ static int snd_pcm_oss_register_minor(struct snd_pcm *pcm)
 
 static int snd_pcm_oss_disconnect_minor(struct snd_pcm *pcm)
 {
-	if (pcm->oss.reg) {
-		if (pcm->oss.reg_mask & 1) {
-			pcm->oss.reg_mask &= ~1;
+	if (oss_pcm(pcm)->oss.reg) {
+		if (oss_pcm(pcm)->oss.reg_mask & 1) {
+			oss_pcm(pcm)->oss.reg_mask &= ~1;
 			snd_unregister_oss_device(SNDRV_OSS_DEVICE_TYPE_PCM,
 						  pcm->card, 0);
 		}
-		if (pcm->oss.reg_mask & 2) {
-			pcm->oss.reg_mask &= ~2;
+		if (oss_pcm(pcm)->oss.reg_mask & 2) {
+			oss_pcm(pcm)->oss.reg_mask &= ~2;
 			snd_unregister_oss_device(SNDRV_OSS_DEVICE_TYPE_PCM,
 						  pcm->card, 1);
 		}
@@ -3059,7 +3064,7 @@ static int snd_pcm_oss_disconnect_minor(struct snd_pcm *pcm)
 			snd_oss_info_unregister(SNDRV_OSS_INFO_DEV_AUDIO, pcm->card->number);
 #endif
 		}
-		pcm->oss.reg = 0;
+		oss_pcm(pcm)->oss.reg = 0;
 	}
 	return 0;
 }

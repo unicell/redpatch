@@ -624,7 +624,7 @@ int snd_pcm_new_stream(struct snd_pcm *pcm, int stream, int substream_count)
 	struct snd_pcm_substream *substream, *prev;
 
 #if defined(CONFIG_SND_PCM_OSS) || defined(CONFIG_SND_PCM_OSS_MODULE)
-	mutex_init(&pstr->oss.setup_mutex);
+	mutex_init(&((struct snd_pcm2 *)pcm)->oss_streams[stream].setup_mutex);
 #endif
 	pstr->stream = stream;
 	pstr->pcm = pcm;
@@ -710,7 +710,7 @@ int snd_pcm_new(struct snd_card *card, const char *id, int device,
 		return -ENXIO;
 	if (rpcm)
 		*rpcm = NULL;
-	pcm = kzalloc(sizeof(*pcm), GFP_KERNEL);
+	pcm = kzalloc(sizeof(struct snd_pcm2), GFP_KERNEL);
 	if (pcm == NULL) {
 		snd_printk(KERN_ERR "Cannot allocate PCM\n");
 		return -ENOMEM;

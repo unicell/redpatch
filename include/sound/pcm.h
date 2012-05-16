@@ -451,7 +451,12 @@ struct snd_pcm {
 	void *private_data;
 	void (*private_free) (struct snd_pcm *pcm);
 	struct device *dev; /* actual hw device this belongs to */
+};
+
+struct snd_pcm2 {
+	struct snd_pcm pcm;
 #if defined(CONFIG_SND_PCM_OSS) || defined(CONFIG_SND_PCM_OSS_MODULE)
+	/* -- OSS things -- */
 	struct snd_pcm_oss oss;
 #endif
 };
