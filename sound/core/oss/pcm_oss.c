@@ -1527,14 +1527,14 @@ static ssize_t snd_pcm_oss_read1(struct snd_pcm_substream *substream, char __use
 static int snd_pcm_oss_reset(struct snd_pcm_oss_file *pcm_oss_file)
 {
 	struct snd_pcm_substream *substream;
-	struct snd_pcm_runtime *runtime;
+	struct snd_pcm_runtime2 *runtime;
 	int i;
 
 	for (i = 0; i < 2; i++) { 
 		substream = pcm_oss_file->streams[i];
 		if (!substream)
 			continue;
-		runtime = substream->runtime;
+		runtime = oss_runtime(substream->runtime);
 		snd_pcm_kernel_ioctl(substream, SNDRV_PCM_IOCTL_DROP, NULL);
 		runtime->oss.prepare = 1;
 		runtime->oss.buffer_used = 0;
@@ -2245,9 +2245,9 @@ static void snd_pcm_oss_look_for_setup(struct snd_pcm *pcm, int stream,
 {
 	struct snd_pcm_oss_setup *setup;
 
-	mutex_lock(&oss_pcm(pcm)->streams[stream].oss.setup_mutex);
+	mutex_lock(&oss_pcm(pcm)->oss_streams[stream].setup_mutex);
 	do {
-		for (setup = oss_pcm(pcm)->streams[stream].oss.setup_list; setup;
+		for (setup = oss_pcm(pcm)->oss_streams[stream].setup_list; setup;
 		     setup = setup->next) {
 			if (!strcmp(setup->task_name, task_name))
 				goto out;
@@ -2256,7 +2256,7 @@ static void snd_pcm_oss_look_for_setup(struct snd_pcm *pcm, int stream,
  out:
 	if (setup)
 		*rsetup = *setup;
-	mutex_unlock(&oss_pcm(pcm)->streams[stream].oss.setup_mutex);
+	mutex_unlock(&oss_pcm(pcm)->oss_streams[stream].setup_mutex);
 }
 
 static void snd_pcm_oss_release_substream(struct snd_pcm_substream *substream)
@@ -2838,9 +2838,9 @@ static int snd_pcm_oss_mmap(struct file *file, struct vm_area_struct *area)
 static void snd_pcm_oss_proc_read(struct snd_info_entry *entry,
 				  struct snd_info_buffer *buffer)
 {
-	struct snd_pcm_str *pstr = entry->private_data;
-	struct snd_pcm_oss_setup *setup = pstr->oss.setup_list;
-	mutex_lock(&pstr->oss.setup_mutex);
+	struct snd_pcm_oss_stream *ostr = entry->private_data;
+	struct snd_pcm_oss_setup *setup = ostr->setup_list;
+	mutex_lock(&ostr->setup_mutex);
 	while (setup) {
 		snd_iprintf(buffer, "%s %u %u%s%s%s%s%s%s\n",
 			    setup->task_name,
@@ -2854,41 +2854,41 @@ static void snd_pcm_oss_proc_read(struct snd_info_entry *entry,
 			    setup->nosilence ? " no-silence" : "");
 		setup = setup->next;
 	}
-	mutex_unlock(&pstr->oss.setup_mutex);
+	mutex_unlock(&ostr->setup_mutex);
 }
 
-static void snd_pcm_oss_proc_free_setup_list(struct snd_pcm_str * pstr)
+static void snd_pcm_oss_proc_free_setup_list(struct snd_pcm_oss_stream * ostr)
 {
 	struct snd_pcm_oss_setup *setup, *setupn;
 
-	for (setup = pstr->oss.setup_list, pstr->oss.setup_list = NULL;
+	for (setup = ostr->setup_list, ostr->setup_list = NULL;
 	     setup; setup = setupn) {
 		setupn = setup->next;
 		kfree(setup->task_name);
 		kfree(setup);
 	}
-	pstr->oss.setup_list = NULL;
+	ostr->setup_list = NULL;
 }
 
 static void snd_pcm_oss_proc_write(struct snd_info_entry *entry,
 				   struct snd_info_buffer *buffer)
 {
-	struct snd_pcm_str *pstr = entry->private_data;
+	struct snd_pcm_oss_stream *ostr = entry->private_data;
 	char line[128], str[32], task_name[32];
 	const char *ptr;
 	int idx1;
 	struct snd_pcm_oss_setup *setup, *setup1, template;
 
 	while (!snd_info_get_line(buffer, line, sizeof(line))) {
-		mutex_lock(&pstr->oss.setup_mutex);
+		mutex_lock(&ostr->setup_mutex);
 		memset(&template, 0, sizeof(template));
 		ptr = snd_info_get_str(task_name, line, sizeof(task_name));
 		if (!strcmp(task_name, "clear") || !strcmp(task_name, "erase")) {
-			snd_pcm_oss_proc_free_setup_list(pstr);
-			mutex_unlock(&pstr->oss.setup_mutex);
+			snd_pcm_oss_proc_free_setup_list(ostr);
+			mutex_unlock(&ostr->setup_mutex);
 			continue;
 		}
-		for (setup = pstr->oss.setup_list; setup; setup = setup->next) {
+		for (setup = ostr->setup_list; setup; setup = setup->next) {
 			if (!strcmp(setup->task_name, task_name)) {
 				template = *setup;
 				break;
@@ -2925,13 +2925,13 @@ static void snd_pcm_oss_proc_write(struct snd_info_entry *entry,
 			setup = kmalloc(sizeof(*setup), GFP_KERNEL);
 			if (! setup) {
 				buffer->error = -ENOMEM;
-				mutex_unlock(&pstr->oss.setup_mutex);
+				mutex_unlock(&ostr->setup_mutex);
 				return;
 			}
-			if (pstr->oss.setup_list == NULL)
-				pstr->oss.setup_list = setup;
+			if (ostr->setup_list == NULL)
+				ostr->setup_list = setup;
 			else {
-				for (setup1 = pstr->oss.setup_list;
+				for (setup1 = ostr->setup_list;
 				     setup1->next; setup1 = setup1->next);
 				setup1->next = setup;
 			}
@@ -2939,12 +2939,12 @@ static void snd_pcm_oss_proc_write(struct snd_info_entry *entry,
 			if (! template.task_name) {
 				kfree(setup);
 				buffer->error = -ENOMEM;
-				mutex_unlock(&pstr->oss.setup_mutex);
+				mutex_unlock(&ostr->setup_mutex);
 				return;
 			}
 		}
 		*setup = template;
-		mutex_unlock(&pstr->oss.setup_mutex);
+		mutex_unlock(&ostr->setup_mutex);
 	}
 }
 
@@ -2954,6 +2954,7 @@ static void snd_pcm_oss_proc_init(struct snd_pcm *pcm)
 	for (stream = 0; stream < 2; ++stream) {
 		struct snd_info_entry *entry;
 		struct snd_pcm_str *pstr = &pcm->streams[stream];
+		struct snd_pcm_oss_stream *ostr = &oss_pcm(pcm)->oss_streams[stream];
 		if (pstr->substream_count == 0)
 			continue;
 		if ((entry = snd_info_create_card_entry(pcm->card, "oss", pstr->proc_root)) != NULL) {
@@ -2961,13 +2962,13 @@ static void snd_pcm_oss_proc_init(struct snd_pcm *pcm)
 			entry->mode = S_IFREG | S_IRUGO | S_IWUSR;
 			entry->c.text.read = snd_pcm_oss_proc_read;
 			entry->c.text.write = snd_pcm_oss_proc_write;
-			entry->private_data = pstr;
+			entry->private_data = ostr;
 			if (snd_info_register(entry) < 0) {
 				snd_info_free_entry(entry);
 				entry = NULL;
 			}
 		}
-		pstr->oss.proc_entry = entry;
+		ostr->proc_entry = entry;
 	}
 }
 
@@ -2975,10 +2976,10 @@ static void snd_pcm_oss_proc_done(struct snd_pcm *pcm)
 {
 	int stream;
 	for (stream = 0; stream < 2; ++stream) {
-		struct snd_pcm_str *pstr = &oss_pcm(pcm)->streams[stream];
-		snd_info_free_entry(pstr->oss.proc_entry);
-		pstr->oss.proc_entry = NULL;
-		snd_pcm_oss_proc_free_setup_list(pstr);
+		struct snd_pcm_oss_stream *ostr = &oss_pcm(pcm)->oss_streams[stream];
+		snd_info_free_entry(ostr->proc_entry);
+		ostr->proc_entry = NULL;
+		snd_pcm_oss_proc_free_setup_list(ostr);
 	}
 }
 #else /* !CONFIG_SND_VERBOSE_PROCFS */

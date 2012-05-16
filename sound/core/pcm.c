@@ -756,10 +756,14 @@ static void snd_pcm_free_stream(struct snd_pcm_str * pstr)
 	}
 	snd_pcm_stream_proc_done(pstr);
 #if defined(CONFIG_SND_PCM_OSS) || defined(CONFIG_SND_PCM_OSS_MODULE)
-	for (setup = pstr->oss.setup_list; setup; setup = setupn) {
-		setupn = setup->next;
-		kfree(setup->task_name);
-		kfree(setup);
+	{
+		struct snd_pcm_oss_stream *ostr;
+		ostr = &((struct snd_pcm2 *)(pstr->pcm))->oss_streams[pstr->stream];
+		for (setup = ostr->setup_list; setup; setup = setupn) {
+			setupn = setup->next;
+			kfree(setup->task_name);
+			kfree(setup);
+		}
 	}
 #endif
 }
