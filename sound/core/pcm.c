@@ -383,13 +383,14 @@ static void snd_pcm_substream_proc_hw_params_read(struct snd_info_entry *entry,
 	snd_iprintf(buffer, "period_size: %lu\n", runtime->period_size);	
 	snd_iprintf(buffer, "buffer_size: %lu\n", runtime->buffer_size);	
 #if defined(CONFIG_SND_PCM_OSS) || defined(CONFIG_SND_PCM_OSS_MODULE)
-	if (substream->oss.oss) {
-		snd_iprintf(buffer, "OSS format: %s\n", snd_pcm_oss_format_name(runtime->oss.format));
-		snd_iprintf(buffer, "OSS channels: %u\n", runtime->oss.channels);	
-		snd_iprintf(buffer, "OSS rate: %u\n", runtime->oss.rate);
-		snd_iprintf(buffer, "OSS period bytes: %lu\n", (unsigned long)runtime->oss.period_bytes);
-		snd_iprintf(buffer, "OSS periods: %u\n", runtime->oss.periods);
-		snd_iprintf(buffer, "OSS period frames: %lu\n", (unsigned long)runtime->oss.period_frames);
+	if (((struct snd_pcm_substream2 *)substream)->oss.oss) {
+		struct snd_pcm_runtime2 *runtime2 = (struct snd_pcm_runtime2 *)runtime;
+		snd_iprintf(buffer, "OSS format: %s\n", snd_pcm_oss_format_name(runtime2->oss.format));
+		snd_iprintf(buffer, "OSS channels: %u\n", runtime2->oss.channels);	
+		snd_iprintf(buffer, "OSS rate: %u\n", runtime2->oss.rate);
+		snd_iprintf(buffer, "OSS period bytes: %lu\n", (unsigned long)runtime2->oss.period_bytes);
+		snd_iprintf(buffer, "OSS periods: %u\n", runtime2->oss.periods);
+		snd_iprintf(buffer, "OSS period frames: %lu\n", (unsigned long)runtime2->oss.period_frames);
 	}
 #endif
 }
@@ -637,7 +638,7 @@ int snd_pcm_new_stream(struct snd_pcm *pcm, int stream, int substream_count)
 	}
 	prev = NULL;
 	for (idx = 0, prev = NULL; idx < substream_count; idx++) {
-		substream = kzalloc(sizeof(*substream), GFP_KERNEL);
+		substream = kzalloc(sizeof(struct snd_pcm_substream2), GFP_KERNEL);
 		if (substream == NULL) {
 			snd_printk(KERN_ERR "Cannot allocate PCM substream\n");
 			return -ENOMEM;
@@ -870,7 +871,7 @@ int snd_pcm_attach_substream(struct snd_pcm *pcm, int stream,
 	if (substream == NULL)
 		return -EAGAIN;
 
-	runtime = kzalloc(sizeof(*runtime), GFP_KERNEL);
+	runtime = kzalloc(sizeof(struct snd_pcm_runtime2), GFP_KERNEL);
 	if (runtime == NULL)
 		return -ENOMEM;
 
