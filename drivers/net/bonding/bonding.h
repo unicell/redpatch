@@ -22,6 +22,7 @@
 #include <linux/cpumask.h>
 #include <linux/in6.h>
 #include <linux/inetdevice.h>
+#include <linux/rtnetlink.h>
 #include "bond_3ad.h"
 #include "bond_alb.h"
 
