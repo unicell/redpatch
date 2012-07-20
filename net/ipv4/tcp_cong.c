@@ -304,6 +304,7 @@ EXPORT_SYMBOL_GPL(tcp_is_cwnd_limited);
 void tcp_slow_start(struct tcp_sock *tp)
 {
 	int cnt; /* increase in packets */
+	unsigned int delta = 0;
 
 	/* RFC3465: ABC Slow start
 	 * Increase only after a full MSS of bytes is acked
@@ -328,11 +329,11 @@ void tcp_slow_start(struct tcp_sock *tp)
 	tp->bytes_acked = 0;
 
 	tp->snd_cwnd_cnt += cnt;
-	while (tp->snd_cwnd_cnt >= tp->snd_cwnd) {
-		tp->snd_cwnd_cnt -= tp->snd_cwnd;
-		if (tp->snd_cwnd < tp->snd_cwnd_clamp)
-			tp->snd_cwnd++;
+	while (tp->snd_cwnd_cnt >= snd_cwnd) {
+		tp->snd_cwnd_cnt -= snd_cwnd;
+		delta++;
 	}
+	tp->snd_cwnd = min(snd_cwnd + delta, tp->snd_cwnd_clamp);
 }
 EXPORT_SYMBOL_GPL(tcp_slow_start);
 
