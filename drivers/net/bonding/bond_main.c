@@ -464,7 +464,7 @@ int bond_dev_queue_xmit(struct bonding *bond, struct sk_buff *skb,
 
 	skb->queue_mapping = bond_queue_mapping(skb);
 #ifdef CONFIG_NET_POLL_CONTROLLER
-	if (unlikely(bond->dev->priv_flags & IFF_IN_NETPOLL)) {
+	if (unlikely(netpoll_tx_running(bond->dev))) {
 		struct netpoll *np = bond->dev->npinfo->netpoll;
 		slave_dev->npinfo = bond->dev->npinfo;
 		slave_dev->priv_flags |= IFF_IN_NETPOLL;
