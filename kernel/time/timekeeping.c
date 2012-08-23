@@ -180,6 +180,7 @@ void timekeeping_leap_insert(int leapsecond)
 	wall_to_monotonic.tv_sec -= leapsecond;
 	update_vsyscall(&xtime, timekeeper.clock, timekeeper.mult);
 	write_sequnlock(&xtime_lock);
+	clock_was_set_delayed();
 }
 
 #ifdef CONFIG_GENERIC_TIME
