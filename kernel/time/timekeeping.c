@@ -172,12 +172,14 @@ void update_xtime_cache(u64 nsec)
 	timespec_add_ns(&xtime_cache, nsec);
 }
 
-/* must hold xtime_lock */
+/* RHEL6: only called in softirq context from hrtimer expiration */
 void timekeeping_leap_insert(int leapsecond)
 {
+	write_seqlock(&xtime_lock);
 	xtime.tv_sec += leapsecond;
 	wall_to_monotonic.tv_sec -= leapsecond;
 	update_vsyscall(&xtime, timekeeper.clock, timekeeper.mult);
+	write_sequnlock(&xtime_lock);
 }
 
 #ifdef CONFIG_GENERIC_TIME
