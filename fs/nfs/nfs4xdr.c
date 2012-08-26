@@ -4693,7 +4693,6 @@ static int decode_getacl(struct xdr_stream *xdr, struct rpc_rqst *req,
 	unsigned int savep;
 	uint32_t attrlen,
 		 bitmap[2] = {0};
-	struct kvec *iov = req->rq_rcv_buf.head;
 	int status;
 	unsigned int pg_offset;
 
@@ -4714,25 +4713,19 @@ static int decode_getacl(struct xdr_stream *xdr, struct rpc_rqst *req,
 	if (unlikely(bitmap[0] & (FATTR4_WORD0_ACL - 1U)))
 		return -EIO;
 	if (likely(bitmap[0] & FATTR4_WORD0_ACL)) {
-		size_t hdrlen;
 
 		/* The bitmap (xdr len + bitmaps) and the attr xdr len words
 		 * are stored with the acl data to handle the problem of
 		 * variable length bitmaps.*/
 		res->acl_data_offset = xdr_stream_pos(xdr) - pg_offset;
-
-		/* We ignore &savep and don't do consistency checks on
-		 * the attr length.  Let userspace figure it out.... */
-		hdrlen = (u8 *)xdr->p - (u8 *)iov->iov_base;
 		res->acl_len = attrlen;
-		if (attrlen > (xdr->nwords << 2)) {
-			if (res->acl_flags & NFS4_ACL_LEN_REQUEST) {
-				/* getxattr interface called with a NULL buf */
-				goto out;
-			}
+
+		/* Check for receive buffer overflow */
+		if (res->acl_len > (xdr->nwords << 2) ||
+		    res->acl_len + res->acl_data_offset > xdr->buf->page_len) {
+			res->acl_flags |= NFS4_ACL_TRUNC;
 			dprintk("NFS: acl reply: attrlen %u > page_len %u\n",
 					attrlen, xdr->nwords << 2);
-			return -EINVAL;
 		}
 	} else
 		status = -EOPNOTSUPP;
