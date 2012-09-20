@@ -850,7 +850,8 @@ struct bio *bio_copy_user_iov(struct request_queue *q,
 	if (!bio)
 		goto out_bmd;
 
-	bio->bi_rw |= (!write_to_vm << BIO_RW);
+	if (!write_to_vm)
+		bio->bi_rw |= (1 << BIO_RW);
 
 	ret = 0;
 

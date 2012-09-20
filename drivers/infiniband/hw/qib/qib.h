@@ -45,6 +45,7 @@
 #include <linux/mutex.h>
 #include <linux/list.h>
 #include <linux/scatterlist.h>
+#include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/fs.h>
 #include <linux/completion.h>
@@ -52,7 +53,6 @@
 #include <linux/sched.h>
 
 #include "qib_common.h"
-#include "qib_debug.h"
 #include "qib_verbs.h"
 
 /* only s/w major version of QLogic_IB we can handle */
@@ -327,6 +327,9 @@ struct qib_verbs_txreq {
 
 #define QIB_DEFAULT_MTU 4096
 
+/* max number of IB ports supported per HCA */
+#define QIB_MAX_IB_PORTS 2
+
 /*
  * Possible IB config parameters for f_get/set_ib_table()
  */
@@ -504,6 +507,7 @@ struct qib_pportdata {
 	struct qib_chippport_specific *cpspec; /* chip-specific per-port */
 	struct kobject pport_kobj;
 	struct kobject sl2vl_kobj;
+	struct kobject diagc_kobj;
 
 	/* GUID for this interface, in network order */
 	__be64 guid;
@@ -615,7 +619,6 @@ struct qib_pportdata {
 	u16 led_override_timeoff; /* delta to next timer event */
 	u8 led_override_vals[2]; /* Alternates per blink-frame */
 	u8 led_override_phase; /* Just counts, LSB picks from vals[] */
-	u8 std_mode_flag;
 	atomic_t led_override_timer_active;
 	/* Used to flash LEDs in override mode */
 	struct timer_list led_override_timer;
@@ -687,6 +690,7 @@ struct qib_devdata {
 	void __iomem *piobase;
 	/* mem-mapped pointer to base of user chip regs (if using WC PAT) */
 	u64 __iomem *userbase;
+	void __iomem *piovl15base; /* base of VL15 buffers, if not WC */
 	/*
 	 * points to area where PIOavail registers will be DMA'ed.
 	 * Has to be on a page of it's own, because the page will be
@@ -752,7 +756,6 @@ struct qib_devdata {
 	void (*f_set_armlaunch)(struct qib_devdata *, u32);
 	void (*f_wantpiobuf_intr)(struct qib_devdata *, u32);
 	int (*f_late_initreg)(struct qib_devdata *);
-	void (*f_dump_sdma_state)(struct qib_pportdata *);
 	int (*f_init_sdma_regs)(struct qib_pportdata *);
 	u16 (*f_sdma_gethead)(struct qib_pportdata *);
 	int (*f_sdma_busy)(struct qib_pportdata *);
@@ -1062,7 +1065,7 @@ void qib_dev_cleanup(void);
 
 int qib_diag_add(struct qib_devdata *);
 void qib_diag_remove(struct qib_devdata *);
-void handle_e_ibstatuschanged(struct qib_pportdata *, u64);
+void qib_handle_e_ibstatuschanged(struct qib_pportdata *, u64);
 void qib_sdma_update_tail(struct qib_pportdata *, u16); /* hold sdma_lock */
 
 int qib_decode_err(struct qib_devdata *dd, char *buf, size_t blen, u64 err);
@@ -1215,8 +1218,7 @@ int qib_update_eeprom_log(struct qib_devdata *dd);
 void qib_inc_eeprom_err(struct qib_devdata *dd, u32 eidx, u32 incr);
 void qib_dump_lookup_output_queue(struct qib_devdata *);
 void qib_force_pio_avail_update(struct qib_devdata *);
-void signal_ib_event(struct qib_pportdata *ppd, enum ib_event_type ev);
-void clear_symerror_on_linkup(unsigned long opaque);
+void qib_clear_symerror_on_linkup(unsigned long opaque);
 
 /*
  * Set LED override, only the two LSBs have "public" meaning, but
@@ -1228,8 +1230,8 @@ void clear_symerror_on_linkup(unsigned long opaque);
 void qib_set_led_override(struct qib_pportdata *ppd, unsigned int val);
 
 /* send dma routines */
-int setup_sdma(struct qib_pportdata *);
-void teardown_sdma(struct qib_pportdata *);
+int qib_setup_sdma(struct qib_pportdata *);
+void qib_teardown_sdma(struct qib_pportdata *);
 void __qib_sdma_intr(struct qib_pportdata *);
 void qib_sdma_intr(struct qib_pportdata *);
 int qib_sdma_verbs_send(struct qib_pportdata *, struct qib_sge_state *,
@@ -1250,7 +1252,6 @@ static inline int __qib_sdma_running(struct qib_pportdata *ppd)
 }
 int qib_sdma_running(struct qib_pportdata *);
 
-void dump_sdma_state(struct qib_pportdata *ppd);
 void __qib_sdma_process_event(struct qib_pportdata *, enum qib_sdma_events);
 void qib_sdma_process_event(struct qib_pportdata *, enum qib_sdma_events);
 
@@ -1324,6 +1325,8 @@ extern const char ib_qib_version[];
 int qib_device_create(struct qib_devdata *);
 void qib_device_remove(struct qib_devdata *);
 
+int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
+			  struct kobject *kobj);
 int qib_verbs_register_sysfs(struct qib_devdata *);
 void qib_verbs_unregister_sysfs(struct qib_devdata *);
 /* Hook for sysfs read of QSFP */
@@ -1365,7 +1368,6 @@ const char *qib_get_unit_name(int unit);
 #endif
 
 /* global module parameter variables */
-extern unsigned qib_debug; /* debugging bit mask */
 extern unsigned qib_ibmtu;
 extern ushort qib_cfgctxts;
 extern ushort qib_num_cfg_vls;
@@ -1404,24 +1406,17 @@ extern struct mutex qib_mutex;
  */
 #define qib_early_err(dev, fmt, ...) \
 	do { \
-		qib_log(__QIB_INFO, "EarlyErr: " fmt, ##__VA_ARGS__); \
-		dev_info(dev, KERN_ERR QIB_DRV_NAME ": " fmt, \
-			##__VA_ARGS__); \
+		dev_err(dev, fmt, ##__VA_ARGS__); \
 	} while (0)
 
 #define qib_dev_err(dd, fmt, ...) \
 	do { \
-		qib_log(__QIB_INFO, "%s: " fmt, \
-			qib_get_unit_name((dd)->unit), ##__VA_ARGS__); \
 		dev_err(&(dd)->pcidev->dev, "%s: " fmt, \
 			qib_get_unit_name((dd)->unit), ##__VA_ARGS__); \
 	} while (0)
 
 #define qib_dev_porterr(dd, port, fmt, ...) \
 	do { \
-		qib_log(__QIB_INFO, "%s IB%u:%u " fmt, \
-			qib_get_unit_name((dd)->unit), (dd)->unit, (port), \
-			##__VA_ARGS__); \
 		dev_err(&(dd)->pcidev->dev, "%s: IB%u:%u " fmt, \
 			qib_get_unit_name((dd)->unit), (dd)->unit, (port), \
 			##__VA_ARGS__); \
@@ -1429,30 +1424,8 @@ extern struct mutex qib_mutex;
 
 #define qib_devinfo(pcidev, fmt, ...) \
 	do { \
-		qib_log(__QIB_INFO, "INFO: " fmt, ##__VA_ARGS__); \
 		dev_info(&(pcidev)->dev, fmt, ##__VA_ARGS__); \
 	} while (0)
-
-#if _QIB_DEBUGGING
-
-# define __QIB_DBG_WHICH(which, fmt, ...)                                   \
-	do {                                                                \
-		if (unlikely(qib_debug & (which))) {                        \
-			qib_log(which, fmt, ##__VA_ARGS__);                 \
-		}                                                           \
-	} while (0)
-
-# define qib_dbg(fmt, ...) \
-	__QIB_DBG_WHICH(__QIB_DBG, fmt, ##__VA_ARGS__)
-# define qib_cdbg(which, fmt, ...) \
-	__QIB_DBG_WHICH(__QIB_##which##DBG, fmt, ##__VA_ARGS__)
-
-#else /* ! _QIB_DEBUGGING */
-
-# define qib_dbg(fmt, ...)
-# define qib_cdbg(which, fmt, ...)
-
-#endif /* _QIB_DEBUGGING */
 
 /*
  * this is used for formatting hw error messages...

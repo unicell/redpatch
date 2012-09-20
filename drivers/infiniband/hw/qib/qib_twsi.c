@@ -332,10 +332,6 @@ static int qib_twsi_wr(struct qib_devdata *dd, int data, int flags)
 
 	if (flags & QIB_TWSI_STOP)
 		stop_cmd(dd);
-	if (ret)
-		qib_cdbg(VERBOSE, "qib%d Failed TWSI wr %s 0x%02X %s\n",
-			dd->unit, (flags & QIB_TWSI_START) ? "START" : "", data,
-			(flags & QIB_TWSI_STOP) ? "STOP" : "");
 	return ret;
 }
 
@@ -364,17 +360,12 @@ int qib_twsi_blk_rd(struct qib_devdata *dd, int dev, int addr,
 
 	if (dev == QIB_TWSI_NO_DEV) {
 		/* legacy not-really-I2C */
-		qib_cdbg(VERBOSE, "qib%d Start command only address\n",
-			 dd->unit);
 		addr = (addr << 1) | READ_CMD;
 		ret = qib_twsi_wr(dd, addr, QIB_TWSI_START);
 	} else {
 		/* Actual I2C */
-		qib_cdbg(VERBOSE, "qib%d Start command uses devaddr %02X\n",
-			 dd->unit, dev);
 		ret = qib_twsi_wr(dd, dev | WRITE_CMD, QIB_TWSI_START);
 		if (ret) {
-			qib_dbg("qib%d Failed TWSI startcmd\n", dd->unit);
 			stop_cmd(dd);
 			ret = 1;
 			goto bail;
@@ -399,7 +390,6 @@ int qib_twsi_blk_rd(struct qib_devdata *dd, int dev, int addr,
 		ret = qib_twsi_wr(dd, dev | READ_CMD, QIB_TWSI_START);
 	}
 	if (ret) {
-		qib_dbg("qib%d Failed startcmd for dev %02X\n", dd->unit, dev);
 		stop_cmd(dd);
 		ret = 1;
 		goto bail;
@@ -451,19 +441,12 @@ int qib_twsi_blk_wr(struct qib_devdata *dd, int dev, int addr,
 		if (dev == QIB_TWSI_NO_DEV) {
 			if (qib_twsi_wr(dd, (addr << 1) | WRITE_CMD,
 					QIB_TWSI_START)) {
-				qib_dbg("qib%d Failed to start cmd offset %u\n",
-					dd->unit, addr);
 				goto failed_write;
 			}
 		} else {
 			/* Real I2C */
-			qib_cdbg(VERBOSE, "qib%d write start command devaddr"
-				" %02X\n", dd->unit, dev);
-			if (qib_twsi_wr(dd, dev | WRITE_CMD, QIB_TWSI_START)) {
-				qib_dbg("qib%d Failed TWSI startcmd\n",
-					dd->unit);
+			if (qib_twsi_wr(dd, dev | WRITE_CMD, QIB_TWSI_START))
 				goto failed_write;
-			}
 			ret = qib_twsi_wr(dd, addr, 0);
 			if (ret) {
 				qib_dev_err(dd, "Failed to write interface"
@@ -476,14 +459,9 @@ int qib_twsi_blk_wr(struct qib_devdata *dd, int dev, int addr,
 		addr += sub_len;
 		len -= sub_len;
 
-		for (i = 0; i < sub_len; i++) {
-			if (qib_twsi_wr(dd, *bp++, 0)) {
-				qib_dbg("qib%d no ack after byte %u/%u (%u "
-					"total remain)\n", dd->unit, i, sub_len,
-					len + sub_len - i);
+		for (i = 0; i < sub_len; i++)
+			if (qib_twsi_wr(dd, *bp++, 0))
 				goto failed_write;
-			}
-		}
 
 		stop_cmd(dd);
 
@@ -501,11 +479,8 @@ int qib_twsi_blk_wr(struct qib_devdata *dd, int dev, int addr,
 		max_wait_time = 100;
 		while (qib_twsi_wr(dd, dev | READ_CMD, QIB_TWSI_START)) {
 			stop_cmd(dd);
-			if (!--max_wait_time) {
-				qib_dbg("qib%d Did not get successful read to "
-					"complete write\n", dd->unit);
+			if (!--max_wait_time)
 				goto failed_write;
-			}
 		}
 		/* now read (and ignore) the resulting byte */
 		rd_byte(dd, 1);

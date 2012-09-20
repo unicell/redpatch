@@ -1265,11 +1265,13 @@ static int cxgb_up(struct adapter *adap)
 	}
 
 	if (!(adap->flags & QUEUES_BOUND)) {
-		err = bind_qsets(adap);
-		if (err) {
-			CH_ERR(adap, "failed to bind qsets, err %d\n", err);
+		int ret = bind_qsets(adap);
+
+		if (ret < 0) {
+			CH_ERR(adap, "failed to bind qsets, err %d\n", ret);
 			t3_intr_disable(adap);
 			free_irq_resources(adap);
+			err = ret;
 			goto out;
 		}
 		adap->flags |= QUEUES_BOUND;
@@ -2318,15 +2320,9 @@ static int cxgb_extension_ioctl(struct net_device *dev, void __user *useraddr)
 		if (copy_from_user(&t, useraddr, sizeof(t)))
 			return -EFAULT;
 		/* Check t.len sanity ? */
-		fw_data = kmalloc(t.len, GFP_KERNEL);
-		if (!fw_data)
-			return -ENOMEM;
-
-		if (copy_from_user
-			(fw_data, useraddr + sizeof(t), t.len)) {
-			kfree(fw_data);
-			return -EFAULT;
-		}
+		fw_data = memdup_user(useraddr + sizeof(t), t.len);
+		if (IS_ERR(fw_data))
+			return PTR_ERR(fw_data);
 
 		ret = t3_load_fw(adapter, fw_data, t.len);
 		kfree(fw_data);
@@ -3211,17 +3207,17 @@ static int __devinit init_one(struct pci_dev *pdev,
 		}
 	}
 
+	err = pci_enable_device(pdev);
+	if (err) {
+		dev_err(&pdev->dev, "cannot enable PCI device\n");
+		goto out;
+	}
+
 	err = pci_request_regions(pdev, DRV_NAME);
 	if (err) {
 		/* Just info, some other driver may have claimed the device. */
 		dev_info(&pdev->dev, "cannot obtain PCI resources\n");
-		return err;
-	}
-
-	err = pci_enable_device(pdev);
-	if (err) {
-		dev_err(&pdev->dev, "cannot enable PCI device\n");
-		goto out_release_regions;
+		goto out_disable_device;
 	}
 
 	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
@@ -3230,11 +3226,11 @@ static int __devinit init_one(struct pci_dev *pdev,
 		if (err) {
 			dev_err(&pdev->dev, "unable to obtain 64-bit DMA for "
 			       "coherent allocations\n");
-			goto out_disable_device;
+			goto out_release_regions;
 		}
 	} else if ((err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) != 0) {
 		dev_err(&pdev->dev, "no usable DMA configuration\n");
-		goto out_disable_device;
+		goto out_release_regions;
 	}
 
 	pci_set_master(pdev);
@@ -3247,7 +3243,7 @@ static int __devinit init_one(struct pci_dev *pdev,
 	adapter = kzalloc(sizeof(*adapter), GFP_KERNEL);
 	if (!adapter) {
 		err = -ENOMEM;
-		goto out_disable_device;
+		goto out_release_regions;
 	}
 
 	adapter->nofail_skb =
@@ -3301,7 +3297,6 @@ static int __devinit init_one(struct pci_dev *pdev,
 		pi->rx_offload = T3_RX_CSUM | T3_LRO;
 		pi->port_id = i;
 		netif_carrier_off(netdev);
-		netif_tx_stop_all_queues(netdev);
 		netdev->irq = pdev->irq;
 		netdev->mem_start = mmio_start;
 		netdev->mem_end = mmio_start + mmio_len - 1;
@@ -3383,11 +3378,12 @@ out_free_dev:
 out_free_adapter:
 	kfree(adapter);
 
-out_disable_device:
-	pci_disable_device(pdev);
 out_release_regions:
 	pci_release_regions(pdev);
+out_disable_device:
+	pci_disable_device(pdev);
 	pci_set_drvdata(pdev, NULL);
+out:
 	return err;
 }
 

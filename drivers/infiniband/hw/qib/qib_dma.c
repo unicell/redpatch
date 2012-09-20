@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, 2009 QLogic, Corporation. All rights reserved.
+ * Copyright (c) 2006, 2009, 2010 QLogic, Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -166,17 +166,17 @@ static void qib_dma_free_coherent(struct ib_device *dev, size_t size,
 }
 
 struct ib_dma_mapping_ops qib_dma_mapping_ops = {
-	qib_mapping_error,
-	qib_dma_map_single,
-	qib_dma_unmap_single,
-	qib_dma_map_page,
-	qib_dma_unmap_page,
-	qib_map_sg,
-	qib_unmap_sg,
-	qib_sg_dma_address,
-	qib_sg_dma_len,
-	qib_sync_single_for_cpu,
-	qib_sync_single_for_device,
-	qib_dma_alloc_coherent,
-	qib_dma_free_coherent
+	.mapping_error = qib_mapping_error,
+	.map_single = qib_dma_map_single,
+	.unmap_single = qib_dma_unmap_single,
+	.map_page = qib_dma_map_page,
+	.unmap_page = qib_dma_unmap_page,
+	.map_sg = qib_map_sg,
+	.unmap_sg = qib_unmap_sg,
+	.dma_address = qib_sg_dma_address,
+	.dma_len = qib_sg_dma_len,
+	.sync_single_for_cpu = qib_sync_single_for_cpu,
+	.sync_single_for_device = qib_sync_single_for_device,
+	.alloc_coherent = qib_dma_alloc_coherent,
+	.free_coherent = qib_dma_free_coherent
 };

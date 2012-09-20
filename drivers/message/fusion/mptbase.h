@@ -76,8 +76,8 @@
 #define COPYRIGHT	"Copyright (c) 1999-2008 " MODULEAUTHOR
 #endif
 
-#define MPT_LINUX_VERSION_COMMON	"3.04.16"
-#define MPT_LINUX_PACKAGE_NAME		"@(#)mptlinux-3.04.16"
+#define MPT_LINUX_VERSION_COMMON	"3.04.18"
+#define MPT_LINUX_PACKAGE_NAME		"@(#)mptlinux-3.04.18"
 #define WHAT_MAGIC_STRING		"@" "(" "#" ")"
 
 #define show_mptmod_ver(s,ver)  \
@@ -399,6 +399,8 @@ typedef struct _VirtTarget {
 	u8			inDMD;         /* currently in the device
 						removal delay timer */
 	u32			 num_luns;
+	u64     		 sas_address;
+	u16     		 handle;
 } VirtTarget;
 
 typedef struct _VirtDevice {
@@ -418,31 +420,6 @@ typedef struct _VirtDevice {
 #define MPT_TARGET_FLAGS_SAF_TE_ISSUED	0x20
 #define MPT_TARGET_FLAGS_RAID_COMPONENT	0x40
 #define MPT_TARGET_FLAGS_LED_ON		0x80
-
-/*
- *	/proc/mpt interface
- */
-typedef struct {
-	const char	*name;
-	mode_t		 mode;
-	int		 pad;
-	read_proc_t	*read_proc;
-	write_proc_t	*write_proc;
-} mpt_proc_entry_t;
-
-#define MPT_PROC_READ_RETURN(buf,start,offset,request,eof,len) \
-do { \
-	len -= offset;			\
-	if (len < request) {		\
-		*eof = 1;		\
-		if (len <= 0)		\
-			return 0;	\
-	} else				\
-		len = request;		\
-	*start = buf + offset;		\
-	return len;			\
-} while (0)
-
 
 /*
  *	IOCTL structure and associated defines
@@ -945,6 +922,7 @@ extern int	 mpt_verify_adapter(int iocid, MPT_ADAPTER **iocpp);
 extern u32	 mpt_GetIocState(MPT_ADAPTER *ioc, int cooked);
 extern void	 mpt_print_ioc_summary(MPT_ADAPTER *ioc, char *buf, int *size, int len, int showlan);
 extern int	 mpt_HardResetHandler(MPT_ADAPTER *ioc, int sleepFlag);
+extern int	 mpt_Soft_Hard_ResetHandler(MPT_ADAPTER *ioc, int sleepFlag);
 extern int	 mpt_config(MPT_ADAPTER *ioc, CONFIGPARMS *cfg);
 extern int	 mpt_alloc_fw_memory(MPT_ADAPTER *ioc, int size);
 extern void	 mpt_free_fw_memory(MPT_ADAPTER *ioc);

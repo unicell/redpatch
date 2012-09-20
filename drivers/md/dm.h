@@ -59,7 +59,6 @@ void dm_table_postsuspend_targets(struct dm_table *t);
 int dm_table_resume_targets(struct dm_table *t);
 int dm_table_any_congested(struct dm_table *t, int bdi_bits);
 int dm_table_any_busy_target(struct dm_table *t);
-int dm_table_set_type(struct dm_table *t);
 unsigned dm_table_get_type(struct dm_table *t);
 bool dm_table_request_based(struct dm_table *t);
 bool dm_table_supports_discards(struct dm_table *t);
@@ -134,7 +133,7 @@ void dm_stripe_exit(void);
  * mapped_device operations
  */
 void dm_destroy(struct mapped_device *md);
-void dm_destroy_nowait(struct mapped_device *md);
+void dm_destroy_immediate(struct mapped_device *md);
 int dm_open_count(struct mapped_device *md);
 int dm_lock_for_deletion(struct mapped_device *md);
 

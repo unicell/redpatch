@@ -19,6 +19,7 @@
 #include <linux/blkdev.h>
 #include <linux/raid/md_u.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
 #include "md.h"
 #include "linear.h"
 
@@ -158,7 +159,8 @@ static linear_conf_t *linear_conf(mddev_t *mddev, int raid_disks)
 		sector_t sectors;
 
 		if (j < 0 || j >= raid_disks || disk->rdev) {
-			printk("linear: disk numbering problem. Aborting!\n");
+			printk(KERN_ERR "md/linear:%s: disk numbering problem. Aborting!\n",
+			       mdname(mddev));
 			goto out;
 		}
 
@@ -186,7 +188,8 @@ static linear_conf_t *linear_conf(mddev_t *mddev, int raid_disks)
 
 	}
 	if (cnt != raid_disks) {
-		printk("linear: not enough drives present. Aborting!\n");
+		printk(KERN_ERR "md/linear:%s: not enough drives present. Aborting!\n",
+		       mdname(mddev));
 		goto out;
 	}
 
@@ -213,7 +216,6 @@ static int linear_run (mddev_t *mddev)
 
 	if (md_check_no_bitmap(mddev))
 		return -EINVAL;
-	mddev->queue->queue_lock = &mddev->queue->__queue_lock;
 	conf = linear_conf(mddev, mddev->raid_disks);
 
 	if (!conf)
@@ -281,6 +283,7 @@ static int linear_stop (mddev_t *mddev)
 	rcu_barrier();
 	blk_sync_queue(mddev->queue); /* the unplug fn references 'conf'*/
 	kfree(conf);
+	mddev->private = NULL;
 
 	return 0;
 }
@@ -290,8 +293,8 @@ static int linear_make_request (mddev_t *mddev, struct bio *bio)
 	dev_info_t *tmp_dev;
 	sector_t start_sector;
 
-	if (unlikely(bio_rw_flagged(bio, BIO_RW_BARRIER))) {
-		md_barrier_request(mddev, bio);
+	if (unlikely(bio->bi_rw & BIO_FLUSH)) {
+		md_flush_request(mddev, bio);
 		return 0;
 	}
 
@@ -304,12 +307,14 @@ static int linear_make_request (mddev_t *mddev, struct bio *bio)
 		     || (bio->bi_sector < start_sector))) {
 		char b[BDEVNAME_SIZE];
 
-		printk("linear_make_request: Sector %llu out of bounds on "
-			"dev %s: %llu sectors, offset %llu\n",
-			(unsigned long long)bio->bi_sector,
-			bdevname(tmp_dev->rdev->bdev, b),
-			(unsigned long long)tmp_dev->rdev->sectors,
-			(unsigned long long)start_sector);
+		printk(KERN_ERR
+		       "md/linear:%s: make_request: Sector %llu out of bounds on "
+		       "dev %s: %llu sectors, offset %llu\n",
+		       mdname(mddev),
+		       (unsigned long long)bio->bi_sector,
+		       bdevname(tmp_dev->rdev->bdev, b),
+		       (unsigned long long)tmp_dev->rdev->sectors,
+		       (unsigned long long)start_sector);
 		rcu_read_unlock();
 		bio_io_error(bio);
 		return 0;

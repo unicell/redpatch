@@ -1,7 +1,7 @@
 #ifndef _QIB_7220_H
 #define _QIB_7220_H
 /*
- * Copyright (c) 2007, 2009 QLogic Corporation. All rights reserved.
+ * Copyright (c) 2007, 2009, 2010 QLogic Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -69,14 +69,12 @@ struct qib_chip_specific {
 	u32 updthresh_dflt; /* default AvailUpdThld */
 	int irq;
 	u8 presets_needed;
+	u8 relock_timer_active;
 	char emsgbuf[128];
 	char sdmamsgbuf[192];
 	char bitsmsgbuf[64];
-	struct qib_relock {
-		atomic_t relock_timer_active;
-		struct timer_list relock_timer;
-		unsigned int relock_interval; /* in jiffies */
-	} relock_st;
+	struct timer_list relock_timer;
+	unsigned int relock_interval; /* in jiffies */
 };
 
 struct qib_chippport_specific {
@@ -111,10 +109,6 @@ struct qib_chippport_specific {
  */
 int qib_sd7220_presets(struct qib_devdata *dd);
 int qib_sd7220_init(struct qib_devdata *dd);
-int qib_sd7220_prog_ld(struct qib_devdata *dd, int sdnum, u8 *img,
-		       int len, int offset);
-int qib_sd7220_prog_vfy(struct qib_devdata *dd, int sdnum, const u8 *img,
-			int len, int offset);
 void qib_sd7220_clr_ibpar(struct qib_devdata *);
 /*
  * Below used for sdnum parameter, selecting one of the two sections
@@ -122,9 +116,6 @@ void qib_sd7220_clr_ibpar(struct qib_devdata *);
  * only one currently used
  */
 #define IB_7220_SERDES 2
-
-int qib_sd7220_ib_load(struct qib_devdata *dd);
-int qib_sd7220_ib_vfy(struct qib_devdata *dd);
 
 static inline u32 qib_read_kreg32(const struct qib_devdata *dd,
 				  const u16 regno)

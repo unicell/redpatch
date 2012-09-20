@@ -76,6 +76,7 @@ EXPORT_SYMBOL_GPL(xen_domain_type);
 struct start_info *xen_start_info;
 EXPORT_SYMBOL_GPL(xen_start_info);
 
+static struct shared_info *shared_info_page;
 struct shared_info xen_dummy_shared_info;
 
 void *xen_initial_gdt;
@@ -1036,10 +1037,6 @@ static void xen_reboot(int reason)
 {
 	struct sched_shutdown r = { .reason = reason };
 
-#ifdef CONFIG_SMP
-	smp_send_stop();
-#endif
-
 	if (HYPERVISOR_sched_op(SCHEDOP_shutdown, &r))
 		BUG();
 }
@@ -1201,6 +1198,15 @@ asmlinkage void __init xen_start_kernel(void)
 
 	xen_smp_init();
 
+#ifdef CONFIG_ACPI_NUMA
+	/*
+	 * The pages we from Xen are not related to machine pages, so
+	 * any NUMA information the kernel tries to get from ACPI will
+	 * be meaningless.  Prevent it from trying.
+	 */
+	acpi_numa = -1;
+#endif
+
 	pgd = (pgd_t *)xen_start_info->pt_base;
 
 	/* Don't do the full vcpu_info placement stuff until we have a
@@ -1314,10 +1320,7 @@ void xen_hvm_init_shared_info(void)
 {
 	int cpu;
 	struct xen_add_to_physmap xatp;
-	static struct shared_info *shared_info_page = 0;
 
-	if (!shared_info_page)
-		shared_info_page = (struct shared_info *) alloc_bootmem_pages(PAGE_SIZE);
 	xatp.domid = DOMID_SELF;
 	xatp.idx = 0;
 	xatp.space = XENMAPSPACE_shared_info;
@@ -1369,6 +1372,9 @@ void __init xen_hvm_guest_init(void)
 	r = init_hvm_pv_info(&major, &minor);
 	if (r < 0)
 		return;
+
+	shared_info_page = (struct shared_info *)
+		alloc_bootmem_pages(PAGE_SIZE);
 
 	xen_hvm_init_shared_info();
 

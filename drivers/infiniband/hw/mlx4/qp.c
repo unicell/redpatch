@@ -51,20 +51,22 @@ enum {
 	MLX4_IB_DEFAULT_SCHED_QUEUE	= 0x83,
 	MLX4_IB_DEFAULT_QP0_SCHED_QUEUE	= 0x3f,
 	MLX4_IB_LINK_TYPE_IB		= 0,
-	MLX4_IB_LINK_TYPE_ETH		= 1,
+	MLX4_IB_LINK_TYPE_ETH		= 1
 };
 
 enum {
 	/*
-	 * Largest possible UD header: send with GRH and immediate data.
-	 * 4 bytes added to accommodate for eth header instead of lrh
+	 * Largest possible UD header: send with GRH and immediate
+	 * data plus 18 bytes for an Ethernet header with VLAN/802.1Q
+	 * tag.  (LRH would only use 8 bytes, so Ethernet is the
+	 * biggest case)
 	 */
-	MLX4_IB_UD_HEADER_SIZE		= 76,
+	MLX4_IB_UD_HEADER_SIZE		= 82,
 	MLX4_IB_LSO_HEADER_SPARE	= 128,
 };
 
 enum {
-	MLX4_IBOE_ETHERTYPE = 0x8915
+	MLX4_IB_IBOE_ETHERTYPE		= 0x8915
 };
 
 struct mlx4_ib_sqp {
@@ -82,17 +84,19 @@ enum {
 };
 
 static const __be32 mlx4_ib_opcode[] = {
-	[IB_WR_SEND]			= cpu_to_be32(MLX4_OPCODE_SEND),
-	[IB_WR_LSO]			= cpu_to_be32(MLX4_OPCODE_LSO),
-	[IB_WR_SEND_WITH_IMM]		= cpu_to_be32(MLX4_OPCODE_SEND_IMM),
-	[IB_WR_RDMA_WRITE]		= cpu_to_be32(MLX4_OPCODE_RDMA_WRITE),
-	[IB_WR_RDMA_WRITE_WITH_IMM]	= cpu_to_be32(MLX4_OPCODE_RDMA_WRITE_IMM),
-	[IB_WR_RDMA_READ]		= cpu_to_be32(MLX4_OPCODE_RDMA_READ),
-	[IB_WR_ATOMIC_CMP_AND_SWP]	= cpu_to_be32(MLX4_OPCODE_ATOMIC_CS),
-	[IB_WR_ATOMIC_FETCH_AND_ADD]	= cpu_to_be32(MLX4_OPCODE_ATOMIC_FA),
-	[IB_WR_SEND_WITH_INV]		= cpu_to_be32(MLX4_OPCODE_SEND_INVAL),
-	[IB_WR_LOCAL_INV]		= cpu_to_be32(MLX4_OPCODE_LOCAL_INVAL),
-	[IB_WR_FAST_REG_MR]		= cpu_to_be32(MLX4_OPCODE_FMR),
+	[IB_WR_SEND]				= cpu_to_be32(MLX4_OPCODE_SEND),
+	[IB_WR_LSO]				= cpu_to_be32(MLX4_OPCODE_LSO),
+	[IB_WR_SEND_WITH_IMM]			= cpu_to_be32(MLX4_OPCODE_SEND_IMM),
+	[IB_WR_RDMA_WRITE]			= cpu_to_be32(MLX4_OPCODE_RDMA_WRITE),
+	[IB_WR_RDMA_WRITE_WITH_IMM]		= cpu_to_be32(MLX4_OPCODE_RDMA_WRITE_IMM),
+	[IB_WR_RDMA_READ]			= cpu_to_be32(MLX4_OPCODE_RDMA_READ),
+	[IB_WR_ATOMIC_CMP_AND_SWP]		= cpu_to_be32(MLX4_OPCODE_ATOMIC_CS),
+	[IB_WR_ATOMIC_FETCH_AND_ADD]		= cpu_to_be32(MLX4_OPCODE_ATOMIC_FA),
+	[IB_WR_SEND_WITH_INV]			= cpu_to_be32(MLX4_OPCODE_SEND_INVAL),
+	[IB_WR_LOCAL_INV]			= cpu_to_be32(MLX4_OPCODE_LOCAL_INVAL),
+	[IB_WR_FAST_REG_MR]			= cpu_to_be32(MLX4_OPCODE_FMR),
+	[IB_WR_MASKED_ATOMIC_CMP_AND_SWP]	= cpu_to_be32(MLX4_OPCODE_MASKED_ATOMIC_CS),
+	[IB_WR_MASKED_ATOMIC_FETCH_AND_ADD]	= cpu_to_be32(MLX4_OPCODE_MASKED_ATOMIC_FA),
 };
 
 static struct mlx4_ib_sqp *to_msqp(struct mlx4_ib_qp *mqp)
@@ -658,7 +662,7 @@ static void mlx4_ib_unlock_cqs(struct mlx4_ib_cq *send_cq, struct mlx4_ib_cq *re
 
 static void del_gid_entries(struct mlx4_ib_qp *qp)
 {
-	struct gid_entry *ge, *tmp;
+	struct mlx4_ib_gid_entry *ge, *tmp;
 
 	list_for_each_entry_safe(ge, tmp, &qp->gid_list, list) {
 		list_del(&ge->list);
@@ -872,8 +876,8 @@ static int mlx4_set_path(struct mlx4_ib_dev *dev, const struct ib_ah_attr *ah,
 			 struct mlx4_qp_path *path, u8 port)
 {
 	int err;
-	int is_eth = rdma_port_link_layer(&dev->ib_dev, port) ==
-		IB_LINK_LAYER_ETHERNET ? 1 : 0;
+	int is_eth = rdma_port_get_link_layer(&dev->ib_dev, port) ==
+		IB_LINK_LAYER_ETHERNET;
 	u8 mac[6];
 	int is_mcast;
 	u16 vlan_tag;
@@ -908,7 +912,7 @@ static int mlx4_set_path(struct mlx4_ib_dev *dev, const struct ib_ah_attr *ah,
 
 	if (is_eth) {
 		path->sched_queue = MLX4_IB_DEFAULT_SCHED_QUEUE |
-			((port - 1) << 6) | ((ah->sl & 0x7) << 3) | ((ah->sl & 8) >> 1);
+			((port - 1) << 6) | ((ah->sl & 7) << 3) | ((ah->sl & 8) >> 1);
 
 		if (!(ah->ah_flags & IB_AH_GRH))
 			return -1;
@@ -923,7 +927,7 @@ static int mlx4_set_path(struct mlx4_ib_dev *dev, const struct ib_ah_attr *ah,
 		path->grh_mylmc &= 0x80;
 
 		vlan_tag = rdma_get_vlan_id(&dev->iboe.gid_table[port - 1][ah->grh.sgid_index]);
-		if (vlan_tag) {
+		if (vlan_tag < 0x1000) {
 			if (mlx4_find_cached_vlan(dev->dev, port, vlan_tag, &vidx))
 				return -ENOENT;
 
@@ -939,11 +943,13 @@ static int mlx4_set_path(struct mlx4_ib_dev *dev, const struct ib_ah_attr *ah,
 
 static void update_mcg_macs(struct mlx4_ib_dev *dev, struct mlx4_ib_qp *qp)
 {
-	struct gid_entry *ge, *tmp;
+	struct mlx4_ib_gid_entry *ge, *tmp;
 
 	list_for_each_entry_safe(ge, tmp, &qp->gid_list, list) {
-		if (!ge->added && mlx4_ib_add_mc(dev, qp, &ge->gid))
+		if (!ge->added && mlx4_ib_add_mc(dev, qp, &ge->gid)) {
 			ge->added = 1;
+			ge->port = qp->port;
+		}
 	}
 }
 
@@ -1042,7 +1048,7 @@ static int __mlx4_ib_modify_qp(struct ib_qp *ibqp,
 	}
 
 	if (attr_mask & IB_QP_TIMEOUT) {
-		context->pri_path.ackto |= (attr->timeout << 3);
+		context->pri_path.ackto |= attr->timeout << 3;
 		optpar |= MLX4_QP_OPTPAR_ACK_TIMEOUT;
 	}
 
@@ -1285,35 +1291,31 @@ static int build_mlx_header(struct mlx4_ib_sqp *sqp, struct ib_send_wr *wr,
 	struct mlx4_wqe_mlx_seg *mlx = wqe;
 	struct mlx4_wqe_inline_seg *inl = wqe + sizeof *mlx;
 	struct mlx4_ib_ah *ah = to_mah(wr->wr.ud.ah);
+	union ib_gid sgid;
 	u16 pkey;
 	int send_size;
 	int header_size;
 	int spc;
 	int i;
-	union ib_gid sgid;
 	int is_eth;
-	int is_grh;
 	int is_vlan = 0;
-	int err;
-	__be16 vlan = 0;
+	int is_grh;
+	u16 vlan;
 
 	send_size = 0;
 	for (i = 0; i < wr->num_sge; ++i)
 		send_size += wr->sg_list[i].length;
 
-	is_eth = rdma_port_link_layer(sqp->qp.ibqp.device, sqp->qp.port) == IB_LINK_LAYER_ETHERNET;
+	is_eth = rdma_port_get_link_layer(sqp->qp.ibqp.device, sqp->qp.port) == IB_LINK_LAYER_ETHERNET;
 	is_grh = mlx4_ib_ah_grh_present(ah);
-	err = ib_get_cached_gid(ib_dev, be32_to_cpu(ah->av.ib.port_pd) >> 24,
-				ah->av.ib.gid_index, &sgid);
-	if (err)
-		return err;
-
 	if (is_eth) {
-		vlan = cpu_to_be16(rdma_get_vlan_id(&sgid));
-		is_vlan = !!vlan;
+		ib_get_cached_gid(ib_dev, be32_to_cpu(ah->av.ib.port_pd) >> 24,
+				  ah->av.ib.gid_index, &sgid);
+		vlan = rdma_get_vlan_id(&sgid);
+		is_vlan = vlan < 0x1000;
 	}
-
 	ib_ud_header_init(send_size, !is_eth, is_eth, is_vlan, is_grh, 0, &sqp->ud_header);
+
 	if (!is_eth) {
 		sqp->ud_header.lrh.service_level =
 			be32_to_cpu(ah->av.ib.sl_tclass_flowlabel) >> 28;
@@ -1340,7 +1342,7 @@ static int build_mlx_header(struct mlx4_ib_sqp *sqp, struct ib_send_wr *wr,
 					  (sqp->ud_header.lrh.destination_lid ==
 					   IB_LID_PERMISSIVE ? MLX4_WQE_MLX_SLR : 0) |
 					  (sqp->ud_header.lrh.service_level << 8));
-		mlx->rlid   = sqp->ud_header.lrh.destination_lid;
+		mlx->rlid = sqp->ud_header.lrh.destination_lid;
 	}
 
 	switch (wr->opcode) {
@@ -1360,19 +1362,20 @@ static int build_mlx_header(struct mlx4_ib_sqp *sqp, struct ib_send_wr *wr,
 	if (is_eth) {
 		u8 *smac;
 
-		memcpy(sqp->ud_header.eth.dmac_h, ah->av.eth.mac_0_1, 6);
-		smac = to_mdev(sqp->qp.ibqp.device)->iboe.netdevs[sqp->qp.port - 1]->dev_addr; /* fixme: cache this value */
+		memcpy(sqp->ud_header.eth.dmac_h, ah->av.eth.mac, 6);
+		/* FIXME: cache smac value? */
+		smac = to_mdev(sqp->qp.ibqp.device)->iboe.netdevs[sqp->qp.port - 1]->dev_addr;
 		memcpy(sqp->ud_header.eth.smac_h, smac, 6);
 		if (!memcmp(sqp->ud_header.eth.smac_h, sqp->ud_header.eth.dmac_h, 6))
 			mlx->flags |= cpu_to_be32(MLX4_WQE_CTRL_FORCE_LOOPBACK);
-		if (!is_vlan)
-			sqp->ud_header.eth.type = cpu_to_be16(MLX4_IBOE_ETHERTYPE);
-		else {
+		if (!is_vlan) {
+			sqp->ud_header.eth.type = cpu_to_be16(MLX4_IB_IBOE_ETHERTYPE);
+		} else {
 			u16 pcp;
 
-			sqp->ud_header.vlan.type = cpu_to_be16(MLX4_IBOE_ETHERTYPE);
-			pcp = be32_to_cpu(ah->av.ib.sl_tclass_flowlabel) >> 23 & 0xe0;
-			sqp->ud_header.vlan.tag = vlan | pcp;
+			sqp->ud_header.vlan.type = cpu_to_be16(MLX4_IB_IBOE_ETHERTYPE);
+			pcp = (be32_to_cpu(ah->av.ib.sl_tclass_flowlabel) >> 27 & 3) << 13;
+			sqp->ud_header.vlan.tag = cpu_to_be16(vlan | pcp);
 		}
 	} else {
 		sqp->ud_header.lrh.virtual_lane    = !sqp->qp.ibqp.qp_num ? 15 : 0;
@@ -1413,7 +1416,7 @@ static int build_mlx_header(struct mlx4_ib_sqp *sqp, struct ib_send_wr *wr,
 	 * segments to hold the UD header.
 	 */
 	spc = MLX4_INLINE_ALIGN -
-	      ((unsigned long) (inl + 1) & (MLX4_INLINE_ALIGN - 1));
+		((unsigned long) (inl + 1) & (MLX4_INLINE_ALIGN - 1));
 	if (header_size <= spc) {
 		inl->byte_count = cpu_to_be32(1 << 31 | header_size);
 		memcpy(inl + 1, sqp->header_buf, header_size);
@@ -1443,7 +1446,7 @@ static int build_mlx_header(struct mlx4_ib_sqp *sqp, struct ib_send_wr *wr,
 	}
 
 	*mlx_seg_len =
-	ALIGN(i * sizeof (struct mlx4_wqe_inline_seg) + header_size, 16);
+		ALIGN(i * sizeof (struct mlx4_wqe_inline_seg) + header_size, 16);
 	return 0;
 }
 
@@ -1515,11 +1518,23 @@ static void set_atomic_seg(struct mlx4_wqe_atomic_seg *aseg, struct ib_send_wr *
 	if (wr->opcode == IB_WR_ATOMIC_CMP_AND_SWP) {
 		aseg->swap_add = cpu_to_be64(wr->wr.atomic.swap);
 		aseg->compare  = cpu_to_be64(wr->wr.atomic.compare_add);
+	} else if (wr->opcode == IB_WR_MASKED_ATOMIC_FETCH_AND_ADD) {
+		aseg->swap_add = cpu_to_be64(wr->wr.atomic.compare_add);
+		aseg->compare  = cpu_to_be64(wr->wr.atomic.compare_add_mask);
 	} else {
 		aseg->swap_add = cpu_to_be64(wr->wr.atomic.compare_add);
 		aseg->compare  = 0;
 	}
 
+}
+
+static void set_masked_atomic_seg(struct mlx4_wqe_masked_atomic_seg *aseg,
+				  struct ib_send_wr *wr)
+{
+	aseg->swap_add		= cpu_to_be64(wr->wr.atomic.swap);
+	aseg->swap_add_mask	= cpu_to_be64(wr->wr.atomic.swap_mask);
+	aseg->compare		= cpu_to_be64(wr->wr.atomic.compare_add);
+	aseg->compare_mask	= cpu_to_be64(wr->wr.atomic.compare_add_mask);
 }
 
 static void set_datagram_seg(struct mlx4_wqe_datagram_seg *dseg,
@@ -1529,7 +1544,7 @@ static void set_datagram_seg(struct mlx4_wqe_datagram_seg *dseg,
 	dseg->dqpn = cpu_to_be32(wr->wr.ud.remote_qpn);
 	dseg->qkey = cpu_to_be32(wr->wr.ud.remote_qkey);
 	dseg->vlan = to_mah(wr->wr.ud.ah)->av.eth.vlan;
-	memcpy(dseg->mac, to_mah(wr->wr.ud.ah)->av.eth.mac_0_1, 6);
+	memcpy(dseg->mac, to_mah(wr->wr.ud.ah)->av.eth.mac, 6);
 	*vlan = dseg->vlan;
 }
 
@@ -1633,7 +1648,7 @@ int mlx4_ib_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 	__be32 uninitialized_var(lso_hdr_sz);
 	__be32 blh;
 	int i;
-	__be16 vlan = 0;
+	__be16 vlan = cpu_to_be16(0xffff);
 
 	spin_lock_irqsave(&qp->sq.lock, flags);
 
@@ -1679,6 +1694,7 @@ int mlx4_ib_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 			switch (wr->opcode) {
 			case IB_WR_ATOMIC_CMP_AND_SWP:
 			case IB_WR_ATOMIC_FETCH_AND_ADD:
+			case IB_WR_MASKED_ATOMIC_FETCH_AND_ADD:
 				set_raddr_seg(wqe, wr->wr.atomic.remote_addr,
 					      wr->wr.atomic.rkey);
 				wqe  += sizeof (struct mlx4_wqe_raddr_seg);
@@ -1688,6 +1704,19 @@ int mlx4_ib_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 
 				size += (sizeof (struct mlx4_wqe_raddr_seg) +
 					 sizeof (struct mlx4_wqe_atomic_seg)) / 16;
+
+				break;
+
+			case IB_WR_MASKED_ATOMIC_CMP_AND_SWP:
+				set_raddr_seg(wqe, wr->wr.atomic.remote_addr,
+					      wr->wr.atomic.rkey);
+				wqe  += sizeof (struct mlx4_wqe_raddr_seg);
+
+				set_masked_atomic_seg(wqe, wr);
+				wqe  += sizeof (struct mlx4_wqe_masked_atomic_seg);
+
+				size += (sizeof (struct mlx4_wqe_raddr_seg) +
+					 sizeof (struct mlx4_wqe_masked_atomic_seg)) / 16;
 
 				break;
 
@@ -1786,6 +1815,11 @@ int mlx4_ib_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 		ctrl->fence_size = (wr->send_flags & IB_SEND_FENCE ?
 				    MLX4_WQE_CTRL_FENCE : 0) | size;
 
+		if (be16_to_cpu(vlan) < 0x1000) {
+			ctrl->ins_vlan = 1 << 6;
+			ctrl->vlan_tag = vlan;
+		}
+
 		/*
 		 * Make sure descriptor is fully written before
 		 * setting ownership bit (because HW can start
@@ -1800,11 +1834,6 @@ int mlx4_ib_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 
 		ctrl->owner_opcode = mlx4_ib_opcode[wr->opcode] |
 			(ind & qp->sq.wqe_cnt ? cpu_to_be32(1 << 31) : 0) | blh;
-
-		if (vlan) {
-			ctrl->ins_vlan = 1 << 6;
-			ctrl->vlan_tag = vlan;
-		}
 
 		stamp = ind + qp->sq_spare_wqes;
 		ind += DIV_ROUND_UP(size * 16, 1U << qp->sq.wqe_shift);
@@ -1955,10 +1984,10 @@ static int to_ib_qp_access_flags(int mlx4_flags)
 	return ib_flags;
 }
 
-static void to_ib_ah_attr(struct mlx4_ib_dev *ib_dev, struct ib_ah_attr *ib_ah_attr,
-			  struct mlx4_qp_path *path)
+static void to_ib_ah_attr(struct mlx4_ib_dev *ibdev, struct ib_ah_attr *ib_ah_attr,
+				struct mlx4_qp_path *path)
 {
-	struct mlx4_dev *dev = ib_dev->dev;
+	struct mlx4_dev *dev = ibdev->dev;
 	int is_eth;
 
 	memset(ib_ah_attr, 0, sizeof *ib_ah_attr);
@@ -1967,8 +1996,8 @@ static void to_ib_ah_attr(struct mlx4_ib_dev *ib_dev, struct ib_ah_attr *ib_ah_a
 	if (ib_ah_attr->port_num == 0 || ib_ah_attr->port_num > dev->caps.num_ports)
 		return;
 
-	is_eth = rdma_port_link_layer(&ib_dev->ib_dev, ib_ah_attr->port_num) ==
-		IB_LINK_LAYER_ETHERNET ? 1 : 0;
+	is_eth = rdma_port_get_link_layer(&ibdev->ib_dev, ib_ah_attr->port_num) ==
+		IB_LINK_LAYER_ETHERNET;
 	if (is_eth)
 		ib_ah_attr->sl = ((path->sched_queue >> 3) & 0x7) |
 		((path->sched_queue & 4) << 1);
@@ -1976,7 +2005,6 @@ static void to_ib_ah_attr(struct mlx4_ib_dev *ib_dev, struct ib_ah_attr *ib_ah_a
 		ib_ah_attr->sl = (path->sched_queue >> 2) & 0xf;
 
 	ib_ah_attr->dlid	  = be16_to_cpu(path->rlid);
-
 	ib_ah_attr->src_path_bits = path->grh_mylmc & 0x7f;
 	ib_ah_attr->static_rate   = path->static_rate ? path->static_rate - 5 : 0;
 	ib_ah_attr->ah_flags      = (path->grh_mylmc & (1 << 7)) ? IB_AH_GRH : 0;

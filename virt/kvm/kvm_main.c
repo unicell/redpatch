@@ -76,6 +76,8 @@ DEFINE_SPINLOCK(kvm_lock);
 LIST_HEAD(vm_list);
 
 static cpumask_var_t cpus_hardware_enabled;
+static int kvm_usage_count = 0;
+static atomic_t hardware_enable_failed;
 
 struct kmem_cache *kvm_vcpu_cache;
 EXPORT_SYMBOL_GPL(kvm_vcpu_cache);
@@ -86,12 +88,17 @@ struct dentry *kvm_debugfs_dir;
 
 static long kvm_vcpu_ioctl(struct file *file, unsigned int ioctl,
 			   unsigned long arg);
+static int hardware_enable_all(void);
+static void hardware_disable_all(void);
 
 static void kvm_io_bus_destroy(struct kvm_io_bus *bus);
 
 static bool kvm_rebooting;
 
 static bool largepages_enabled = true;
+
+static struct page *hwpoison_page;
+static pfn_t hwpoison_pfn;
 
 static struct page *fault_page;
 static pfn_t fault_pfn;
@@ -698,34 +705,24 @@ out:
 inline int kvm_is_mmio_pfn(pfn_t pfn)
 {
 	if (pfn_valid(pfn)) {
-		struct page *head;
+		int reserved;
 		struct page *tail = pfn_to_page(pfn);
-		head = compound_head(tail);
+		struct page *head = compound_trans_head(tail);
+		reserved = PageReserved(head);
 		if (head != tail) {
-			smp_rmb();
 			/*
-			 * head may be a dangling pointer.
-			 * __split_huge_page_refcount clears PageTail
-			 * before overwriting first_page, so if
-			 * PageTail is still there it means the head
-			 * pointer isn't dangling.
+			 * "head" is not a dangling pointer
+			 * (compound_trans_head takes care of that)
+			 * but the hugepage may have been splitted
+			 * from under us (and we may not hold a
+			 * reference count on the head page so it can
+			 * be reused before we run PageReferenced), so
+			 * we've to check PageTail before returning
+			 * what we just read.
 			 */
-			if (PageTail(tail)) {
-				/*
-				 * the "head" is not a dangling
-				 * pointer but the hugepage may have
-				 * been splitted from under us (and we
-				 * may not hold a reference count on
-				 * the head page so it can be reused
-				 * before we run PageReferenced), so
-				 * we've to recheck PageTail before
-				 * returning what we just read.
-				 */
-				int reserved = PageReserved(head);
-				smp_rmb();
-				if (PageTail(tail))
-					return reserved;
-			}
+			smp_rmb();
+			if (PageTail(tail))
+				return reserved;
 		}
 		return PageReserved(tail);
 	}
@@ -991,7 +988,7 @@ static const struct mmu_notifier_ops kvm_mmu_notifier_ops = {
 
 static struct kvm *kvm_create_vm(void)
 {
-	int r, i;
+	int r = 0, i;
 	struct kvm *kvm = kvm_arch_create_vm();
 #ifdef KVM_COALESCED_MMIO_PAGE_OFFSET
 	struct page *page;
@@ -999,6 +996,11 @@ static struct kvm *kvm_create_vm(void)
 
 	if (IS_ERR(kvm))
 		goto out;
+
+	r = hardware_enable_all();
+	if (r)
+		goto out_err_nodisable;
+
 #ifdef CONFIG_HAVE_KVM_IRQCHIP
 	INIT_HLIST_HEAD(&kvm->mask_notifier_list);
 	INIT_HLIST_HEAD(&kvm->irq_ack_notifier_list);
@@ -1035,7 +1037,8 @@ static struct kvm *kvm_create_vm(void)
 		cleanup_srcu_struct(&kvm->srcu);
 		kfree(kvm->memslots);
 		kfree(kvm);
-		return ERR_PTR(-ENOMEM);
+		r = -ENOMEM;
+		goto out_err;
 	}
 	kvm->coalesced_mmio_ring =
 			(struct kvm_coalesced_mmio_ring *)page_address(page);
@@ -1043,10 +1046,9 @@ static struct kvm *kvm_create_vm(void)
 
 #if defined(CONFIG_MMU_NOTIFIER) && defined(KVM_ARCH_WANT_MMU_NOTIFIER)
 	{
-		int err;
 		kvm->mmu_notifier.ops = &kvm_mmu_notifier_ops;
-		err = mmu_notifier_register(&kvm->mmu_notifier, current->mm);
-		if (err) {
+		r = mmu_notifier_register(&kvm->mmu_notifier, current->mm);
+		if (r) {
 #ifdef KVM_COALESCED_MMIO_PAGE_OFFSET
 			put_page(page);
 #endif
@@ -1055,7 +1057,7 @@ static struct kvm *kvm_create_vm(void)
 			cleanup_srcu_struct(&kvm->srcu);
 			kfree(kvm->memslots);
 			kfree(kvm);
-			return ERR_PTR(err);
+			goto out_err;
 		}
 	}
 #endif
@@ -1077,6 +1079,12 @@ static struct kvm *kvm_create_vm(void)
 #endif
 out:
 	return kvm;
+
+out_err:
+	hardware_disable_all();
+out_err_nodisable:
+	kfree(kvm);
+	return ERR_PTR(r);
 }
 
 /*
@@ -1139,6 +1147,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
 	kvm_arch_flush_shadow(kvm);
 #endif
 	kvm_arch_destroy_vm(kvm);
+	hardware_disable_all();
 	mmdrop(mm);
 }
 
@@ -1457,15 +1466,21 @@ EXPORT_SYMBOL_GPL(kvm_disable_largepages);
 
 int is_error_page(struct page *page)
 {
-	return page == bad_page || page == fault_page;
+	return page == bad_page || page == hwpoison_page || page == fault_page;
 }
 EXPORT_SYMBOL_GPL(is_error_page);
 
 int is_error_pfn(pfn_t pfn)
 {
-	return pfn == bad_pfn || pfn == fault_pfn;
+	return pfn == bad_pfn || pfn == hwpoison_pfn || pfn == fault_pfn;
 }
 EXPORT_SYMBOL_GPL(is_error_pfn);
+
+int is_hwpoison_pfn(pfn_t pfn)
+{
+	return pfn == hwpoison_pfn;
+}
+EXPORT_SYMBOL_GPL(is_hwpoison_pfn);
 
 int is_fault_pfn(pfn_t pfn)
 {
@@ -1570,6 +1585,12 @@ pfn_t hva_to_pfn(struct kvm *kvm, unsigned long addr)
 		struct vm_area_struct *vma;
 
 		down_read(&current->mm->mmap_sem);
+		if (is_hwpoison_address(addr)) {
+			up_read(&current->mm->mmap_sem);
+			get_page(hwpoison_page);
+			return page_to_pfn(hwpoison_page);
+		}
+
 		vma = find_vma(current->mm, addr);
 
 		if (vma == NULL || addr < vma->vm_start ||
@@ -2601,11 +2622,21 @@ static struct miscdevice kvm_dev = {
 static void hardware_enable(void *junk)
 {
 	int cpu = raw_smp_processor_id();
+	int r;
 
 	if (cpumask_test_cpu(cpu, cpus_hardware_enabled))
 		return;
+
 	cpumask_set_cpu(cpu, cpus_hardware_enabled);
-	kvm_arch_hardware_enable(NULL);
+
+	r = kvm_arch_hardware_enable(NULL);
+
+	if (r) {
+		cpumask_clear_cpu(cpu, cpus_hardware_enabled);
+		atomic_inc(&hardware_enable_failed);
+		printk(KERN_INFO "kvm: enabling virtualization on "
+				 "CPU%d failed\n", cpu);
+	}
 }
 
 static void hardware_disable(void *junk)
@@ -2618,10 +2649,51 @@ static void hardware_disable(void *junk)
 	kvm_arch_hardware_disable(NULL);
 }
 
+static void hardware_disable_all_nolock(void)
+{
+	BUG_ON(!kvm_usage_count);
+
+	kvm_usage_count--;
+	if (!kvm_usage_count)
+		on_each_cpu(hardware_disable, NULL, 1);
+}
+
+static void hardware_disable_all(void)
+{
+	spin_lock(&kvm_lock);
+	hardware_disable_all_nolock();
+	spin_unlock(&kvm_lock);
+}
+
+static int hardware_enable_all(void)
+{
+	int r = 0;
+
+	spin_lock(&kvm_lock);
+
+	kvm_usage_count++;
+	if (kvm_usage_count == 1) {
+		atomic_set(&hardware_enable_failed, 0);
+		on_each_cpu(hardware_enable, NULL, 1);
+
+		if (atomic_read(&hardware_enable_failed)) {
+			hardware_disable_all_nolock();
+			r = -EBUSY;
+		}
+	}
+
+	spin_unlock(&kvm_lock);
+
+	return r;
+}
+
 static int kvm_cpu_hotplug(struct notifier_block *notifier, unsigned long val,
 			   void *v)
 {
 	int cpu = (long)v;
+
+	if (!kvm_usage_count)
+		return NOTIFY_OK;
 
 	val &= ~CPU_TASKS_FROZEN;
 	switch (val) {
@@ -2635,10 +2707,12 @@ static int kvm_cpu_hotplug(struct notifier_block *notifier, unsigned long val,
 		       cpu);
 		smp_call_function_single(cpu, hardware_disable, NULL, 1);
 		break;
-	case CPU_ONLINE:
+	case CPU_STARTING:
 		printk(KERN_INFO "kvm: enabling virtualization on CPU%d\n",
 		       cpu);
-		smp_call_function_single(cpu, hardware_enable, NULL, 1);
+		spin_lock(&kvm_lock);
+		hardware_enable(NULL);
+		spin_unlock(&kvm_lock);
 		break;
 	}
 	return NOTIFY_OK;
@@ -2647,10 +2721,12 @@ static int kvm_cpu_hotplug(struct notifier_block *notifier, unsigned long val,
 
 asmlinkage void kvm_handle_fault_on_reboot(void)
 {
-	if (kvm_rebooting)
+	if (kvm_rebooting) {
 		/* spin while reset goes on */
+		local_irq_enable();
 		while (true)
 			;
+	}
 	/* Fault while not rebooting.  We want the trace. */
 	BUG();
 }
@@ -2770,7 +2846,6 @@ int kvm_io_bus_unregister_dev(struct kvm *kvm, enum kvm_bus bus_idx,
 
 static struct notifier_block kvm_cpu_notifier = {
 	.notifier_call = kvm_cpu_hotplug,
-	.priority = 20, /* must be > scheduler priority */
 };
 
 static int vm_stat_get(void *_offset, u64 *val)
@@ -2834,13 +2909,15 @@ static void kvm_exit_debug(void)
 
 static int kvm_suspend(struct sys_device *dev, pm_message_t state)
 {
-	hardware_disable(NULL);
+	if (kvm_usage_count)
+		hardware_disable(NULL);
 	return 0;
 }
 
 static int kvm_resume(struct sys_device *dev)
 {
-	hardware_enable(NULL);
+	if (kvm_usage_count)
+		hardware_enable(NULL);
 	return 0;
 }
 
@@ -2898,6 +2975,15 @@ int kvm_init(void *opaque, unsigned int vcpu_size,
 
 	bad_pfn = page_to_pfn(bad_page);
 
+	hwpoison_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
+
+	if (hwpoison_page == NULL) {
+		r = -ENOMEM;
+		goto out_free_0;
+	}
+
+	hwpoison_pfn = page_to_pfn(hwpoison_page);
+
 	fault_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
 
 	if (fault_page == NULL) {
@@ -2924,7 +3010,6 @@ int kvm_init(void *opaque, unsigned int vcpu_size,
 			goto out_free_1;
 	}
 
-	on_each_cpu(hardware_enable, NULL, 1);
 	r = register_cpu_notifier(&kvm_cpu_notifier);
 	if (r)
 		goto out_free_2;
@@ -2974,7 +3059,6 @@ out_free_3:
 	unregister_reboot_notifier(&kvm_reboot_notifier);
 	unregister_cpu_notifier(&kvm_cpu_notifier);
 out_free_2:
-	on_each_cpu(hardware_disable, NULL, 1);
 out_free_1:
 	kvm_arch_hardware_unsetup();
 out_free_0a:
@@ -2982,7 +3066,8 @@ out_free_0a:
 out_free_0:
 	if (fault_page)
 		__free_page(fault_page);
-
+	if (hwpoison_page)
+		__free_page(hwpoison_page);
 	__free_page(bad_page);
 out:
 	kvm_arch_exit();
@@ -3005,6 +3090,7 @@ void kvm_exit(void)
 	kvm_arch_hardware_unsetup();
 	kvm_arch_exit();
 	free_cpumask_var(cpus_hardware_enabled);
+	__free_page(hwpoison_page);
 	__free_page(bad_page);
 }
 EXPORT_SYMBOL_GPL(kvm_exit);

@@ -68,10 +68,6 @@ MLX4_EN_PARM_INT(rss_xor, 0, "Use XOR hash function for RSS");
 /* RSS hash type mask - default to <saddr, daddr, sport, dport> */
 MLX4_EN_PARM_INT(rss_mask, 0xf, "RSS hash type bitmask");
 
-/* Number of LRO sessions per Rx ring (rounded up to a power of two) */
-MLX4_EN_PARM_INT(num_lro, MLX4_EN_MAX_LRO_DESCRIPTORS,
-		 "Number of LRO sessions per ring or disabled (0)");
-
 /* Priority pausing */
 MLX4_EN_PARM_INT(pfctx, 0, "Priority based Flow Control policy on TX[7:0]."
 			   " Per priority bit mask");
@@ -85,7 +81,6 @@ static int mlx4_en_get_profile(struct mlx4_en_dev *mdev)
 
 	params->rss_xor = (rss_xor != 0);
 	params->rss_mask = rss_mask & 0x1f;
-	params->num_lro = min_t(int, num_lro , MLX4_EN_MAX_LRO_DESCRIPTORS);
 	for (i = 1; i <= MLX4_MAX_PORTS; i++) {
 		params->prof[i].rx_pause = 1;
 		params->prof[i].rx_ppp = pfcrx;
@@ -100,7 +95,7 @@ static int mlx4_en_get_profile(struct mlx4_en_dev *mdev)
 	return 0;
 }
 
-static void *get_netdev(struct mlx4_dev *dev, void *ctx, u8 port)
+static void *mlx4_en_get_netdev(struct mlx4_dev *dev, void *ctx, u8 port)
 {
 	struct mlx4_en_dev *endev = ctx;
 
@@ -268,26 +263,12 @@ err_free_res:
 	return NULL;
 }
 
-enum mlx4_query_reply mlx4_en_query(void *endev_ptr, void *int_dev)
-{
-	struct mlx4_en_dev *mdev = endev_ptr;
-	struct net_device *netdev = int_dev;
-	int p;
-
-	for (p = 1; p <= MLX4_MAX_PORTS; ++p)
-		if (mdev->pndev[p] == netdev)
-			return p;
-
-	return MLX4_QUERY_NOT_MINE;
-}
-
 static struct mlx4_interface mlx4_en_interface = {
-	.add	= mlx4_en_add,
-	.remove	= mlx4_en_remove,
-	.event	= mlx4_en_event,
-	.query	= mlx4_en_query,
-	.get_prot_dev	= get_netdev,
-	.protocol	= MLX4_PROT_EN,
+	.add		= mlx4_en_add,
+	.remove		= mlx4_en_remove,
+	.event		= mlx4_en_event,
+	.get_dev	= mlx4_en_get_netdev,
+	.protocol	= MLX4_PROTOCOL_EN,
 };
 
 static int __init mlx4_en_init(void)

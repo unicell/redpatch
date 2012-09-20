@@ -258,6 +258,10 @@ struct audit_context {
 			pid_t			pid;
 			struct audit_cap_data	cap;
 		} capset;
+		struct {
+			int			fd;
+			int			flags;
+		} mmap;
 	};
 	int fds[2];
 
@@ -1355,6 +1359,10 @@ static void show_special(struct audit_context *context, int *call_panic)
 		audit_log_cap(ab, "cap_pp", &context->capset.cap.permitted);
 		audit_log_cap(ab, "cap_pe", &context->capset.cap.effective);
 		break; }
+	case AUDIT_MMAP: {
+		audit_log_format(ab, "fd=%d flags=0x%x", context->mmap.fd,
+				 context->mmap.flags);
+		break; }
 	}
 	audit_log_end(ab);
 }
@@ -2180,12 +2188,13 @@ int audit_set_loginuid(struct task_struct *task, uid_t loginuid)
 
 		ab = audit_log_start(NULL, GFP_KERNEL, AUDIT_LOGIN);
 		if (ab) {
-			audit_log_format(ab, "login pid=%d uid=%u "
-				"old auid=%u new auid=%u"
-				" old ses=%u new ses=%u",
-				task->pid, task_uid(task),
-				task->loginuid, loginuid,
-				task->sessionid, sessionid);
+			audit_log_format(ab, "pid=%d uid=%u", task->pid,
+					 task_uid(task));
+			audit_log_task_context(ab);
+			audit_log_format(ab, " old auid=%u new auid=%u "
+					 "old ses=%u new ses=%u",
+					 task->loginuid, loginuid,
+					 task->sessionid, sessionid);
 			audit_log_end(ab);
 		}
 	}
@@ -2530,6 +2539,14 @@ void __audit_log_capset(pid_t pid,
 	context->capset.cap.inheritable = new->cap_effective;
 	context->capset.cap.permitted   = new->cap_permitted;
 	context->type = AUDIT_CAPSET;
+}
+
+void __audit_mmap_fd(int fd, int flags)
+{
+	struct audit_context *context = current->audit_context;
+	context->mmap.fd = fd;
+	context->mmap.flags = flags;
+	context->type = AUDIT_MMAP;
 }
 
 /**

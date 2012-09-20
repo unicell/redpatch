@@ -11,11 +11,14 @@
 #include <linux/kprobes.h>		/* __kprobes, ...		*/
 #include <linux/mmiotrace.h>		/* kmmio_handler, ...		*/
 #include <linux/perf_event.h>		/* perf_sw_event		*/
+#include <linux/hugetlb.h>		/* hstate_index_to_shift	*/
 #include <trace/events/kmem.h>
 
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
 #include <asm/pgalloc.h>		/* pgd_*(), ...			*/
 #include <asm/kmemcheck.h>		/* kmemcheck_*(), ...		*/
+
+#include <xen/xen.h>			/* xen_pv_domain()		*/
 
 /*
  * Page fault error code bits:
@@ -160,15 +163,20 @@ is_prefetch(struct pt_regs *regs, unsigned long error_code, unsigned long addr)
 
 static void
 force_sig_info_fault(int si_signo, int si_code, unsigned long address,
-		     struct task_struct *tsk)
+		     struct task_struct *tsk, int fault)
 {
+	unsigned lsb = 0;
 	siginfo_t info;
 
 	info.si_signo	= si_signo;
 	info.si_errno	= 0;
 	info.si_code	= si_code;
 	info.si_addr	= (void __user *)address;
-	info.si_addr_lsb = si_code == BUS_MCEERR_AR ? PAGE_SHIFT : 0;
+	if (fault & VM_FAULT_HWPOISON_LARGE)
+		lsb = hstate_index_to_shift(VM_FAULT_GET_HINDEX(fault)); 
+	if (fault & VM_FAULT_HWPOISON)
+		lsb = PAGE_SHIFT;
+	info.si_addr_lsb = lsb;
 
 	force_sig_info(si_signo, &info, tsk);
 }
@@ -229,14 +237,16 @@ void vmalloc_sync_all(void)
 
 		spin_lock_irqsave(&pgd_lock, flags);
 		list_for_each_entry(page, &pgd_list, lru) {
-			spinlock_t *pgt_lock;
+			struct mm_struct *mm;
 			pmd_t *ret;
 
-			pgt_lock = &pgd_page_get_mm(page)->page_table_lock;
+			mm = pgd_page_get_mm(page);
 
-			spin_lock(pgt_lock);
+			if (mm)
+				spin_lock(&mm->page_table_lock);
 			ret = vmalloc_sync_one(page_address(page), address);
-			spin_unlock(pgt_lock);
+			if (mm)
+				spin_unlock(&mm->page_table_lock);
 
 			if (!ret)
 				break;
@@ -350,19 +360,21 @@ void vmalloc_sync_all(void)
 		spin_lock_irqsave(&pgd_lock, flags);
 		list_for_each_entry(page, &pgd_list, lru) {
 			pgd_t *pgd;
-			spinlock_t *pgt_lock;
+			struct mm_struct *mm;
 
 			pgd = (pgd_t *)page_address(page) + pgd_index(address);
 
-			pgt_lock = &pgd_page_get_mm(page)->page_table_lock;
-			spin_lock(pgt_lock);
+			mm = pgd_page_get_mm(page);
+			if (mm)
+				spin_lock(&mm->page_table_lock);
 
 			if (pgd_none(*pgd))
 				set_pgd(pgd, *pgd_ref);
 			else
 				BUG_ON(pgd_page_vaddr(*pgd) != pgd_page_vaddr(*pgd_ref));
 
-			spin_unlock(pgt_lock);
+			if (mm)
+				spin_unlock(&mm->page_table_lock);
 		}
 		spin_unlock_irqrestore(&pgd_lock, flags);
 	}
@@ -748,7 +760,7 @@ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		tsk->thread.error_code	= error_code | (address >= TASK_SIZE);
 		tsk->thread.trap_no	= 14;
 
-		force_sig_info_fault(SIGSEGV, si_code, address, tsk);
+		force_sig_info_fault(SIGSEGV, si_code, address, tsk, 0);
 
 		return;
 	}
@@ -833,14 +845,14 @@ do_sigbus(struct pt_regs *regs, unsigned long error_code, unsigned long address,
 	tsk->thread.trap_no	= 14;
 
 #ifdef CONFIG_MEMORY_FAILURE
-	if (fault & VM_FAULT_HWPOISON) {
+	if (fault & (VM_FAULT_HWPOISON|VM_FAULT_HWPOISON_LARGE)) {
 		printk(KERN_ERR
 	"MCE: Killing %s:%d due to hardware memory corruption fault at %lx\n",
 			tsk->comm, tsk->pid, address);
 		code = BUS_MCEERR_AR;
 	}
 #endif
-	force_sig_info_fault(SIGBUS, code, address, tsk);
+	force_sig_info_fault(SIGBUS, code, address, tsk, fault);
 }
 
 static noinline void
@@ -850,7 +862,8 @@ mm_fault_error(struct pt_regs *regs, unsigned long error_code,
 	if (fault & VM_FAULT_OOM) {
 		out_of_memory(regs, error_code, address);
 	} else {
-		if (fault & (VM_FAULT_SIGBUS|VM_FAULT_HWPOISON))
+		if (fault & (VM_FAULT_SIGBUS|VM_FAULT_HWPOISON|
+			     VM_FAULT_HWPOISON_LARGE))
 			do_sigbus(regs, error_code, address, fault);
 		else
 			BUG();
@@ -962,8 +975,10 @@ static inline void __do_page_fault(struct pt_regs *regs, unsigned long address, 
 	struct vm_area_struct *vma;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
-	int write;
 	int fault;
+	int write = error_code & PF_WRITE;
+	unsigned int flags = FAULT_FLAG_ALLOW_RETRY |
+					(write ? FAULT_FLAG_WRITE : 0);
 
 	tsk = current;
 	mm = tsk->mm;
@@ -1071,6 +1086,7 @@ static inline void __do_page_fault(struct pt_regs *regs, unsigned long address, 
 			bad_area_nosemaphore(regs, error_code, address);
 			return;
 		}
+retry:
 		down_read(&mm->mmap_sem);
 	} else {
 		/*
@@ -1114,8 +1130,6 @@ static inline void __do_page_fault(struct pt_regs *regs, unsigned long address, 
 	 * we can handle it..
 	 */
 good_area:
-	write = error_code & PF_WRITE;
-
 	if (unlikely(access_error(error_code, write, vma))) {
 		bad_area_access_error(regs, error_code, address);
 		return;
@@ -1126,21 +1140,34 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault:
 	 */
-	fault = handle_mm_fault(mm, vma, address, write ? FAULT_FLAG_WRITE : 0);
+	fault = handle_mm_fault(mm, vma, address, flags);
 
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		mm_fault_error(regs, error_code, address, fault);
 		return;
 	}
 
-	if (fault & VM_FAULT_MAJOR) {
-		tsk->maj_flt++;
-		perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MAJ, 1, 0,
-				     regs, address);
-	} else {
-		tsk->min_flt++;
-		perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1, 0,
-				     regs, address);
+	/*
+	 * Major/minor page fault accounting is only done on the
+	 * initial attempt. If we go through a retry, it is extremely
+	 * likely that the page will be found in page cache at that point.
+	 */
+	if (flags & FAULT_FLAG_ALLOW_RETRY) {
+		if (fault & VM_FAULT_MAJOR) {
+			tsk->maj_flt++;
+			perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MAJ, 1, 0,
+				      regs, address);
+		} else {
+			tsk->min_flt++;
+			perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS_MIN, 1, 0,
+				      regs, address);
+		}
+		if (fault & VM_FAULT_RETRY) {
+			/* Clear FAULT_FLAG_ALLOW_RETRY to avoid any risk
+			 * of starvation. */
+			flags &= ~FAULT_FLAG_ALLOW_RETRY;
+			goto retry;
+		}
 	}
 
 	check_v8086_mode(regs, address, tsk);

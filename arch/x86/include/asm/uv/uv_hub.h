@@ -5,7 +5,7 @@
  *
  * SGI UV architectural definitions
  *
- * Copyright (C) 2007-2008 Silicon Graphics, Inc. All rights reserved.
+ * Copyright (C) 2007-2010 Silicon Graphics, Inc. All rights reserved.
  */
 
 #ifndef _ASM_X86_UV_UV_HUB_H
@@ -77,7 +77,8 @@
  *
  *		1111110000000000
  *		5432109876543210
- *		pppppppppplc0cch
+ *		pppppppppplc0cch	Nehalem-EX
+ *		ppppppppplcc0cch	Westmere-EX
  *		sssssssssss
  *
  *			p  = pnode bits
@@ -154,6 +155,29 @@ DECLARE_PER_CPU(struct uv_hub_info_s, __uv_hub_info);
 #define uv_hub_info		(&__get_cpu_var(__uv_hub_info))
 #define uv_cpu_hub_info(cpu)	(&per_cpu(__uv_hub_info, cpu))
 
+#define UV_HUB_INFO_EXTRA_FIELDS	L1_CACHE_BYTES-2
+struct uv_hub_info_extra_s {
+	unsigned char	apic_pnode_shift;
+	unsigned char	hub_type;
+	unsigned char	future[UV_HUB_INFO_EXTRA_FIELDS];
+};
+
+DECLARE_PER_CPU(struct uv_hub_info_extra_s, __uv_hub_info_extra);
+#define uv_hub_info_extra		(&__get_cpu_var(__uv_hub_info_extra))
+#define uv_cpu_hub_info_extra(cpu)	(&per_cpu(__uv_hub_info_extra, cpu))
+
+union uvh_apicid {
+    unsigned long       v;
+    struct uvh_apicid_s {
+        unsigned long   local_apic_mask  : 24;
+        unsigned long   local_apic_shift :  5;
+        unsigned long   unused1          :  3;
+        unsigned long   pnode_mask       : 24;
+        unsigned long   pnode_shift      :  5;
+        unsigned long   unused2          :  3;
+    } s;
+};
+
 /*
  * Local & Global MMR space macros.
  *	Note: macros are intended to be used ONLY by inline functions
@@ -182,6 +206,7 @@ DECLARE_PER_CPU(struct uv_hub_info_s, __uv_hub_info);
 #define UV_GLOBAL_MMR64_PNODE_BITS(p)					\
 	(((unsigned long)(p)) << UV_GLOBAL_MMR64_PNODE_SHIFT)
 
+#define UVH_APICID		0x002D0E00L
 #define UV_APIC_PNODE_SHIFT	6
 
 #define UV_APICID_HIBIT_MASK	0xffff0000
@@ -282,7 +307,7 @@ static inline void *uv_pnode_offset_to_vaddr(int pnode, unsigned long offset)
  */
 static inline int uv_apicid_to_pnode(int apicid)
 {
-	return (apicid >> UV_APIC_PNODE_SHIFT);
+	return (apicid >> uv_hub_info_extra->apic_pnode_shift);
 }
 
 /*

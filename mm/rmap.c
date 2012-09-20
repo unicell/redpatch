@@ -362,6 +362,8 @@ vma_address(struct page *page, struct vm_area_struct *vma)
 	pgoff_t pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
 	unsigned long address;
 
+	if (unlikely(is_vm_hugetlb_page(vma)))
+		pgoff = page->index << huge_page_order(page_hstate(page));
 	address = vma->vm_start + ((pgoff - vma->vm_pgoff) << PAGE_SHIFT);
 	if (unlikely(address < vma->vm_start || address >= vma->vm_end)) {
 		/* page should be within @vma mapping range */
@@ -412,6 +414,12 @@ pte_t *page_check_address(struct page *page, struct mm_struct *mm,
 	pte_t *pte;
 	spinlock_t *ptl;
 
+	if (unlikely(PageHuge(page))) {
+		pte = huge_pte_offset(mm, address);
+		ptl = &mm->page_table_lock;
+		goto check;
+	}
+
 	pgd = pgd_offset(mm, address);
 	if (!pgd_present(*pgd))
 		return NULL;
@@ -434,6 +442,7 @@ pte_t *page_check_address(struct page *page, struct mm_struct *mm,
 	}
 
 	ptl = pte_lockptr(mm, pmd);
+check:
 	spin_lock(ptl);
 	if (pte_present(*pte) && page_to_pfn(page) == pte_pfn(*pte)) {
 		*ptlp = ptl;
@@ -480,40 +489,50 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 	struct mm_struct *mm = vma->vm_mm;
 	int referenced = 0;
 
-	/*
-	 * Don't want to elevate referenced for mlocked page that gets this far,
-	 * in order that it progresses to try_to_unmap and is moved to the
-	 * unevictable list.
-	 */
-	if (vma->vm_flags & VM_LOCKED) {
-		*mapcount = 0;	/* break early from loop */
-		*vm_flags |= VM_LOCKED;
-		goto out;
-	}
-
-	/* Pretend the page is referenced if the task has the
-	   swap token and is in the middle of a page fault. */
-	if (mm != current->mm && has_swap_token(mm) &&
-			rwsem_is_locked(&mm->mmap_sem))
-		referenced++;
-
 	if (unlikely(PageTransHuge(page))) {
 		pmd_t *pmd;
 
 		spin_lock(&mm->page_table_lock);
+		/*
+		 * rmap might return false positives; we must filter
+		 * these out using page_check_address_pmd().
+		 */
 		pmd = page_check_address_pmd(page, mm, address,
 					     PAGE_CHECK_ADDRESS_PMD_FLAG);
-		if (pmd && !pmd_trans_splitting(*pmd) &&
-		    pmdp_clear_flush_young_notify(vma, address, pmd))
+		if (!pmd) {
+			spin_unlock(&mm->page_table_lock);
+			goto out;
+		}
+
+		if (vma->vm_flags & VM_LOCKED) {
+			spin_unlock(&mm->page_table_lock);
+			*mapcount = 0;	/* break early from loop */
+			*vm_flags |= VM_LOCKED;
+			goto out;
+		}
+
+		/* go ahead even if the pmd is pmd_trans_splitting() */
+		if (pmdp_clear_flush_young_notify(vma, address, pmd))
 			referenced++;
 		spin_unlock(&mm->page_table_lock);
 	} else {
 		pte_t *pte;
 		spinlock_t *ptl;
 
+		/*
+		 * rmap might return false positives; we must filter
+		 * these out using page_check_address().
+		 */
 		pte = page_check_address(page, mm, address, &ptl, 0);
 		if (!pte)
 			goto out;
+
+		if (vma->vm_flags & VM_LOCKED) {
+			pte_unmap_unlock(pte, ptl);
+			*mapcount = 0;	/* break early from loop */
+			*vm_flags |= VM_LOCKED;
+			goto out;
+		}
 
 		if (ptep_clear_flush_young_notify(vma, address, pte)) {
 			/*
@@ -528,6 +547,12 @@ int page_referenced_one(struct page *page, struct vm_area_struct *vma,
 		}
 		pte_unmap_unlock(pte, ptl);
 	}
+
+	/* Pretend the page is referenced if the task has the
+	   swap token and is in the middle of a page fault. */
+	if (mm != current->mm && has_swap_token(mm) &&
+			rwsem_is_locked(&mm->mmap_sem))
+		referenced++;
 
 	(*mapcount)--;
 
@@ -783,10 +808,10 @@ void page_move_anon_rmap(struct page *page,
 }
 
 /**
- * __page_set_anon_rmap - setup new anonymous rmap
- * @page:	the page to add the mapping to
- * @vma:	the vm area in which the mapping is added
- * @address:	the user virtual address mapped
+ * __page_set_anon_rmap - set up new anonymous rmap
+ * @page:	Page to add to rmap	
+ * @vma:	VM area to add page to.
+ * @address:	User virtual address of the mapping	
  * @exclusive:	the page is exclusively owned by the current process
  */
 static void __page_set_anon_rmap(struct page *page,
@@ -796,17 +821,16 @@ static void __page_set_anon_rmap(struct page *page,
 
 	BUG_ON(!anon_vma);
 
+	if (PageAnon(page))
+		return;
+
 	/*
 	 * If the page isn't exclusively mapped into this vma,
 	 * we must use the _oldest_ possible anon_vma for the
 	 * page mapping!
 	 */
-	if (!exclusive) {
-		if (PageAnon(page))
-			return;
+	if (!exclusive)
 		anon_vma = anon_vma->root;
-	} else
-		BUG_ON(PageAnon(page));
 
 	anon_vma = (void *) anon_vma + PAGE_MAPPING_ANON;
 	page->mapping = (struct address_space *) anon_vma;
@@ -854,6 +878,17 @@ static void __page_check_anon_rmap(struct page *page,
 void page_add_anon_rmap(struct page *page,
 	struct vm_area_struct *vma, unsigned long address)
 {
+	do_page_add_anon_rmap(page, vma, address, 0);
+}
+
+/*
+ * Special version of the above for do_swap_page, which often runs
+ * into pages that are exclusively owned by the current process.
+ * Everybody else should continue to use page_add_anon_rmap above.
+ */
+void do_page_add_anon_rmap(struct page *page,
+	struct vm_area_struct *vma, unsigned long address, int exclusive)
+{
 	int first = atomic_inc_and_test(&page->_mapcount);
 	if (first) {
 		if (!PageTransHuge(page))
@@ -868,7 +903,7 @@ void page_add_anon_rmap(struct page *page,
 	VM_BUG_ON(!PageLocked(page));
 	VM_BUG_ON(address < vma->vm_start || address >= vma->vm_end);
 	if (first)
-		__page_set_anon_rmap(page, vma, address, 0);
+		__page_set_anon_rmap(page, vma, address, exclusive);
 	else
 		__page_check_anon_rmap(page, vma, address);
 }
@@ -910,7 +945,7 @@ void page_add_file_rmap(struct page *page)
 {
 	if (atomic_inc_and_test(&page->_mapcount)) {
 		__inc_zone_page_state(page, NR_FILE_MAPPED);
-		mem_cgroup_update_mapped_file_stat(page, 1);
+		mem_cgroup_update_file_mapped(page, 1);
 	}
 }
 
@@ -937,6 +972,12 @@ void page_remove_rmap(struct page *page)
 		page_clear_dirty(page);
 		set_page_dirty(page);
 	}
+	/*
+	 * Hugepages are not counted in NR_ANON_PAGES nor NR_FILE_MAPPED
+	 * and not charged by memcg for now.
+	 */
+	if (unlikely(PageHuge(page)))
+		return;
 	if (PageAnon(page)) {
 		mem_cgroup_uncharge_page(page);
 		if (!PageTransHuge(page))
@@ -946,8 +987,8 @@ void page_remove_rmap(struct page *page)
 					      NR_ANON_TRANSPARENT_HUGEPAGES);
 	} else {
 		__dec_zone_page_state(page, NR_FILE_MAPPED);
+		mem_cgroup_update_file_mapped(page, -1);
 	}
-	mem_cgroup_update_mapped_file_stat(page, -1);
 	/*
 	 * It would be tidy to reset the PageAnon mapping here,
 	 * but that might overwrite a racing page_add_anon_rmap
@@ -1377,7 +1418,7 @@ int try_to_unmap(struct page *page, enum ttu_flags flags)
 	int ret;
 
 	BUG_ON(!PageLocked(page));
-	BUG_ON(PageTransHuge(page));
+	VM_BUG_ON(!PageHuge(page) && PageTransHuge(page));
 
 	if (unlikely(PageKsm(page)))
 		ret = try_to_unmap_ksm(page, flags);
@@ -1530,3 +1571,49 @@ int rmap_walk(struct page *page, int (*rmap_one)(struct page *,
 		return rmap_walk_file(page, rmap_one, arg);
 }
 #endif /* CONFIG_MIGRATION */
+
+#ifdef CONFIG_HUGETLB_PAGE
+/*
+ * The following three functions are for anonymous (private mapped) hugepages.
+ * Unlike common anonymous pages, anonymous hugepages have no accounting code
+ * and no lru code, because we handle hugepages differently from common pages.
+ */
+static void __hugepage_set_anon_rmap(struct page *page,
+	struct vm_area_struct *vma, unsigned long address, int exclusive)
+{
+	struct anon_vma *anon_vma = vma->anon_vma;
+
+	BUG_ON(!anon_vma);
+
+	if (PageAnon(page))
+		return;
+	if (!exclusive)
+		anon_vma = anon_vma->root;
+
+	anon_vma = (void *) anon_vma + PAGE_MAPPING_ANON;
+	page->mapping = (struct address_space *) anon_vma;
+	page->index = linear_page_index(vma, address);
+}
+
+void hugepage_add_anon_rmap(struct page *page,
+			    struct vm_area_struct *vma, unsigned long address)
+{
+	struct anon_vma *anon_vma = vma->anon_vma;
+	int first;
+
+	BUG_ON(!PageLocked(page));
+	BUG_ON(!anon_vma);
+	BUG_ON(address < vma->vm_start || address >= vma->vm_end);
+	first = atomic_inc_and_test(&page->_mapcount);
+	if (first)
+		__hugepage_set_anon_rmap(page, vma, address, 0);
+}
+
+void hugepage_add_new_anon_rmap(struct page *page,
+			struct vm_area_struct *vma, unsigned long address)
+{
+	BUG_ON(address < vma->vm_start || address >= vma->vm_end);
+	atomic_set(&page->_mapcount, 0);
+	__hugepage_set_anon_rmap(page, vma, address, 1);
+}
+#endif /* CONFIG_HUGETLB_PAGE */

@@ -34,9 +34,7 @@
 #include <linux/io.h>
 #include <linux/delay.h>
 #include <linux/vmalloc.h>
-#ifdef CONFIG_PCIEAER
 #include <linux/aer.h>
-#endif
 
 #include "qib.h"
 
@@ -44,16 +42,6 @@
  * This file contains PCIe utility routines that are common to the
  * various QLogic InfiniPath adapters
  */
-
-#ifndef PCI_MSIX_FLAGS
-#define PCI_MSIX_FLAGS 2
-#endif
-#ifndef PCI_MSIX_FLAGS_ENABLE
-#define  PCI_MSIX_FLAGS_ENABLE  (1 << 15)
-#endif
-#ifndef PCI_MSIX_FLAGS_QSIZE
-#define PCI_MSIX_FLAGS_QSIZE 0x7FF
-#endif
 
 /*
  * Code to adjust PCIe capabilities.
@@ -96,50 +84,44 @@ int qib_pcie_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	ret = pci_request_regions(pdev, QIB_DRV_NAME);
 	if (ret) {
-		qib_devinfo(pdev, "pci_request_regions fails: err %d\n",
-			 -ret);
+		qib_devinfo(pdev, "pci_request_regions fails: err %d\n", -ret);
 		goto bail;
 	}
 
-	ret = pci_set_dma_mask(pdev, DMA_64BIT_MASK);
+	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
 	if (ret) {
 		/*
 		 * If the 64 bit setup fails, try 32 bit.  Some systems
 		 * do not setup 64 bit maps on systems with 2GB or less
 		 * memory installed.
 		 */
-		ret = pci_set_dma_mask(pdev, DMA_32BIT_MASK);
+		ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 		if (ret) {
 			qib_devinfo(pdev, "Unable to set DMA mask: %d\n", ret);
 			goto bail;
 		}
-		qib_dbg("No 64bit DMA mask, used 32 bit mask\n");
-		ret = pci_set_consistent_dma_mask(pdev, DMA_32BIT_MASK);
+		ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
 	} else
-		ret = pci_set_consistent_dma_mask(pdev, DMA_64BIT_MASK);
-	if (ret)
+		ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
+	if (ret) {
 		qib_early_err(&pdev->dev,
 			      "Unable to set DMA consistent mask: %d\n", ret);
+		goto bail;
+	}
 
 	pci_set_master(pdev);
-#ifdef CONFIG_PCIEAER
-	/* enable basic AER reporting.  Perhaps more later */
-	if (pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR)) {
-		ret = pci_enable_pcie_error_reporting(pdev);
-		if (ret)
-			qib_early_err(&pdev->dev,
-				      "Unable to enable pcie error reporting"
-				      ": %d\n", ret);
-	} else
-		qib_dbg("AER capability not found! AER reports not enabled\n");
-#endif
-
+	ret = pci_enable_pcie_error_reporting(pdev);
+	if (ret) {
+		qib_early_err(&pdev->dev,
+			      "Unable to enable pcie error reporting: %d\n",
+			      ret);
+		ret = 0;
+	}
 	goto done;
 
 bail:
 	pci_disable_device(pdev);
 	pci_release_regions(pdev);
-
 done:
 	return ret;
 }
@@ -160,9 +142,6 @@ int qib_pcie_ddinit(struct qib_devdata *dd, struct pci_dev *pdev,
 
 	addr = pci_resource_start(pdev, 0);
 	len = pci_resource_len(pdev, 0);
-	qib_cdbg(VERBOSE, "regbase (0) %llx len %ld vend %x/%x "
-		 "driver_data %p\n", (unsigned long long)addr, len,
-		 ent->vendor, ent->device, pci_get_drvdata(pdev));
 
 #if defined(__powerpc__)
 	/* There isn't a generic way to specify writethrough mappings */
@@ -171,17 +150,11 @@ int qib_pcie_ddinit(struct qib_devdata *dd, struct pci_dev *pdev,
 	dd->kregbase = ioremap_nocache(addr, len);
 #endif
 
-	if (!dd->kregbase) {
-		qib_dbg("Unable to map io addr %llx to kvirt, failing\n",
-			(unsigned long long)addr);
+	if (!dd->kregbase)
 		return -ENOMEM;
-	}
 
 	dd->kregend = (u64 __iomem *)((void __iomem *) dd->kregbase + len);
 	dd->physaddr = addr;        /* used for io_remap, etc. */
-	/* for user mmap */
-	qib_cdbg(VERBOSE, "mapped io addr %llx to kregbase %p through %p\n",
-		 (unsigned long long)addr, dd->kregbase, dd->kregend);
 
 	/*
 	 * Save BARs to rewrite after device reset.  Save all 64 bits of
@@ -204,28 +177,21 @@ void qib_pcie_ddcleanup(struct qib_devdata *dd)
 {
 	u64 __iomem *base = (void __iomem *) dd->kregbase;
 
-	qib_cdbg(VERBOSE, "Unmapping kregbase %p\n", dd->kregbase);
 	dd->kregbase = NULL;
 	iounmap(base);
-	if (dd->piobase) {
-		qib_cdbg(VERBOSE, "Unmapping piobase %p\n",
-			 dd->piobase);
+	if (dd->piobase)
 		iounmap(dd->piobase);
-	}
-	if (dd->userbase) {
-		qib_cdbg(VERBOSE, "Unmapping userbase %p\n",
-			 dd->userbase);
+	if (dd->userbase)
 		iounmap(dd->userbase);
-	}
+	if (dd->piovl15base)
+		iounmap(dd->piovl15base);
 
-	qib_cdbg(VERBOSE, "calling pci_disable_device\n");
 	pci_disable_device(dd->pcidev);
 	pci_release_regions(dd->pcidev);
 
 	pci_set_drvdata(dd->pcidev, NULL);
 }
 
-#ifdef CONFIG_PCI_MSI
 static void qib_msix_setup(struct qib_devdata *dd, int pos, u32 *msixcnt,
 			   struct msix_entry *msix_entry)
 {
@@ -239,8 +205,6 @@ static void qib_msix_setup(struct qib_devdata *dd, int pos, u32 *msixcnt,
 		tabsize = *msixcnt;
 	ret = pci_enable_msix(dd->pcidev, msix_entry, tabsize);
 	if (ret > 0) {
-		qib_dbg("Couldn't get %d MSIx vectors, "
-			"trying to get %d\n", tabsize, ret);
 		tabsize = ret;
 		ret = pci_enable_msix(dd->pcidev, msix_entry, tabsize);
 	}
@@ -273,7 +237,6 @@ static int qib_msi_setup(struct qib_devdata *dd, int pos)
 			    "interrupts may not work\n", ret);
 	/* continue even if it fails, we may still be OK... */
 
-
 	pci_read_config_dword(pdev, pos + PCI_MSI_ADDRESS_LO,
 			      &dd->msi_lo);
 	pci_read_config_dword(pdev, pos + PCI_MSI_ADDRESS_HI,
@@ -283,13 +246,8 @@ static int qib_msi_setup(struct qib_devdata *dd, int pos)
 	pci_read_config_word(pdev, pos + ((control & PCI_MSI_FLAGS_64BIT)
 				    ? 12 : 8),
 			     &dd->msi_data);
-	qib_cdbg(VERBOSE, "Read msi data 0x%x from config offset "
-		 "0x%x, control=0x%x\n", dd->msi_data,
-		 pos + ((control & PCI_MSI_FLAGS_64BIT) ? 12 : 8),
-		 control);
 	return ret;
 }
-#endif /* CONFIG_PCI_MSI */
 
 int qib_pcie_params(struct qib_devdata *dd, u32 minw, u32 *nent,
 		    struct msix_entry *entry)
@@ -306,7 +264,6 @@ int qib_pcie_params(struct qib_devdata *dd, u32 minw, u32 *nent,
 		goto bail;
 	}
 
-#ifdef CONFIG_PCI_MSI
 	pos = pci_find_capability(dd->pcidev, PCI_CAP_ID_MSIX);
 	if (nent && *nent && pos) {
 		qib_msix_setup(dd, pos, nent, entry);
@@ -318,9 +275,6 @@ int qib_pcie_params(struct qib_devdata *dd, u32 minw, u32 *nent,
 		else
 			qib_dev_err(dd, "No PCI MSI or MSIx capability!\n");
 	}
-#else
-	ret = 0; /* no MSI or MSIx support; OK */
-#endif /* CONFIG_PCI_MSI */
 	if (!pos)
 		qib_enable_intx(dd->pcidev);
 
@@ -342,22 +296,18 @@ int qib_pcie_params(struct qib_devdata *dd, u32 minw, u32 *nent,
 		dd->lbus_speed = 5000; /* Gen1, 5GHz */
 		break;
 	default: /* not defined, assume gen1 */
-		qib_dbg("PCIe unexpected link speed %u\n", speed);
 		dd->lbus_speed = 2500;
 		break;
 	}
 
 	/*
-	 * check against expected pcie width and complain if "wrong"
+	 * Check against expected pcie width and complain if "wrong"
 	 * on first initialization, not afterwards (i.e., reset).
 	 */
 	if (minw && linkstat < minw)
 		qib_dev_err(dd,
 			    "PCIe width %u (x%u HCA), performance reduced\n",
 			    linkstat, minw);
-	else
-		qib_cdbg(VERBOSE, "PCIe speed %u width %u (x8 HCA)\n",
-			 dd->lbus_speed, linkstat);
 
 	qib_tune_pcie_caps(dd);
 
@@ -384,11 +334,10 @@ int qib_reinit_intr(struct qib_devdata *dd)
 	u16 control;
 	int ret = 0;
 
+	/* If we aren't using MSI, don't restore it */
 	if (!dd->msi_lo)
-		/* we weren't using MSI, so don't restore it */
 		goto bail;
 
-#ifdef CONFIG_PCI_MSI
 	pos = pci_find_capability(dd->pcidev, PCI_CAP_ID_MSI);
 	if (!pos) {
 		qib_dev_err(dd, "Can't find MSI capability, "
@@ -397,19 +346,12 @@ int qib_reinit_intr(struct qib_devdata *dd)
 		/* nothing special for MSIx, just MSI */
 		goto bail;
 	}
-	qib_cdbg(VERBOSE, "Writing msi_lo 0x%x to config offset 0x%x\n",
-		 dd->msi_lo, pos + PCI_MSI_ADDRESS_LO);
 	pci_write_config_dword(dd->pcidev, pos + PCI_MSI_ADDRESS_LO,
 			       dd->msi_lo);
-	qib_cdbg(VERBOSE, "Writing msi_lo 0x%x to config offset 0x%x\n",
-		 dd->msi_hi, pos + PCI_MSI_ADDRESS_HI);
 	pci_write_config_dword(dd->pcidev, pos + PCI_MSI_ADDRESS_HI,
 			       dd->msi_hi);
 	pci_read_config_word(dd->pcidev, pos + PCI_MSI_FLAGS, &control);
 	if (!(control & PCI_MSI_FLAGS_ENABLE)) {
-		qib_cdbg(INIT, "MSI control at off %x was %x, "
-			 "setting MSI enable (%x)\n", pos + PCI_MSI_FLAGS,
-			 control, control | PCI_MSI_FLAGS_ENABLE);
 		control |= PCI_MSI_FLAGS_ENABLE;
 		pci_write_config_word(dd->pcidev, pos + PCI_MSI_FLAGS,
 				      control);
@@ -419,10 +361,8 @@ int qib_reinit_intr(struct qib_devdata *dd)
 			      ((control & PCI_MSI_FLAGS_64BIT) ? 12 : 8),
 			      dd->msi_data);
 	ret = 1;
-#endif /* CONFIG_PCI_MSI */
 bail:
 	if (!ret && (dd->flags & QIB_HAS_INTX)) {
-		qib_cdbg(INIT, "Using INTx, MSI disabled or not configured\n");
 		qib_enable_intx(dd->pcidev);
 		ret = 1;
 	}
@@ -440,11 +380,8 @@ bail:
  */
 void qib_nomsi(struct qib_devdata *dd)
 {
-#ifdef CONFIG_PCI_MSI
 	dd->msi_lo = 0;
-	qib_cdbg(INIT, "disable device MSI interrupts\n");
 	pci_disable_msi(dd->pcidev);
-#endif
 }
 
 /*
@@ -452,10 +389,7 @@ void qib_nomsi(struct qib_devdata *dd)
  */
 void qib_nomsix(struct qib_devdata *dd)
 {
-#ifdef CONFIG_PCI_MSI
-	qib_cdbg(INIT, "disable device MSIx interrupts\n");
 	pci_disable_msix(dd->pcidev);
-#endif
 }
 
 /*
@@ -467,15 +401,12 @@ void qib_enable_intx(struct pci_dev *pdev)
 	u16 cw, new;
 	int pos;
 
-	qib_cdbg(INIT, "Using INTx interrupts\n");
-
 	/* first, turn on INTx */
 	pci_read_config_word(pdev, PCI_COMMAND, &cw);
 	new = cw & ~PCI_COMMAND_INTX_DISABLE;
 	if (new != cw)
 		pci_write_config_word(pdev, PCI_COMMAND, new);
 
-#ifdef CONFIG_PCI_MSI
 	pos = pci_find_capability(pdev, PCI_CAP_ID_MSI);
 	if (pos) {
 		/* then turn off MSI */
@@ -492,7 +423,6 @@ void qib_enable_intx(struct pci_dev *pdev)
 		if (new != cw)
 			pci_write_config_word(pdev, pos + PCI_MSIX_FLAGS, new);
 	}
-#endif /* CONFIG_PCI_MSI */
 }
 
 /*
@@ -580,15 +510,10 @@ static int qib_tune_pcie_coalesce(struct qib_devdata *dd)
 		return 1;
 	}
 	ppos = pci_find_capability(parent, PCI_CAP_ID_EXP);
-	if (!ppos) {
-		qib_dbg("parent not PCIe root complex!?\n");
+	if (!ppos)
 		return 1;
-	}
-	if (parent->vendor != 0x8086) {
-		qib_cdbg(VERBOSE, "VendorID 0x%x isn't Intel, skip\n",
-			 parent->vendor);
+	if (parent->vendor != 0x8086)
 		return 1;
-	}
 
 	/*
 	 *  - bit 12: Max_rdcmp_Imt_EN: need to set to 1
@@ -605,11 +530,9 @@ static int qib_tune_pcie_coalesce(struct qib_devdata *dd)
 
 		/* 5000 P/V/X/Z */
 		pci_read_config_byte(parent, PCI_REVISION_ID, &rev);
-		if (rev <= 0xb2) {
+		if (rev <= 0xb2)
 			bits = 1U << 10;
-			qib_cdbg(INIT, "Old rev 5000* (0x%x), enable-only\n",
-				 rev);
-		} else
+		else
 			bits = 7U << 10;
 		mask = (3U << 24) | (7U << 10);
 	} else if (devid >= 0x65e2 && devid <= 0x65fa) {
@@ -626,22 +549,12 @@ static int qib_tune_pcie_coalesce(struct qib_devdata *dd)
 		mask = (3U << 24) | (7U << 10);
 	} else {
 		/* not one of the chipsets that we know about */
-		qib_cdbg(VERBOSE, "DeviceID 0x%x isn't one we know, skip\n",
-			 devid);
 		return 1;
 	}
 	pci_read_config_dword(parent, 0x48, &val);
-	qib_cdbg(VERBOSE, "Read initial value 0x%x at 0x48, deviceid 0x%x\n",
-		val, devid);
 	val &= ~mask;
 	val |= bits;
 	r = pci_write_config_dword(parent, 0x48, val);
-	if (r)
-		qib_dev_err(dd, "Unable to update deviceid 0x%x to val 0x%x"
-			    " for PCIe coalescing\n", devid, val);
-	else
-		qib_dbg("Updated deviceid 0x%x to val 0x%x"
-			 " for PCIe coalescing\n", devid, val);
 	return 0;
 }
 
@@ -672,7 +585,6 @@ static int qib_tune_pcie_caps(struct qib_devdata *dd)
 	if (ppos) {
 		pci_read_config_word(parent, ppos + PCI_EXP_DEVCAP, &pcaps);
 		pci_read_config_word(parent, ppos + PCI_EXP_DEVCTL, &pctl);
-		qib_cdbg(VERBOSE, "Root caps %04X, ctl %04X\n", pcaps, pctl);
 	} else
 		goto bail;
 	/* Find out supported and configured values for endpoint (us) */
@@ -680,22 +592,17 @@ static int qib_tune_pcie_caps(struct qib_devdata *dd)
 	if (epos) {
 		pci_read_config_word(dd->pcidev, epos + PCI_EXP_DEVCAP, &ecaps);
 		pci_read_config_word(dd->pcidev, epos + PCI_EXP_DEVCTL, &ectl);
-		qib_cdbg(VERBOSE, "our caps %04X, ctl %04X\n", ecaps, ectl);
 	} else
 		goto bail;
 	ret = 0;
 	/* Find max payload supported by root, endpoint */
 	rc_sup = fld2val(pcaps, PCI_EXP_DEVCAP_PAYLOAD);
 	ep_sup = fld2val(ecaps, PCI_EXP_DEVCAP_PAYLOAD);
-	qib_cdbg(VERBOSE, "Root supports %d payload, we support %d\n",
-		(1U << (rc_sup + 7)), (1U << (ep_sup + 7)));
 	if (rc_sup > ep_sup)
 		rc_sup = ep_sup;
 
 	rc_cur = fld2val(pctl, PCI_EXP_DEVCTL_PAYLOAD);
 	ep_cur = fld2val(ectl, PCI_EXP_DEVCTL_PAYLOAD);
-	qib_cdbg(VERBOSE, "Root set to %d payload, we are %d\n",
-		 (1U << (rc_cur + 7)), (1U << (ep_cur + 7)));
 
 	/* If Supported greater than limit in module param, limit it */
 	if (rc_sup > (qib_pcie_caps & 7))
@@ -703,8 +610,6 @@ static int qib_tune_pcie_caps(struct qib_devdata *dd)
 	/* If less than (allowed, supported), bump root payload */
 	if (rc_sup > rc_cur) {
 		rc_cur = rc_sup;
-		qib_cdbg(INIT, "Increase Root to %d Payload\n",
-			 (1U << (rc_cur + 7)));
 		pctl = (pctl & ~PCI_EXP_DEVCTL_PAYLOAD) |
 			val2fld(rc_cur, PCI_EXP_DEVCTL_PAYLOAD);
 		pci_write_config_word(parent, ppos + PCI_EXP_DEVCTL, pctl);
@@ -712,8 +617,6 @@ static int qib_tune_pcie_caps(struct qib_devdata *dd)
 	/* If less than (allowed, supported), bump endpoint payload */
 	if (rc_sup > ep_cur) {
 		ep_cur = rc_sup;
-		qib_cdbg(INIT, "Increase Endpoint to %d Payload\n",
-			 (1U << (ep_cur + 7)));
 		ectl = (ectl & ~PCI_EXP_DEVCTL_PAYLOAD) |
 			val2fld(ep_cur, PCI_EXP_DEVCTL_PAYLOAD);
 		pci_write_config_word(dd->pcidev, epos + PCI_EXP_DEVCTL, ectl);
@@ -730,21 +633,14 @@ static int qib_tune_pcie_caps(struct qib_devdata *dd)
 	rc_cur = fld2val(pctl, PCI_EXP_DEVCTL_READRQ);
 	ep_cur = fld2val(ectl, PCI_EXP_DEVCTL_READRQ);
 
-	qib_cdbg(VERBOSE, "Root set to %d rdreq, we are %d\n",
-		 1U << (rc_cur + 7), 1U << (ep_cur + 7));
-
 	if (rc_sup > rc_cur) {
 		rc_cur = rc_sup;
-		qib_cdbg(INIT, "Increase Root to %d RdReq\n",
-			 (1U << (rc_cur + 7)));
 		pctl = (pctl & ~PCI_EXP_DEVCTL_READRQ) |
 			val2fld(rc_cur, PCI_EXP_DEVCTL_READRQ);
 		pci_write_config_word(parent, ppos + PCI_EXP_DEVCTL, pctl);
 	}
 	if (rc_sup > ep_cur) {
 		ep_cur = rc_sup;
-		qib_cdbg(INIT, "Increase Endpoint to %d RdReq\n",
-			 (1U << (ep_cur + 7)));
 		ectl = (ectl & ~PCI_EXP_DEVCTL_READRQ) |
 			val2fld(ep_cur, PCI_EXP_DEVCTL_READRQ);
 		pci_write_config_word(dd->pcidev, epos + PCI_EXP_DEVCTL, ectl);
@@ -830,9 +726,7 @@ qib_pci_resume(struct pci_dev *pdev)
 {
 	struct qib_devdata *dd = pci_get_drvdata(pdev);
 	qib_devinfo(pdev, "QIB resume function called\n");
-#ifdef CONFIG_PCIEAER
 	pci_cleanup_aer_uncorrect_error_status(pdev);
-#endif
 	/*
 	 * Running jobs will fail, since it's asynchronous
 	 * unlike sysfs-requested reset.   Better than

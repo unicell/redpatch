@@ -69,6 +69,7 @@
 #include <linux/kmemtrace.h>
 #include <linux/sfi.h>
 #include <linux/shmem_fs.h>
+#include <linux/perf_event.h>
 #include <trace/boot.h>
 
 #include <asm/io.h>
@@ -612,6 +613,8 @@ asmlinkage void __init start_kernel(void)
 				"enabled *very* early, fixing it\n");
 		local_irq_disable();
 	}
+	idr_init_cache();
+	perf_event_init();
 	rcu_init();
 	/* init some links before init_ISA_irqs() */
 	early_irq_init();
@@ -623,6 +626,7 @@ asmlinkage void __init start_kernel(void)
 	timekeeping_init();
 	time_init();
 	profile_init();
+	call_function_init();
 	if (!irqs_disabled())
 		printk(KERN_CRIT "start_kernel(): bug: interrupts were "
 				 "enabled early\n");
@@ -667,7 +671,6 @@ asmlinkage void __init start_kernel(void)
 	kmemtrace_init();
 	kmemleak_init();
 	debug_objects_mem_init();
-	idr_init_cache();
 	setup_per_cpu_pageset();
 	numa_policy_init();
 	if (late_time_init)
@@ -904,6 +907,7 @@ static int __init kernel_init(void * unused)
 
 	do_pre_smp_initcalls();
 	start_boot_trace();
+	lockup_detector_init();
 
 	smp_init();
 	sched_init_smp();

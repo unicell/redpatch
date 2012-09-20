@@ -174,10 +174,10 @@ static void sas_set_ex_phy(struct domain_device *dev, int phy_id,
 	switch (resp->result) {
 	case SMP_RESP_PHY_VACANT:
 		phy->phy_state = PHY_VACANT;
-		return;
+		break;
 	default:
 		phy->phy_state = PHY_NOT_PRESENT;
-		return;
+		break;
 	case SMP_RESP_FUNC_ACC:
 		phy->phy_state = PHY_EMPTY; /* do not know yet */
 		break;
@@ -208,7 +208,10 @@ static void sas_set_ex_phy(struct domain_device *dev, int phy_id,
 	phy->phy->negotiated_linkrate = phy->linkrate;
 
 	if (!rediscover)
-		sas_phy_add(phy->phy);
+		if (sas_phy_add(phy->phy)) {
+			sas_phy_free(phy->phy);
+			return;
+		}
 
 	SAS_DPRINTK("ex %016llx phy%02d:%c attached: %016llx\n",
 		    SAS_ADDR(dev->sas_addr), phy->phy_id,
@@ -1717,12 +1720,27 @@ out:
 	return res;
 }
 
+/* FIXME: delete this routine when/if sas_ata stops submitting tasks
+ * with host_lock held
+ */
+void sas_device_gone(struct domain_device *dev)
+{
+	struct sas_rphy *rphy = dev->rphy;
+	struct Scsi_Host *shost = dev_to_shost(rphy->dev.parent);
+
+	/* take the lock to synchronize against incoming sata i/o */
+	spin_lock_irq(shost->host_lock);
+	dev->gone = 1;
+	spin_unlock_irq(shost->host_lock);
+}
+
 static void sas_unregister_ex_tree(struct domain_device *dev)
 {
 	struct expander_device *ex = &dev->ex_dev;
 	struct domain_device *child, *n;
 
 	list_for_each_entry_safe(child, n, &ex->children, siblings) {
+		sas_device_gone(child);
 		if (child->dev_type == EDGE_DEV ||
 		    child->dev_type == FANOUT_DEV)
 			sas_unregister_ex_tree(child);
@@ -1743,6 +1761,7 @@ static void sas_unregister_devs_sas_addr(struct domain_device *parent,
 			&ex_dev->children, siblings) {
 			if (SAS_ADDR(child->sas_addr) ==
 			    SAS_ADDR(phy->attached_sas_addr)) {
+				sas_device_gone(child);
 				if (child->dev_type == EDGE_DEV ||
 				    child->dev_type == FANOUT_DEV)
 					sas_unregister_ex_tree(child);
@@ -1751,6 +1770,7 @@ static void sas_unregister_devs_sas_addr(struct domain_device *parent,
 				break;
 			}
 		}
+		sas_device_gone(parent);
 		sas_disable_routing(parent, phy->attached_sas_addr);
 	}
 	memset(phy->attached_sas_addr, 0, SAS_ADDR_SIZE);

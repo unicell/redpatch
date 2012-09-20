@@ -8,6 +8,8 @@
 
 #include <linux/limits.h>
 #include <linux/ioctl.h>
+#include <linux/blk_types.h>
+#include <linux/types.h>
 
 /*
  * It's silly to have NR_OPEN bigger than NR_FILE, but you can change
@@ -30,6 +32,12 @@
 #define SEEK_CUR	1	/* seek relative to current file position */
 #define SEEK_END	2	/* seek relative to end of file */
 #define SEEK_MAX	SEEK_END
+
+struct fstrim_range {
+	__u64 start;
+	__u64 len;
+	__u64 minlen;
+};
 
 /* And dynamically-tunable limits and defaults: */
 struct files_stat_struct {
@@ -120,7 +128,8 @@ struct inodes_stat_t {
  *			 block layer could (in theory) choose to ignore this
  *			request if it runs into resource problems.
  * WRITE		A normal async write. Device will be plugged.
- * SWRITE		Like WRITE, but a special case for ll_rw_block() that
+ * SWRITE		DEPRECATED; use write_dirty_buffer instead.
+ *			Like WRITE, but a special case for ll_rw_block() that
  *			tells it to lock the buffer first. Normally a buffer
  *			must be locked before doing IO.
  * WRITE_SYNC_PLUG	Synchronous write. Identical to WRITE, but passes down
@@ -134,36 +143,44 @@ struct inodes_stat_t {
  *			of READ_SYNC.
  * WRITE_ODIRECT_PLUG	Special case write for O_DIRECT only.
  * SWRITE_SYNC
- * SWRITE_SYNC_PLUG	Like WRITE_SYNC/WRITE_SYNC_PLUG, but locks the buffer.
- *			See SWRITE.
- * WRITE_BARRIER	Like WRITE, but tells the block layer that all
- *			previously submitted writes must be safely on storage
- *			before this one is started. Also guarantees that when
- *			this write is complete, it itself is also safely on
- *			storage. Prevents reordering of writes on both sides
- *			of this IO.
+ * SWRITE_SYNC_PLUG	DEPRECATED. Like WRITE_SYNC/WRITE_SYNC_PLUG, but locks
+ *			the buffer. See SWRITE.
+ * WRITE_BARRIER	DEPRECATED. Always fails. Use FLUSH/FUA instead.
+ * WRITE_FLUSH		Like WRITE_SYNC but with preceding cache flush.
+ * WRITE_FUA		Like WRITE_SYNC but data is guaranteed to be on
+ *			non-volatile media on completion.
+ * WRITE_FLUSH_FUA	Combination of WRITE_FLUSH and FUA. The IO is preceded
+ *			by a cache flush and data is guaranteed to be on
+ *			non-volatile media on completion.
  *
  */
-#define RW_MASK		1
-#define RWA_MASK	16
-#define READ 0
-#define WRITE 1
-#define READA 16	/* read-ahead  - don't block if no resources */
-#define SWRITE 17	/* for ll_rw_block() - wait for buffer lock */
+#define RW_MASK			REQ_WRITE
+#define RWA_MASK		(1 << BIO_RW_AHEAD)
+
+#define READ			0
+#define WRITE			1
+#define READA			RWA_MASK
+#define SWRITE			(WRITE | READA)
+
 #define READ_SYNC	(READ | (1 << BIO_RW_SYNCIO) | (1 << BIO_RW_UNPLUG))
 #define READ_META	(READ | (1 << BIO_RW_META))
 #define WRITE_SYNC_PLUG	(WRITE | (1 << BIO_RW_SYNCIO) | (1 << BIO_RW_NOIDLE))
 #define WRITE_SYNC	(WRITE_SYNC_PLUG | (1 << BIO_RW_UNPLUG))
 #define WRITE_ODIRECT_PLUG	(WRITE | (1 << BIO_RW_SYNCIO))
 #define WRITE_META	(WRITE | (1 << BIO_RW_META))
-#define SWRITE_SYNC_PLUG	\
+#define SWRITE_SYNC_PLUG						\
 			(SWRITE | (1 << BIO_RW_SYNCIO) | (1 << BIO_RW_NOIDLE))
 #define SWRITE_SYNC	(SWRITE_SYNC_PLUG | (1 << BIO_RW_UNPLUG))
-#define WRITE_BARRIER	(WRITE | (1 << BIO_RW_BARRIER))
+#define WRITE_BARRIER	(WRITE_SYNC | (1 << BIO_RW_BARRIER))
+
+#define WRITE_FLUSH	(WRITE_SYNC | (1 << BIO_RW_FLUSH))
+#define WRITE_FUA	(WRITE_SYNC | (1 << BIO_RW_FUA))
+#define WRITE_FLUSH_FUA	(WRITE_FLUSH | WRITE_FUA)
 
 /*
  * These aren't really reads or writes, they pass down information about
  * parts of device that are now unused by the file system.
+ * DEPRECATED but preserved for compatibility.
  */
 #define DISCARD_NOBARRIER (WRITE | (1 << BIO_RW_DISCARD))
 #define DISCARD_BARRIER (DISCARD_NOBARRIER | (1 << BIO_RW_BARRIER))
@@ -235,6 +252,7 @@ struct inodes_stat_t {
 #define S_NOCMTIME	128	/* Do not update file c/mtime */
 #define S_SWAPFILE	256	/* Do not truncate: swapon got its bmaps */
 #define S_PRIVATE	512	/* Inode is fs-internal */
+#define S_AOP_EXT	16384 /* fs supports extended aops */
 
 /*
  * Note that nosuid etc flags are inode-specific: setting some file-system
@@ -269,6 +287,7 @@ struct inodes_stat_t {
 #define IS_NOCMTIME(inode)	((inode)->i_flags & S_NOCMTIME)
 #define IS_SWAPFILE(inode)	((inode)->i_flags & S_SWAPFILE)
 #define IS_PRIVATE(inode)	((inode)->i_flags & S_PRIVATE)
+#define IS_AOP_EXT(inode)	((inode)->i_flags & S_AOP_EXT)
 
 /* the read-only stuff doesn't really belong here, but any other place is
    probably as bad and I don't want to create yet another include file. */
@@ -315,6 +334,7 @@ struct inodes_stat_t {
 #define FIGETBSZ   _IO(0x00,2)	/* get the block size used for bmap */
 #define FIFREEZE	_IOWR('X', 119, int)	/* Freeze */
 #define FITHAW		_IOWR('X', 120, int)	/* Thaw */
+#define FITRIM		_IOWR('X', 121, struct fstrim_range)	/* Trim */
 
 #define	FS_IOC_GETFLAGS			_IOR('f', 1, long)
 #define	FS_IOC_SETFLAGS			_IOW('f', 2, long)
@@ -608,6 +628,19 @@ struct address_space_operations {
 	int (*error_remove_page)(struct address_space *, struct page *);
 };
 
+struct address_space_operations_ext {
+	struct address_space_operations orig_aops;
+
+	/* if S_AOP_EXT is set then these are there */
+	void (*freepage)(struct page *);
+	void (*dummy[5]);		/* padding for ABI compatibility */
+};
+static inline struct address_space_operations_ext *
+EXT_AOPS(const struct address_space_operations *ops)
+{
+	return container_of(ops, struct address_space_operations_ext, orig_aops);
+}
+
 /*
  * pagecache_write_begin/pagecache_write_end must be used by general code
  * to write into the pagecache.
@@ -684,6 +717,7 @@ struct block_device {
  */
 #define PAGECACHE_TAG_DIRTY	0
 #define PAGECACHE_TAG_WRITEBACK	1
+#define PAGECACHE_TAG_TOWRITE	2
 
 int mapping_tagged(struct address_space *mapping, int tag);
 
@@ -872,6 +906,12 @@ static inline unsigned iminor(const struct inode *inode)
 static inline unsigned imajor(const struct inode *inode)
 {
 	return MAJOR(inode->i_rdev);
+}
+static inline void set_ext_aops(struct address_space *mapping,
+		const struct address_space_operations_ext *ops)
+{
+	mapping->a_ops = (struct address_space_operations *)ops;
+	mapping->host->i_flags |= S_AOP_EXT;
 }
 
 extern struct block_device *I_BDEV(struct inode *inode);
@@ -2066,10 +2106,10 @@ extern void check_disk_size_change(struct gendisk *disk,
 				   struct block_device *bdev);
 extern int revalidate_disk(struct gendisk *);
 extern int check_disk_change(struct block_device *);
-extern int __invalidate_device(struct block_device *);
+extern int __invalidate_device(struct block_device *, bool);
 extern int invalidate_partition(struct gendisk *, int);
 #endif
-extern int invalidate_inodes(struct super_block *);
+extern int invalidate_inodes(struct super_block *, bool);
 unsigned long invalidate_mapping_pages(struct address_space *mapping,
 					pgoff_t start, pgoff_t end);
 
@@ -2486,6 +2526,8 @@ int proc_nr_files(struct ctl_table *table, int write,
 		  void __user *buffer, size_t *lenp, loff_t *ppos);
 
 int __init get_filesystem_list(char *buf);
+
+#define OPEN_FMODE(flag) ((__force fmode_t)((flag + 1) & O_ACCMODE))
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_FS_H */

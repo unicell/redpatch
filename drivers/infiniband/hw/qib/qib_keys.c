@@ -59,7 +59,6 @@ int qib_alloc_lkey(struct qib_lkey_table *rkt, struct qib_mregion *mr)
 		r = (r + 1) & (rkt->max - 1);
 		if (r == n) {
 			spin_unlock_irqrestore(&rkt->lock, flags);
-			qib_dbg("LKEY table full\n");
 			ret = 0;
 			goto bail;
 		}
@@ -114,10 +113,8 @@ int qib_free_lkey(struct qib_ibdev *dev, struct qib_mregion *mr)
 	}
 	spin_unlock_irqrestore(&dev->lk_table.lock, flags);
 
-	if (ret) {
-		qib_dbg("MR busy (LKEY %x cnt %u)\n", lkey, ret);
+	if (ret)
 		ret = -EBUSY;
-	}
 	return ret;
 }
 
@@ -272,6 +269,59 @@ int qib_rkey_ok(struct qib_qp *qp, struct qib_sge *sge,
 	sge->n = n;
 ok:
 	ret = 1;
+bail:
+	spin_unlock_irqrestore(&rkt->lock, flags);
+	return ret;
+}
+
+/*
+ * Initialize the memory region specified by the work reqeust.
+ */
+int qib_fast_reg_mr(struct qib_qp *qp, struct ib_send_wr *wr)
+{
+	struct qib_lkey_table *rkt = &to_idev(qp->ibqp.device)->lk_table;
+	struct qib_pd *pd = to_ipd(qp->ibqp.pd);
+	struct qib_mregion *mr;
+	u32 rkey = wr->wr.fast_reg.rkey;
+	unsigned i, n, m;
+	int ret = -EINVAL;
+	unsigned long flags;
+	u64 *page_list;
+	size_t ps;
+
+	spin_lock_irqsave(&rkt->lock, flags);
+	if (pd->user || rkey == 0)
+		goto bail;
+
+	mr = rkt->table[(rkey >> (32 - ib_qib_lkey_table_size))];
+	if (unlikely(mr == NULL || qp->ibqp.pd != mr->pd))
+		goto bail;
+
+	if (wr->wr.fast_reg.page_list_len > mr->max_segs)
+		goto bail;
+
+	ps = 1UL << wr->wr.fast_reg.page_shift;
+	if (wr->wr.fast_reg.length > ps * wr->wr.fast_reg.page_list_len)
+		goto bail;
+
+	mr->user_base = wr->wr.fast_reg.iova_start;
+	mr->iova = wr->wr.fast_reg.iova_start;
+	mr->lkey = rkey;
+	mr->length = wr->wr.fast_reg.length;
+	mr->access_flags = wr->wr.fast_reg.access_flags;
+	page_list = wr->wr.fast_reg.page_list->page_list;
+	m = 0;
+	n = 0;
+	for (i = 0; i < wr->wr.fast_reg.page_list_len; i++) {
+		mr->map[m]->segs[n].vaddr = (void *) page_list[i];
+		mr->map[m]->segs[n].length = ps;
+		if (++n == QIB_SEGSZ) {
+			m++;
+			n = 0;
+		}
+	}
+
+	ret = 0;
 bail:
 	spin_unlock_irqrestore(&rkt->lock, flags);
 	return ret;

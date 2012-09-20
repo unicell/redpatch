@@ -1030,8 +1030,11 @@ nfsd4_proc_compound(struct svc_rqst *rqstp,
 	resp->cstate.session = NULL;
 	fh_init(&resp->cstate.current_fh, NFS4_FHSIZE);
 	fh_init(&resp->cstate.save_fh, NFS4_FHSIZE);
-	/* Use the deferral mechanism only for NFSv4.0 compounds */
-	rqstp->rq_usedeferral = (args->minorversion == 0);
+	/*
+	 * Don't use the deferral mechanism for NFSv4; compounds make it
+	 * too hard to avoid non-idempotency problems.
+	 */
+	rqstp->rq_usedeferral = 0;
 
 	/*
 	 * According to RFC3010, this takes precedence over all other errors.
@@ -1121,10 +1124,6 @@ encode_op:
 			fput(op->u.read.rd_filp);
 
 		nfsd4_increment_op_stats(op->opnum);
-	}
-	if (!rqstp->rq_usedeferral && status == nfserr_dropit) {
-		dprintk("%s Dropit - send NFS4ERR_DELAY\n", __func__);
-		status = nfserr_jukebox;
 	}
 
 	resp->cstate.status = status;

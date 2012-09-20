@@ -191,6 +191,7 @@ struct netif_rx_stats
 	unsigned dropped;
 	unsigned time_squeeze;
 	unsigned cpu_collision;
+	unsigned received_rps;
 };
 
 DECLARE_PER_CPU(struct netif_rx_stats, netdev_rx_stat);
@@ -364,13 +365,24 @@ enum
 	NAPI_STATE_NPSVC,	/* Netpoll - don't dequeue from poll_list */
 };
 
-enum {
+enum gro_result {
 	GRO_MERGED,
 	GRO_MERGED_FREE,
 	GRO_HELD,
 	GRO_NORMAL,
 	GRO_DROP,
 };
+/*
+ * Make gro_result_t a separate type for the sparse checker.
+ * This helps avoid confusion between napi_gro_frags{,_gr}
+ * and similar function pairs we have in RHEL.
+ */
+typedef enum gro_result __bitwise__ gro_result_t;
+#define GRO_MERGED	((__force gro_result_t) GRO_MERGED)
+#define GRO_MERGED_FREE	((__force gro_result_t) GRO_MERGED_FREE)
+#define GRO_HELD	((__force gro_result_t) GRO_HELD)
+#define GRO_NORMAL	((__force gro_result_t) GRO_NORMAL)
+#define GRO_DROP	((__force gro_result_t) GRO_DROP)
 
 extern void __napi_schedule(struct napi_struct *n);
 
@@ -501,6 +513,91 @@ struct netdev_queue {
 	unsigned long		tx_dropped;
 } ____cacheline_aligned_in_smp;
 
+/*
+ * This structure holds an RPS map which can be of variable length.  The
+ * map is an array of CPUs.
+ */
+struct rps_map {
+	unsigned int len;
+	struct rcu_head rcu;
+	u16 cpus[0];
+};
+#define RPS_MAP_SIZE(_num) (sizeof(struct rps_map) + (_num * sizeof(u16)))
+
+ /*
+  * The rps_dev_flow structure contains the mapping of a flow to a CPU and the
+  * tail pointer for that CPU's input queue at the time of last enqueue.
+  */
+struct rps_dev_flow {
+	u16 cpu;
+	u16 fill;
+	unsigned int last_qtail;
+};
+
+ /*
+  * The rps_dev_flow_table structure contains a table of flow mappings.
+  */
+struct rps_dev_flow_table {
+	unsigned int mask;
+	struct rcu_head rcu;
+	struct work_struct free_work;
+	struct rps_dev_flow flows[0];
+};
+
+#define RPS_DEV_FLOW_TABLE_SIZE(_num) (sizeof(struct rps_dev_flow_table) + \
+     (_num * sizeof(struct rps_dev_flow)))
+
+ /*
+  * The rps_sock_flow_table contains mappings of flows to the last CPU
+  * on which they were processed by the application (set in recvmsg).
+  */
+struct rps_sock_flow_table {
+	unsigned int mask;
+	u16 ents[0];
+};
+#define	RPS_SOCK_FLOW_TABLE_SIZE(_num) (sizeof(struct rps_sock_flow_table) + \
+     (_num * sizeof(u16)))
+
+#define RPS_NO_CPU 0xffff
+
+static inline void rps_record_sock_flow(struct rps_sock_flow_table *table,
+					u32 hash)
+{
+	if (table && hash) {
+		unsigned int cpu, index = hash & table->mask;
+
+		/* We only give a hint, preemption can change cpu under us */
+		cpu = raw_smp_processor_id();
+
+		if (table->ents[index] != cpu)
+			table->ents[index] = cpu;
+	}
+}
+
+static inline void rps_reset_sock_flow(struct rps_sock_flow_table *table,
+				       u32 hash)
+{
+	if (table && hash)
+		table->ents[hash & table->mask] = RPS_NO_CPU;
+}
+
+extern struct rps_sock_flow_table *rps_sock_flow_table;
+
+/* This structure contains an instance of an RX queue. */
+struct netdev_rx_queue {
+	struct rps_map *rps_map;
+	struct rps_dev_flow_table *rps_flow_table;
+	struct kobject kobj;
+	struct net_device *dev;
+} ____cacheline_aligned_in_smp;
+
+#define TC_MAX_QUEUE	16
+#define TC_BITMASK	15
+/* HW offloaded queuing disciplines txq count and offset maps */
+struct netdev_tc_txq {
+	u16 count;
+	u16 offset;
+};
 
 /*
  * This structure defines the management hooks for network devices.
@@ -962,10 +1059,73 @@ struct net_device
 	/* max exchange id for FCoE LRO by ddp */
 	unsigned int		fcoe_ddp_xid;
 #endif
+#ifndef __GENKSYMS__
+	struct kset             *queues_kset;
+
+	struct netdev_rx_queue  *_rx;
+
+	/* Number of RX queues allocated at alloc_netdev_mq() time  */
+	unsigned int            num_rx_queues;
+
+	u8 num_tc;
+	struct netdev_tc_txq tc_to_txq[TC_MAX_QUEUE];
+	u8 prio_tc_map[TC_BITMASK + 1];
+#endif
 };
 #define to_net_dev(d) container_of(d, struct net_device, dev)
 
 #define	NETDEV_ALIGN		32
+
+static inline
+int netdev_get_prio_tc_map(const struct net_device *dev, u32 prio)
+{
+	return dev->prio_tc_map[prio & TC_BITMASK];
+}
+
+static inline
+int netdev_set_prio_tc_map(struct net_device *dev, u8 prio, u8 tc)
+{
+	if (tc >= dev->num_tc)
+		return -EINVAL;
+
+	dev->prio_tc_map[prio & TC_BITMASK] = tc & TC_BITMASK;
+	return 0;
+}
+
+static inline
+void netdev_reset_tc(struct net_device *dev)
+{
+	dev->num_tc = 0;
+	memset(dev->tc_to_txq, 0, sizeof(dev->tc_to_txq));
+	memset(dev->prio_tc_map, 0, sizeof(dev->prio_tc_map));
+}
+
+static inline
+int netdev_set_tc_queue(struct net_device *dev, u8 tc, u16 count, u16 offset)
+{
+	if (tc >= dev->num_tc)
+		return -EINVAL;
+
+	dev->tc_to_txq[tc].count = count;
+	dev->tc_to_txq[tc].offset = offset;
+	return 0;
+}
+
+static inline
+int netdev_set_num_tc(struct net_device *dev, u8 num_tc)
+{
+	if (num_tc > TC_MAX_QUEUE)
+		return -EINVAL;
+
+	dev->num_tc = num_tc;
+	return 0;
+}
+
+static inline
+int netdev_get_num_tc(struct net_device *dev)
+{
+	return dev->num_tc;
+}
 
 static inline
 struct netdev_queue *netdev_get_tx_queue(const struct net_device *dev,
@@ -1261,14 +1421,23 @@ static inline int unregister_gifconf(unsigned int family)
 struct softnet_data
 {
 	struct Qdisc		*output_queue;
-	struct sk_buff_head	input_pkt_queue;
 	struct list_head	poll_list;
 	struct sk_buff		*completion_queue;
 
+	/* Elements below can be accessed between CPUs for RPS */
+	struct call_single_data	csd ____cacheline_aligned_in_smp;
+	unsigned int            input_queue_head;
+	struct sk_buff_head	input_pkt_queue;
 	struct napi_struct	backlog;
 };
 
-DECLARE_PER_CPU(struct softnet_data,softnet_data);
+static inline void incr_input_queue_head(struct softnet_data *queue)
+{
+	queue->input_queue_head++;
+}
+
+
+DECLARE_PER_CPU_ALIGNED(struct softnet_data, softnet_data);
 
 #define HAVE_NETIF_QUEUE
 
@@ -1516,18 +1685,22 @@ extern int		netif_rx_ni(struct sk_buff *skb);
 #define HAVE_NETIF_RECEIVE_SKB 1
 extern int		netif_receive_skb(struct sk_buff *skb);
 extern void		napi_gro_flush(struct napi_struct *napi);
-extern int		dev_gro_receive(struct napi_struct *napi,
+extern gro_result_t	dev_gro_receive(struct napi_struct *napi,
 					struct sk_buff *skb);
-extern int		napi_skb_finish(int ret, struct sk_buff *skb);
+extern gro_result_t	napi_skb_finish(gro_result_t ret, struct sk_buff *skb);
 extern int		napi_gro_receive(struct napi_struct *napi,
 					 struct sk_buff *skb);
+extern gro_result_t	napi_gro_receive_gr(struct napi_struct *napi,
+					    struct sk_buff *skb);
 extern void		napi_reuse_skb(struct napi_struct *napi,
 				       struct sk_buff *skb);
 extern struct sk_buff *	napi_get_frags(struct napi_struct *napi);
-extern int		napi_frags_finish(struct napi_struct *napi,
-					  struct sk_buff *skb, int ret);
+extern gro_result_t	napi_frags_finish(struct napi_struct *napi,
+					  struct sk_buff *skb,
+					  gro_result_t ret);
 extern struct sk_buff *	napi_frags_skb(struct napi_struct *napi);
 extern int		napi_gro_frags(struct napi_struct *napi);
+extern gro_result_t	napi_gro_frags_gr(struct napi_struct *napi);
 
 static inline void napi_free_frags(struct napi_struct *napi)
 {
@@ -1610,6 +1783,8 @@ extern void __netdev_watchdog_up(struct net_device *dev);
 extern void netif_carrier_on(struct net_device *dev);
 
 extern void netif_carrier_off(struct net_device *dev);
+
+extern void netif_notify_peers(struct net_device *dev);
 
 /**
  *	netif_dormant_on - mark device as dormant.
@@ -2186,7 +2361,7 @@ do {								\
 #define netif_vdbg(priv, type, dev, format, args...)		\
 ({								\
 	if (0)							\
-		netif_printk(KERN_DEBUG, dev, format, ##args);	\
+		netif_printk(priv, type, KERN_DEBUG, dev, format, ##args); \
 	0;							\
 })
 #endif

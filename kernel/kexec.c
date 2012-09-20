@@ -32,6 +32,7 @@
 #include <linux/console.h>
 #include <linux/vmalloc.h>
 #include <linux/swap.h>
+#include <linux/kmsg_dump.h>
 
 #include <asm/page.h>
 #include <asm/uaccess.h>
@@ -48,6 +49,7 @@ static unsigned char vmcoreinfo_data[VMCOREINFO_BYTES];
 u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
 size_t vmcoreinfo_size;
 size_t vmcoreinfo_max_size = sizeof(vmcoreinfo_data);
+int kexec_load_disabled;
 
 /* Location of the reserved area for the crash kernel */
 struct resource crashk_res = {
@@ -946,6 +948,9 @@ SYSCALL_DEFINE4(kexec_load, unsigned long, entry, unsigned long, nr_segments,
 	if (!capable(CAP_SYS_BOOT))
 		return -EPERM;
 
+	if (kexec_load_disabled)
+		return -EPERM;
+
 	/*
 	 * Verify we have a legal set of flags
 	 * This leaves us room for future extensions.
@@ -1075,6 +1080,9 @@ void crash_kexec(struct pt_regs *regs)
 	if (mutex_trylock(&kexec_mutex)) {
 		if (kexec_crash_image) {
 			struct pt_regs fixed_regs;
+
+			kmsg_dump(KMSG_DUMP_KEXEC);
+
 			crash_setup_regs(&fixed_regs, regs);
 			crash_save_vmcoreinfo();
 			machine_crash_shutdown(&fixed_regs);
@@ -1094,7 +1102,8 @@ size_t crash_get_memory_size(void)
 	return size;
 }
 
-static void free_reserved_phys_range(unsigned long begin, unsigned long end)
+void __weak crash_free_reserved_phys_range(unsigned long begin,
+					   unsigned long end)
 {
 	unsigned long addr;
 
@@ -1130,7 +1139,7 @@ int crash_shrink_memory(unsigned long new_size)
 	start = roundup(start, PAGE_SIZE);
 	end = roundup(start + new_size, PAGE_SIZE);
 
-	free_reserved_phys_range(end, crashk_res.end);
+	crash_free_reserved_phys_range(end, crashk_res.end);
 
 	if ((start == end) && (crashk_res.parent != NULL))
 		release_resource(&crashk_res);

@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2006, 2007, 2008, 2009 QLogic Corporation. All rights reserved.
+ * Copyright (c) 2006, 2007, 2008, 2009, 2010 QLogic Corporation.
+ * All rights reserved.
  * Copyright (c) 2003, 2004, 2005, 2006 PathScale, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -37,9 +38,13 @@
 
 #include <linux/pci.h>
 #include <linux/delay.h>
+#include <linux/firmware.h>
 
 #include "qib.h"
 #include "qib_7220.h"
+
+#define SD7220_FW_NAME "qlogic/sd7220.fw"
+MODULE_FIRMWARE(SD7220_FW_NAME);
 
 /*
  * Same as in qib_iba7220.c, but just the registers needed here.
@@ -102,6 +107,10 @@ static int qib_internal_presets(struct qib_devdata *dd);
 /* Tweak the register (CMUCTRL5) that contains the TRIMSELF controls */
 static int qib_sd_trimself(struct qib_devdata *dd, int val);
 static int epb_access(struct qib_devdata *dd, int sdnum, int claim);
+static int qib_sd7220_ib_load(struct qib_devdata *dd,
+			      const struct firmware *fw);
+static int qib_sd7220_ib_vfy(struct qib_devdata *dd,
+			     const struct firmware *fw);
 
 /*
  * Below keeps track of whether the "once per power-on" initialization has
@@ -110,10 +119,13 @@ static int epb_access(struct qib_devdata *dd, int sdnum, int claim);
  * state of the reset "pin", is no longer valid. Instead, we check for the
  * actual uC code having been loaded.
  */
-static int qib_ibsd_ucode_loaded(struct qib_pportdata *ppd)
+static int qib_ibsd_ucode_loaded(struct qib_pportdata *ppd,
+				 const struct firmware *fw)
 {
 	struct qib_devdata *dd = ppd->dd;
-	if (!dd->cspec->serdes_first_init_done && (qib_sd7220_ib_vfy(dd) > 0))
+
+	if (!dd->cspec->serdes_first_init_done &&
+	    qib_sd7220_ib_vfy(dd, fw) > 0)
 		dd->cspec->serdes_first_init_done = 1;
 	return dd->cspec->serdes_first_init_done;
 }
@@ -204,7 +216,6 @@ static int qib_resync_ibepb(struct qib_devdata *dd)
 		if (++chn == 4)
 			break;  /* Success */
 	}
-	qib_cdbg(VERBOSE, "Resync in %d tries\n", tries);
 	return (ret > 0) ? 0 : ret;
 }
 
@@ -310,9 +321,7 @@ static void qib_sd_trimdone_monitor(struct qib_devdata *dd,
 
 	/* Check/show "summary" Trim-done bit in IBCStatus */
 	val = qib_read_kreg64(dd, kr_ibcstatus);
-	if (val & (1ULL << 11))
-		qib_cdbg(VERBOSE, "IBCS TRIMDONE set (%s)\n", where);
-	else
+	if (!(val & (1ULL << 11)))
 		qib_dev_err(dd, "IBCS TRIMDONE clear (%s)\n", where);
 	/*
 	 * Do "dummy read/mod/wr" to get EPB in sane state after reset
@@ -380,21 +389,26 @@ static void qib_sd_trimdone_monitor(struct qib_devdata *dd,
  */
 int qib_sd7220_init(struct qib_devdata *dd)
 {
+	const struct firmware *fw;
 	int ret = 1; /* default to failure */
 	int first_reset, was_reset;
 
 	/* SERDES MPU reset recorded in D0 */
 	was_reset = (qib_read_kreg64(dd, kr_ibserdesctrl) & 1);
-	qib_cdbg(INIT, "IBReset %s xgxsconfig %llx\n",
-		 was_reset ? "Asserted" : "Negated", (unsigned long long)
-		 qib_read_kreg64(dd, kr_xgxs_cfg));
 	if (!was_reset) {
 		/* entered with reset not asserted, we need to do it */
 		qib_ibsd_reset(dd, 1);
 		qib_sd_trimdone_monitor(dd, "Driver-reload");
 	}
+
+	ret = request_firmware(&fw, SD7220_FW_NAME, &dd->pcidev->dev);
+	if (ret) {
+		qib_dev_err(dd, "Failed to load IB SERDES image\n");
+		goto done;
+	}
+
 	/* Substitute our deduced value for was_reset */
-	ret = qib_ibsd_ucode_loaded(dd->pport);
+	ret = qib_ibsd_ucode_loaded(dd->pport, fw);
 	if (ret < 0)
 		goto bail;
 
@@ -443,14 +457,13 @@ int qib_sd7220_init(struct qib_devdata *dd)
 		int vfy;
 		int trim_done;
 
-		qib_dbg("SerDes uC was reset, reloading PRAM\n");
-		ret = qib_sd7220_ib_load(dd);
+		ret = qib_sd7220_ib_load(dd, fw);
 		if (ret < 0) {
 			qib_dev_err(dd, "Failed to load IB SERDES image\n");
 			goto bail;
 		} else {
 			/* Loaded image, try to verify */
-			vfy = qib_sd7220_ib_vfy(dd);
+			vfy = qib_sd7220_ib_vfy(dd, fw);
 			if (vfy != ret) {
 				qib_dev_err(dd, "SERDES PRAM VFY failed\n");
 				goto bail;
@@ -513,6 +526,8 @@ bail:
 done:
 	/* start relock timer regardless, but start at 1 second */
 	set_7220_relock_poll(dd, -1);
+
+	release_firmware(fw);
 	return ret;
 }
 
@@ -760,9 +775,6 @@ static int qib_sd7220_ram_xfer(struct qib_devdata *dd, int sdnum, u32 loc,
 	owned = epb_access(dd, sdnum, 1);
 	if (owned < 0) {
 		spin_unlock_irqrestore(&dd->cspec->sdepb_lock, flags);
-		qib_dbg("Could not get %s access to %s EPB: %X, loc %X\n",
-			op, (sdnum == IB_7220_SERDES) ? "IB" : "PCIe",
-			owned, loc);
 		return -1;
 	}
 
@@ -782,9 +794,7 @@ static int qib_sd7220_ram_xfer(struct qib_devdata *dd, int sdnum, u32 loc,
 	}
 
 	sofar = 0;
-	if (tries <= 0)
-		qib_dbg("No initial RDY on EPB access request\n");
-	else {
+	if (tries > 0) {
 		/*
 		 * Every "memory" access is doubly-indirect.
 		 * We set two bytes of address, then read/write
@@ -795,8 +805,6 @@ static int qib_sd7220_ram_xfer(struct qib_devdata *dd, int sdnum, u32 loc,
 		transval = csbit | EPB_UC_CTL |
 			(rd_notwr ? EPB_ROM_R : EPB_ROM_W);
 		tries = epb_trans(dd, trans, transval, &transval);
-		if (tries <= 0)
-			qib_dbg("No EPB response to uC %s cmd\n", op);
 		while (tries > 0 && sofar < cnt) {
 			if (!sofar) {
 				/* Only set address at start of chunk */
@@ -804,18 +812,14 @@ static int qib_sd7220_ram_xfer(struct qib_devdata *dd, int sdnum, u32 loc,
 				transval = csbit | EPB_MADDRH | addrbyte;
 				tries = epb_trans(dd, trans, transval,
 						  &transval);
-				if (tries <= 0) {
-					qib_dbg("No EPB response ADDRH\n");
+				if (tries <= 0)
 					break;
-				}
 				addrbyte = (addr + sofar) & 0xFF;
 				transval = csbit | EPB_MADDRL | addrbyte;
 				tries = epb_trans(dd, trans, transval,
 						 &transval);
-				if (tries <= 0) {
-					qib_dbg("No EPB response ADDRL\n");
+				if (tries <= 0)
 					break;
-				}
 			}
 
 			if (rd_notwr)
@@ -823,10 +827,8 @@ static int qib_sd7220_ram_xfer(struct qib_devdata *dd, int sdnum, u32 loc,
 			else
 				transval = csbit | EPB_ROMDATA | buf[sofar];
 			tries = epb_trans(dd, trans, transval, &transval);
-			if (tries <= 0) {
-				qib_dbg("No EPB response DATA\n");
+			if (tries <= 0)
 				break;
-			}
 			if (rd_notwr)
 				buf[sofar] = transval & EPB_DATA_MASK;
 			++sofar;
@@ -834,8 +836,6 @@ static int qib_sd7220_ram_xfer(struct qib_devdata *dd, int sdnum, u32 loc,
 		/* Finally, clear control-bit for Read or Write */
 		transval = csbit | EPB_UC_CTL;
 		tries = epb_trans(dd, trans, transval, &transval);
-		if (tries <= 0)
-			qib_dbg("No EPB response to drop of uC %s cmd\n", op);
 	}
 
 	ret = sofar;
@@ -844,17 +844,15 @@ static int qib_sd7220_ram_xfer(struct qib_devdata *dd, int sdnum, u32 loc,
 		ret = -1;
 
 	spin_unlock_irqrestore(&dd->cspec->sdepb_lock, flags);
-	if (tries <= 0) {
-		qib_dbg("SERDES PRAM %s failed after %d bytes\n", op, sofar);
+	if (tries <= 0)
 		ret = -1;
-	}
 	return ret;
 }
 
 #define PROG_CHUNK 64
 
-int qib_sd7220_prog_ld(struct qib_devdata *dd, int sdnum,
-		       u8 *img, int len, int offset)
+static int qib_sd7220_prog_ld(struct qib_devdata *dd, int sdnum,
+			      const u8 *img, int len, int offset)
 {
 	int cnt, sofar, req;
 
@@ -864,7 +862,7 @@ int qib_sd7220_prog_ld(struct qib_devdata *dd, int sdnum,
 		if (req > PROG_CHUNK)
 			req = PROG_CHUNK;
 		cnt = qib_sd7220_ram_xfer(dd, sdnum, offset + sofar,
-					  img + sofar, req, 0);
+					  (u8 *)img + sofar, req, 0);
 		if (cnt < req) {
 			sofar = -1;
 			break;
@@ -877,8 +875,8 @@ int qib_sd7220_prog_ld(struct qib_devdata *dd, int sdnum,
 #define VFY_CHUNK 64
 #define SD_PRAM_ERROR_LIMIT 42
 
-int qib_sd7220_prog_vfy(struct qib_devdata *dd, int sdnum,
-			const u8 *img, int len, int offset)
+static int qib_sd7220_prog_vfy(struct qib_devdata *dd, int sdnum,
+			       const u8 *img, int len, int offset)
 {
 	int cnt, sofar, req, idx, errors;
 	unsigned char readback[VFY_CHUNK];
@@ -905,6 +903,18 @@ int qib_sd7220_prog_vfy(struct qib_devdata *dd, int sdnum,
 	return errors ? -errors : sofar;
 }
 
+static int
+qib_sd7220_ib_load(struct qib_devdata *dd, const struct firmware *fw)
+{
+	return qib_sd7220_prog_ld(dd, IB_7220_SERDES, fw->data, fw->size, 0);
+}
+
+static int
+qib_sd7220_ib_vfy(struct qib_devdata *dd, const struct firmware *fw)
+{
+	return qib_sd7220_prog_vfy(dd, IB_7220_SERDES, fw->data, fw->size, 0);
+}
+
 /*
  * IRQ not set up at this point in init, so we poll.
  */
@@ -924,7 +934,6 @@ static int qib_sd_trimdone_poll(struct qib_devdata *dd)
 	for (trim_tmo = 0; trim_tmo < TRIM_TMO; ++trim_tmo) {
 		val = qib_read_kreg64(dd, kr_ibcstatus);
 		if (val & IB_SERDES_TRIM_DONE) {
-			qib_cdbg(VERBOSE, "TRIMDONE after %d\n", trim_tmo);
 			ret = 1;
 			break;
 		}
@@ -1365,12 +1374,8 @@ void toggle_7220_rclkrls(struct qib_devdata *dd)
  */
 void shutdown_7220_relock_poll(struct qib_devdata *dd)
 {
-	struct qib_relock *irp = &dd->cspec->relock_st;
-
-	if (atomic_read(&irp->relock_timer_active)) {
-		del_timer_sync(&irp->relock_timer);
-		atomic_set(&irp->relock_timer_active, 0);
-	}
+	if (dd->cspec->relock_timer_active)
+		del_timer_sync(&dd->cspec->relock_timer);
 }
 
 static unsigned qib_relock_by_timer = 1;
@@ -1382,7 +1387,7 @@ static void qib_run_relock(unsigned long opaque)
 {
 	struct qib_devdata *dd = (struct qib_devdata *)opaque;
 	struct qib_pportdata *ppd = dd->pport;
-	struct qib_relock *irp = &dd->cspec->relock_st;
+	struct qib_chip_specific *cs = dd->cspec;
 	int timeoff;
 
 	/*
@@ -1395,48 +1400,48 @@ static void qib_run_relock(unsigned long opaque)
 	    (QIBL_IB_AUTONEG_INPROG | QIBL_LINKINIT | QIBL_LINKARMED |
 	     QIBL_LINKACTIVE))) {
 		if (qib_relock_by_timer) {
-			if (!(ppd->lflags & QIBL_IB_LINK_DISABLED)) {
-				qib_cdbg(VERBOSE, "RELOCK\n");
+			if (!(ppd->lflags & QIBL_IB_LINK_DISABLED))
 				toggle_7220_rclkrls(dd);
-			}
 		}
 		/* re-set timer for next check */
-		timeoff = irp->relock_interval << 1;
+		timeoff = cs->relock_interval << 1;
 		if (timeoff > HZ)
 			timeoff = HZ;
-		irp->relock_interval = timeoff;
+		cs->relock_interval = timeoff;
 	} else
 		timeoff = HZ;
-	mod_timer(&irp->relock_timer, jiffies + timeoff);
+	mod_timer(&cs->relock_timer, jiffies + timeoff);
 }
 
 void set_7220_relock_poll(struct qib_devdata *dd, int ibup)
 {
-	struct qib_relock *irp = &dd->cspec->relock_st;
+	struct qib_chip_specific *cs = dd->cspec;
 
-	if (ibup > 0) {
+	if (ibup) {
 		/* We are now up, relax timer to 1 second interval */
-		if (atomic_read(&irp->relock_timer_active))
-			mod_timer(&irp->relock_timer, jiffies + HZ);
+		if (cs->relock_timer_active) {
+			cs->relock_interval = HZ;
+			mod_timer(&cs->relock_timer, jiffies + HZ);
+		}
 	} else {
 		/* Transition to down, (re-)set timer to short interval. */
-		int timeout;
+		unsigned int timeout;
 
-		timeout = (HZ * ((ibup == -1) ? 1000 : RELOCK_FIRST_MS)) / 1000;
+		timeout = msecs_to_jiffies(RELOCK_FIRST_MS);
 		if (timeout == 0)
 			timeout = 1;
 		/* If timer has not yet been started, do so. */
-		if (atomic_inc_return(&irp->relock_timer_active) == 1) {
-			init_timer(&irp->relock_timer);
-			irp->relock_timer.function = qib_run_relock;
-			irp->relock_timer.data = (unsigned long) dd;
-			irp->relock_interval = timeout;
-			irp->relock_timer.expires = jiffies + timeout;
-			add_timer(&irp->relock_timer);
+		if (!cs->relock_timer_active) {
+			cs->relock_timer_active = 1;
+			init_timer(&cs->relock_timer);
+			cs->relock_timer.function = qib_run_relock;
+			cs->relock_timer.data = (unsigned long) dd;
+			cs->relock_interval = timeout;
+			cs->relock_timer.expires = jiffies + timeout;
+			add_timer(&cs->relock_timer);
 		} else {
-			irp->relock_interval = timeout;
-			mod_timer(&irp->relock_timer, jiffies + timeout);
-			atomic_dec(&irp->relock_timer_active);
+			cs->relock_interval = timeout;
+			mod_timer(&cs->relock_timer, jiffies + timeout);
 		}
 	}
 }

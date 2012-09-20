@@ -30,12 +30,12 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/sysrq.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/screen_info.h>
+#include <linux/vga_switcheroo.h>
 
 #include "drmP.h"
 #include "drm.h"
@@ -152,44 +152,6 @@ static void nouveau_fbcon_gamma_get(struct drm_crtc *crtc, u16 *red, u16 *green,
 	*blue = nv_crtc->lut.b[regno];
 }
 
-#if defined(__i386__) || defined(__x86_64__)
-static bool
-nouveau_fbcon_has_vesafb_or_efifb(struct drm_device *dev)
-{
-	struct pci_dev *pdev = dev->pdev;
-	int ramin;
-
-	if (screen_info.orig_video_isVGA != VIDEO_TYPE_VLFB &&
-	    screen_info.orig_video_isVGA != VIDEO_TYPE_EFI)
-		return false;
-
-	if (screen_info.lfb_base < pci_resource_start(pdev, 1))
-		goto not_fb;
-
-	if (screen_info.lfb_base + screen_info.lfb_size >=
-	    pci_resource_start(pdev, 1) + pci_resource_len(pdev, 1))
-		goto not_fb;
-
-	return true;
-not_fb:
-	ramin = 2;
-	if (pci_resource_len(pdev, ramin) == 0) {
-		ramin = 3;
-		if (pci_resource_len(pdev, ramin) == 0)
-			return false;
-	}
-
-	if (screen_info.lfb_base < pci_resource_start(pdev, ramin))
-		return false;
-
-	if (screen_info.lfb_base + screen_info.lfb_size >=
-	    pci_resource_start(pdev, ramin) + pci_resource_len(pdev, ramin))
-		return false;
-
-	return true;
-}
-#endif
-
 static void
 nouveau_fbcon_zfill(struct drm_device *dev, struct nouveau_fbdev *nfbdev)
 {
@@ -219,7 +181,8 @@ nouveau_fbcon_create(struct nouveau_fbdev *nfbdev,
 	struct nouveau_framebuffer *nouveau_fb;
 	struct nouveau_bo *nvbo;
 	struct drm_mode_fb_cmd mode_cmd;
-	struct device *device = &dev->pdev->dev;
+	struct pci_dev *pdev = dev->pdev;
+	struct device *device = &pdev->dev;
 	int size, ret;
 
 	mode_cmd.width = sizes->surface_width;
@@ -300,29 +263,12 @@ nouveau_fbcon_create(struct nouveau_fbdev *nfbdev,
 	drm_fb_helper_fill_var(info, &nfbdev->helper, sizes->fb_width, sizes->fb_height);
 
 	/* FIXME: we really shouldn't expose mmio space at all */
-	info->fix.mmio_start = pci_resource_start(dev->pdev, 1);
-	info->fix.mmio_len = pci_resource_len(dev->pdev, 1);
+	info->fix.mmio_start = pci_resource_start(pdev, 1);
+	info->fix.mmio_len = pci_resource_len(pdev, 1);
 
 	/* Set aperture base/size for vesafb takeover */
-#if defined(__i386__) || defined(__x86_64__)
-	if (nouveau_fbcon_has_vesafb_or_efifb(dev)) {
-		/* Some NVIDIA VBIOS' are stupid and decide to put the
-		 * framebuffer in the middle of the PRAMIN BAR for
-		 * whatever reason.  We need to know the exact lfb_base
-		 * to get vesafb kicked off, and the only reliable way
-		 * we have left is to find out lfb_base the same way
-		 * vesafb did.
-		 */
-		info->aperture_base = screen_info.lfb_base;
-		info->aperture_size = screen_info.lfb_size;
-		if (screen_info.orig_video_isVGA == VIDEO_TYPE_VLFB)
-			info->aperture_size *= 65536;
-	} else
-#endif
-	{
-		info->aperture_base = info->fix.mmio_start;
-		info->aperture_size = info->fix.mmio_len;
-	}
+	info->aperture_base = dev_priv->apertures->ranges[1].base;
+	info->aperture_size = dev_priv->apertures->ranges[1].size;
 
 	info->pixmap.size = 64*1024;
 	info->pixmap.buf_align = 8;
@@ -332,6 +278,8 @@ nouveau_fbcon_create(struct nouveau_fbdev *nfbdev,
 
 	if (dev_priv->channel && !nouveau_nofbaccel) {
 		switch (dev_priv->card_type) {
+		case NV_C0:
+			break;
 		case NV_50:
 			nv50_fbcon_accel_init(info);
 			info->fbops = &nv50_fbcon_ops;
@@ -352,6 +300,7 @@ nouveau_fbcon_create(struct nouveau_fbdev *nfbdev,
 						nvbo->bo.offset, nvbo);
 
 	mutex_unlock(&dev->struct_mutex);
+	vga_switcheroo_client_fb_set(dev->pdev, info);
 	return 0;
 
 out_unref:
@@ -384,7 +333,7 @@ nouveau_fbcon_output_poll_changed(struct drm_device *dev)
 	drm_fb_helper_hotplug_event(&dev_priv->nfbdev->helper);
 }
 
-int
+static int
 nouveau_fbcon_destroy(struct drm_device *dev, struct nouveau_fbdev *nfbdev)
 {
 	struct nouveau_framebuffer *nouveau_fb = &nfbdev->nouveau_fb;
@@ -400,10 +349,8 @@ nouveau_fbcon_destroy(struct drm_device *dev, struct nouveau_fbdev *nfbdev)
 
 	if (nouveau_fb->nvbo) {
 		nouveau_bo_unmap(nouveau_fb->nvbo);
-		mutex_lock(&dev->struct_mutex);
-		drm_gem_object_unreference(nouveau_fb->nvbo->gem);
+		drm_gem_object_unreference_unlocked(nouveau_fb->nvbo->gem);
 		nouveau_fb->nvbo = NULL;
-		mutex_unlock(&dev->struct_mutex);
 	}
 	drm_fb_helper_fini(&nfbdev->helper);
 	drm_framebuffer_cleanup(&nouveau_fb->base);
@@ -430,6 +377,7 @@ int nouveau_fbcon_init(struct drm_device *dev)
 {
 	struct drm_nouveau_private *dev_priv = dev->dev_private;
 	struct nouveau_fbdev *nfbdev;
+	int ret;
 
 	nfbdev = kzalloc(sizeof(struct nouveau_fbdev), GFP_KERNEL);
 	if (!nfbdev)
@@ -439,7 +387,13 @@ int nouveau_fbcon_init(struct drm_device *dev)
 	dev_priv->nfbdev = nfbdev;
 	nfbdev->helper.funcs = &nouveau_fbcon_helper_funcs;
 
-	drm_fb_helper_init(dev, &nfbdev->helper, nv_two_heads(dev) ? 2 : 1, 4);
+	ret = drm_fb_helper_init(dev, &nfbdev->helper,
+				 nv_two_heads(dev) ? 2 : 1, 4);
+	if (ret) {
+		kfree(nfbdev);
+		return ret;
+	}
+
 	drm_fb_helper_single_add_all_connectors(&nfbdev->helper);
 	drm_fb_helper_initial_config(&nfbdev->helper, 32);
 	return 0;

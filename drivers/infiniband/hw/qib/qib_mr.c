@@ -107,6 +107,7 @@ static struct qib_mr *alloc_mr(int count, struct qib_lkey_table *lk_table)
 			goto bail;
 	}
 	mr->mr.mapsz = m;
+	mr->mr.max_segs = count;
 
 	/*
 	 * ib_reg_phys_mr() will initialize mr->ibmr except for
@@ -159,7 +160,6 @@ struct ib_mr *qib_reg_phys_mr(struct ib_pd *pd,
 	mr->mr.length = 0;
 	mr->mr.offset = 0;
 	mr->mr.access_flags = acc;
-	mr->mr.max_segs = num_phys_buf;
 	mr->umem = NULL;
 
 	m = 0;
@@ -229,7 +229,6 @@ struct ib_mr *qib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mr->mr.length = length;
 	mr->mr.offset = umem->offset;
 	mr->mr.access_flags = mr_access_flags;
-	mr->mr.max_segs = n;
 	mr->umem = umem;
 
 	m = 0;
@@ -285,6 +284,61 @@ int qib_dereg_mr(struct ib_mr *ibmr)
 		ib_umem_release(mr->umem);
 	kfree(mr);
 	return 0;
+}
+
+/*
+ * Allocate a memory region usable with the
+ * IB_WR_FAST_REG_MR send work request.
+ *
+ * Return the memory region on success, otherwise return an errno.
+ */
+struct ib_mr *qib_alloc_fast_reg_mr(struct ib_pd *pd, int max_page_list_len)
+{
+	struct qib_mr *mr;
+
+	mr = alloc_mr(max_page_list_len, &to_idev(pd->device)->lk_table);
+	if (mr == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	mr->mr.pd = pd;
+	mr->mr.user_base = 0;
+	mr->mr.iova = 0;
+	mr->mr.length = 0;
+	mr->mr.offset = 0;
+	mr->mr.access_flags = 0;
+	mr->umem = NULL;
+
+	return &mr->ibmr;
+}
+
+struct ib_fast_reg_page_list *
+qib_alloc_fast_reg_page_list(struct ib_device *ibdev, int page_list_len)
+{
+	unsigned size = page_list_len * sizeof(u64);
+	struct ib_fast_reg_page_list *pl;
+
+	if (size > PAGE_SIZE)
+		return ERR_PTR(-EINVAL);
+
+	pl = kmalloc(sizeof *pl, GFP_KERNEL);
+	if (!pl)
+		return ERR_PTR(-ENOMEM);
+
+	pl->page_list = kmalloc(size, GFP_KERNEL);
+	if (!pl->page_list)
+		goto err_free;
+
+	return pl;
+
+err_free:
+	kfree(pl);
+	return ERR_PTR(-ENOMEM);
+}
+
+void qib_free_fast_reg_page_list(struct ib_fast_reg_page_list *pl)
+{
+	kfree(pl->page_list);
+	kfree(pl);
 }
 
 /**
@@ -372,11 +426,8 @@ int qib_map_phys_fmr(struct ib_fmr *ibfmr, u64 *page_list,
 	u32 ps;
 	int ret;
 
-	if (atomic_read(&fmr->mr.refcount)) {
-		qib_dbg("FMR modified when busy (LKEY %x cnt %u)\n",
-			fmr->mr.lkey, atomic_read(&fmr->mr.refcount));
+	if (atomic_read(&fmr->mr.refcount))
 		return -EBUSY;
-	}
 
 	if (list_len > fmr->mr.max_segs) {
 		ret = -EINVAL;
@@ -420,9 +471,6 @@ int qib_unmap_fmr(struct list_head *fmr_list)
 	list_for_each_entry(fmr, fmr_list, ibfmr.list) {
 		rkt = &to_idev(fmr->ibfmr.device)->lk_table;
 		spin_lock_irqsave(&rkt->lock, flags);
-		if (atomic_read(&fmr->mr.refcount))
-			qib_dbg("FMR busy (LKEY %x cnt %u)\n",
-				fmr->mr.lkey, atomic_read(&fmr->mr.refcount));
 		fmr->mr.user_base = 0;
 		fmr->mr.iova = 0;
 		fmr->mr.length = 0;

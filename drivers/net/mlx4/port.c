@@ -111,6 +111,12 @@ int mlx4_register_mac(struct mlx4_dev *dev, u8 port, u64 mac, int *index)
 			goto out;
 		}
 	}
+
+	if (free < 0) {
+		err = -ENOMEM;
+		goto out;
+	}
+
 	mlx4_dbg(dev, "Free MAC index is %d\n", free);
 
 	if (table->total == table->max) {
@@ -191,7 +197,7 @@ int mlx4_find_cached_vlan(struct mlx4_dev *dev, u8 port, u16 vid, int *idx)
 		if (table->refs[i] &&
 		    (vid == (MLX4_VLAN_MASK &
 			      be32_to_cpu(table->entries[i])))) {
-			/* Vlan already registered, increase refernce count */
+			/* VLAN already registered, increase reference count */
 			*idx = i;
 			return 0;
 		}
@@ -222,6 +228,11 @@ int mlx4_register_vlan(struct mlx4_dev *dev, u8 port, u16 vlan, int *index)
 			++table->refs[i];
 			goto out;
 		}
+	}
+
+	if (free < 0) {
+		err = -ENOMEM;
+		goto out;
 	}
 
 	if (table->total == table->max) {
@@ -318,7 +329,7 @@ int mlx4_SET_PORT(struct mlx4_dev *dev, u8 port)
 	struct mlx4_cmd_mailbox *mailbox;
 	int err;
 
-	if (dev->caps.port_type[port] != MLX4_PORT_TYPE_IB)
+	if (dev->caps.port_type[port] == MLX4_PORT_TYPE_ETH)
 		return 0;
 
 	mailbox = mlx4_alloc_cmd_mailbox(dev);

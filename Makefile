@@ -4,7 +4,7 @@ SUBLEVEL = 32
 EXTRAVERSION =
 NAME = Man-Eating Seals of Antiquity
 RHEL_MAJOR = 6
-RHEL_MINOR = 0
+RHEL_MINOR = 1
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
@@ -368,7 +368,10 @@ CPP_VERS        := $(shell expr $(CPP_MAJOR) \* 1000000 + $(CPP_MINOR) \* 1000 \
 # gcc version 4.4.4 .
 ifeq ($(KBUILD_EXTMOD),)
 KBUILD_CFLAGS   += $(shell if [ $(CPP_VERS) -ge 4004004 ]; then \
-		   echo "-Wno-array-bounds -Werror"; else echo ""; fi)
+		   echo "-Wno-array-bounds"; else echo ""; fi)
+# enable -Werror on RHEL6 only for in tree modules
+KBUILD_CFLAGS   += $(shell if [ ! -z "$(shell cat /etc/redhat-release |grep Santiago)" ] ; then \
+		   echo "-Werror"; else echo ""; fi)
 endif ##($(KBUILD_EXTMOD),)
 endif #(,$(filter $(ARCH), i386 x86_64))
 
@@ -431,7 +434,7 @@ endif
 no-dot-config-targets := clean mrproper distclean \
 			 cscope TAGS tags help %docs check% \
 			 include/linux/version.h headers_% \
-			 kernelrelease kernelversion
+			 kernelrelease kernelversion %src-pkg
 
 config-targets := 0
 mixed-targets  := 0
@@ -579,9 +582,9 @@ KBUILD_CFLAGS	+= -pg
 endif
 
 # We trigger additional mismatches with less inlining
-ifdef CONFIG_DEBUG_SECTION_MISMATCH
-KBUILD_CFLAGS += $(call cc-option, -fno-inline-functions-called-once)
-endif
+#ifdef CONFIG_DEBUG_SECTION_MISMATCH
+#KBUILD_CFLAGS += $(call cc-option, -fno-inline-functions-called-once)
+#endif
 
 # arch Makefile may override CC so keep this after arch Makefile is included
 NOSTDINC_FLAGS += -nostdinc -isystem $(shell $(CC) -print-file-name=include)

@@ -5,10 +5,12 @@
 #include <linux/virtio.h>
 #include <linux/virtio_blk.h>
 #include <linux/scatterlist.h>
+#include <linux/string_helpers.h>
 
 #define PART_BITS 4
 
 static int major, index;
+struct workqueue_struct *virtblk_wq;
 
 struct virtio_blk
 {
@@ -24,6 +26,9 @@ struct virtio_blk
 	struct list_head reqs;
 
 	mempool_t *pool;
+
+	/* Process context for config space updates */
+	struct work_struct config_work;
 
 	/* What host tells us, plus 2 for header & tailer. */
 	unsigned int sg_elems;
@@ -64,7 +69,7 @@ static void blk_done(struct virtqueue *vq)
 			break;
 		}
 
-		if (blk_pc_request(vbr->req)) {
+		if (vbr->req->cmd_type == REQ_TYPE_BLOCK_PC) {
 			vbr->req->resid_len = vbr->in_hdr.residual;
 			vbr->req->sense_len = vbr->in_hdr.sense_len;
 			vbr->req->errors = vbr->in_hdr.errors;
@@ -91,32 +96,27 @@ static bool do_req(struct request_queue *q, struct virtio_blk *vblk,
 		return false;
 
 	vbr->req = req;
-	switch (req->cmd_type) {
-	case REQ_TYPE_FS:
-		vbr->out_hdr.type = 0;
-		vbr->out_hdr.sector = blk_rq_pos(vbr->req);
-		vbr->out_hdr.ioprio = req_get_ioprio(vbr->req);
-		break;
-	case REQ_TYPE_BLOCK_PC:
-		vbr->out_hdr.type = VIRTIO_BLK_T_SCSI_CMD;
+	if (req->cmd_flags & REQ_FLUSH) {
+		vbr->out_hdr.type = VIRTIO_BLK_T_FLUSH;
 		vbr->out_hdr.sector = 0;
 		vbr->out_hdr.ioprio = req_get_ioprio(vbr->req);
-		break;
-	case REQ_TYPE_LINUX_BLOCK:
-		if (req->cmd[0] == REQ_LB_OP_FLUSH) {
-			vbr->out_hdr.type = VIRTIO_BLK_T_FLUSH;
+	} else {
+		switch (req->cmd_type) {
+		case REQ_TYPE_FS:
+			vbr->out_hdr.type = 0;
+			vbr->out_hdr.sector = blk_rq_pos(vbr->req);
+			vbr->out_hdr.ioprio = req_get_ioprio(vbr->req);
+			break;
+		case REQ_TYPE_BLOCK_PC:
+			vbr->out_hdr.type = VIRTIO_BLK_T_SCSI_CMD;
 			vbr->out_hdr.sector = 0;
 			vbr->out_hdr.ioprio = req_get_ioprio(vbr->req);
 			break;
+		default:
+			/* We don't put anything else in the queue. */
+			BUG();
 		}
-		/*FALLTHRU*/
-	default:
-		/* We don't put anything else in the queue. */
-		BUG();
 	}
-
-	if (blk_barrier_rq(vbr->req))
-		vbr->out_hdr.type |= VIRTIO_BLK_T_BARRIER;
 
 	sg_set_buf(&vblk->sg[out++], &vbr->out_hdr, sizeof(vbr->out_hdr));
 
@@ -126,12 +126,12 @@ static bool do_req(struct request_queue *q, struct virtio_blk *vblk,
 	 * block, and before the normal inhdr we put the sense data and the
 	 * inhdr with additional status information before the normal inhdr.
 	 */
-	if (blk_pc_request(vbr->req))
+	if (vbr->req->cmd_type == REQ_TYPE_BLOCK_PC)
 		sg_set_buf(&vblk->sg[out++], vbr->req->cmd, vbr->req->cmd_len);
 
 	num = blk_rq_map_sg(q, vbr->req, vblk->sg + out);
 
-	if (blk_pc_request(vbr->req)) {
+	if (vbr->req->cmd_type == REQ_TYPE_BLOCK_PC) {
 		sg_set_buf(&vblk->sg[num + out + in++], vbr->req->sense, 96);
 		sg_set_buf(&vblk->sg[num + out + in++], &vbr->in_hdr,
 			   sizeof(vbr->in_hdr));
@@ -180,12 +180,6 @@ static void do_virtblk_request(struct request_queue *q)
 
 	if (issued)
 		virtqueue_kick(vblk->vq);
-}
-
-static void virtblk_prepare_flush(struct request_queue *q, struct request *req)
-{
-	req->cmd_type = REQ_TYPE_LINUX_BLOCK;
-	req->cmd[0] = REQ_LB_OP_FLUSH;
 }
 
 static int virtblk_ioctl(struct block_device *bdev, fmode_t mode,
@@ -240,6 +234,46 @@ static int index_to_minor(int index)
 	return index << PART_BITS;
 }
 
+static void virtblk_config_changed_work(struct work_struct *work)
+{
+	struct virtio_blk *vblk =
+		container_of(work, struct virtio_blk, config_work);
+	struct virtio_device *vdev = vblk->vdev;
+	struct request_queue *q = vblk->disk->queue;
+	char cap_str_2[10], cap_str_10[10];
+	u64 capacity, size;
+
+	/* Host must always specify the capacity. */
+	vdev->config->get(vdev, offsetof(struct virtio_blk_config, capacity),
+			  &capacity, sizeof(capacity));
+
+	/* If capacity is too big, truncate with warning. */
+	if ((sector_t)capacity != capacity) {
+		dev_warn(&vdev->dev, "Capacity %llu too large: truncating\n",
+			 (unsigned long long)capacity);
+		capacity = (sector_t)-1;
+	}
+
+	size = capacity * queue_logical_block_size(q);
+	string_get_size(size, STRING_UNITS_2, cap_str_2, sizeof(cap_str_2));
+	string_get_size(size, STRING_UNITS_10, cap_str_10, sizeof(cap_str_10));
+
+	dev_notice(&vdev->dev,
+		  "new size: %llu %d-byte logical blocks (%s/%s)\n",
+		  (unsigned long long)capacity,
+		  queue_logical_block_size(q),
+		  cap_str_10, cap_str_2);
+
+	set_capacity(vblk->disk, capacity);
+}
+
+static void virtblk_config_changed(struct virtio_device *vdev)
+{
+	struct virtio_blk *vblk = vdev->priv;
+
+	queue_work(virtblk_wq, &vblk->config_work);
+}
+
 static int __devinit virtblk_probe(struct virtio_device *vdev)
 {
 	struct virtio_blk *vblk;
@@ -274,6 +308,7 @@ static int __devinit virtblk_probe(struct virtio_device *vdev)
 	vblk->vdev = vdev;
 	vblk->sg_elems = sg_elems;
 	sg_init_table(vblk->sg, vblk->sg_elems);
+	INIT_WORK(&vblk->config_work, virtblk_config_changed_work);
 
 	/* We expect one virtqueue, for output. */
 	vblk->vq = virtio_find_single_vq(vdev, blk_done, "requests");
@@ -323,32 +358,9 @@ static int __devinit virtblk_probe(struct virtio_device *vdev)
 	vblk->disk->driverfs_dev = &vdev->dev;
 	index++;
 
-	if (virtio_has_feature(vdev, VIRTIO_BLK_F_FLUSH)) {
-		/*
-		 * If the FLUSH feature is supported we do have support for
-		 * flushing a volatile write cache on the host.  Use that
-		 * to implement write barrier support.
-		 */
-		blk_queue_ordered(q, QUEUE_ORDERED_DRAIN_FLUSH,
-				  virtblk_prepare_flush);
-	} else if (virtio_has_feature(vdev, VIRTIO_BLK_F_BARRIER)) {
-		/*
-		 * If the BARRIER feature is supported the host expects us
-		 * to order request by tags.  This implies there is not
-		 * volatile write cache on the host, and that the host
-		 * never re-orders outstanding I/O.  This feature is not
-		 * useful for real life scenarious and deprecated.
-		 */
-		blk_queue_ordered(q, QUEUE_ORDERED_TAG, NULL);
-	} else {
-		/*
-		 * If the FLUSH feature is not supported we must assume that
-		 * the host does not perform any kind of volatile write
-		 * caching. We still need to drain the queue to provider
-		 * proper barrier semantics.
-		 */
-		blk_queue_ordered(q, QUEUE_ORDERED_DRAIN, NULL);
-	}
+	/* configure queue flush support */
+	if (virtio_has_feature(vdev, VIRTIO_BLK_F_FLUSH))
+		blk_queue_flush(q, REQ_FLUSH);
 
 	/* If disk is read-only in the host, the guest should obey */
 	if (virtio_has_feature(vdev, VIRTIO_BLK_F_RO))
@@ -440,6 +452,8 @@ static void __devexit virtblk_remove(struct virtio_device *vdev)
 {
 	struct virtio_blk *vblk = vdev->priv;
 
+	flush_work(&vblk->config_work);
+
 	/* Nothing should be pending. */
 	BUG_ON(!list_empty(&vblk->reqs));
 
@@ -460,9 +474,9 @@ static struct virtio_device_id id_table[] = {
 };
 
 static unsigned int features[] = {
-	VIRTIO_BLK_F_BARRIER, VIRTIO_BLK_F_SEG_MAX, VIRTIO_BLK_F_SIZE_MAX,
-	VIRTIO_BLK_F_GEOMETRY, VIRTIO_BLK_F_RO, VIRTIO_BLK_F_BLK_SIZE,
-	VIRTIO_BLK_F_SCSI, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_TOPOLOGY
+	VIRTIO_BLK_F_SEG_MAX, VIRTIO_BLK_F_SIZE_MAX, VIRTIO_BLK_F_GEOMETRY,
+	VIRTIO_BLK_F_RO, VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_SCSI,
+	VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_TOPOLOGY
 };
 
 /*
@@ -471,27 +485,47 @@ static unsigned int features[] = {
  * Use __refdata to avoid this warning.
  */
 static struct virtio_driver __refdata virtio_blk = {
-	.feature_table = features,
-	.feature_table_size = ARRAY_SIZE(features),
-	.driver.name =	KBUILD_MODNAME,
-	.driver.owner =	THIS_MODULE,
-	.id_table =	id_table,
-	.probe =	virtblk_probe,
-	.remove =	__devexit_p(virtblk_remove),
+	.feature_table		= features,
+	.feature_table_size	= ARRAY_SIZE(features),
+	.driver.name		= KBUILD_MODNAME,
+	.driver.owner		= THIS_MODULE,
+	.id_table		= id_table,
+	.probe			= virtblk_probe,
+	.remove			= __devexit_p(virtblk_remove),
+	.config_changed		= virtblk_config_changed,
 };
 
 static int __init init(void)
 {
+	int error;
+
+	virtblk_wq = create_singlethread_workqueue("virtio-blk");
+	if (!virtblk_wq)
+		return -ENOMEM;
+
 	major = register_blkdev(0, "virtblk");
-	if (major < 0)
-		return major;
-	return register_virtio_driver(&virtio_blk);
+	if (major < 0) {
+		error = major;
+		goto out_destroy_workqueue;
+	}
+
+	error = register_virtio_driver(&virtio_blk);
+	if (error)
+		goto out_unregister_blkdev;
+	return 0;
+
+out_unregister_blkdev:
+	unregister_blkdev(major, "virtblk");
+out_destroy_workqueue:
+	destroy_workqueue(virtblk_wq);
+	return error;
 }
 
 static void __exit fini(void)
 {
 	unregister_blkdev(major, "virtblk");
 	unregister_virtio_driver(&virtio_blk);
+	destroy_workqueue(virtblk_wq);
 }
 module_init(init);
 module_exit(fini);

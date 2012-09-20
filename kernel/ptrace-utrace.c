@@ -69,6 +69,7 @@ struct ptrace_context {
 #define PT_UTRACED			0x00001000
 
 #define PTRACE_O_SYSEMU			0x100
+#define PTRACE_O_DETACHED		0x200
 
 #define PTRACE_EVENT_SYSCALL		(1 << 16)
 #define PTRACE_EVENT_SIGTRAP		(2 << 16)
@@ -105,6 +106,19 @@ static struct utrace_engine *ptrace_lookup_engine(struct task_struct *tracee)
 					&ptrace_utrace_ops, NULL);
 }
 
+static int utrace_barrier_uninterruptible(struct task_struct *target,
+					struct utrace_engine *engine)
+{
+	for (;;) {
+		int err = utrace_barrier(target, engine);
+
+		if (err != -ERESTARTSYS)
+			return err;
+
+		schedule_timeout_uninterruptible(1);
+	}
+}
+
 static struct utrace_engine *
 ptrace_reuse_engine(struct task_struct *tracee)
 {
@@ -117,7 +131,7 @@ ptrace_reuse_engine(struct task_struct *tracee)
 		return engine;
 
 	ctx = ptrace_context(engine);
-	if (unlikely(ctx->resume == UTRACE_DETACH)) {
+	if (unlikely(ctx->options == PTRACE_O_DETACHED)) {
 		/*
 		 * Try to reuse this self-detaching engine.
 		 * The only caller which can hit this case is ptrace_attach(),
@@ -131,12 +145,16 @@ ptrace_reuse_engine(struct task_struct *tracee)
 		if (!err || err == -EINPROGRESS) {
 			ctx->resume = UTRACE_RESUME;
 			/* synchronize with ptrace_report_signal() */
-			err = utrace_barrier(tracee, engine);
+			err = utrace_barrier_uninterruptible(tracee, engine);
 		}
-		WARN_ON(!err != (engine->ops == &ptrace_utrace_ops));
 
-		if (!err)
+		if (!err) {
+			WARN_ON(engine->ops != &ptrace_utrace_ops &&
+				!tracee->exit_state);
 			return engine;
+		}
+
+		WARN_ON(engine->ops == &ptrace_utrace_ops);
 	}
 
 	utrace_engine_put(engine);
@@ -246,32 +264,60 @@ static void ptrace_detach_task(struct task_struct *tracee, int sig)
 	 * If true, the caller is PTRACE_DETACH, otherwise
 	 * the tracer detaches implicitly during exit.
 	 */
-	bool voluntary = (sig >= 0);
+	bool explicit = (sig >= 0);
 	struct utrace_engine *engine = ptrace_lookup_engine(tracee);
 	enum utrace_resume_action action = UTRACE_DETACH;
+	struct ptrace_context *ctx;
 
 	if (unlikely(IS_ERR(engine)))
 		return;
 
-	if (sig) {
-		struct ptrace_context *ctx = ptrace_context(engine);
+	ctx = ptrace_context(engine);
 
+	if (!explicit) {
+		int err;
+
+		/*
+		 * We are going to detach, the tracee can be running.
+		 * Ensure ptrace_report_signal() won't report a signal.
+		 */
+		ctx->resume = UTRACE_DETACH;
+		err = utrace_barrier_uninterruptible(tracee, engine);
+
+		if (!err && ctx->siginfo) {
+			/*
+			 * The tracee has already reported a signal
+			 * before utrace_barrier().
+			 *
+			 * Resume it like we do in PTRACE_EVENT_SIGNAL
+			 * case below. The difference is that we can race
+			 * with ptrace_report_signal() if the tracee is
+			 * running but this doesn't matter. In any case
+			 * UTRACE_SIGNAL_REPORT must be pending and it
+			 * can return nothing but UTRACE_DETACH.
+			 */
+			action = UTRACE_RESUME;
+		}
+
+	} else if (sig) {
 		switch (get_stop_event(ctx)) {
 		case PTRACE_EVENT_SYSCALL:
-			if (voluntary)
-				send_sig_info(sig, SEND_SIG_PRIV, tracee);
+			send_sig_info(sig, SEND_SIG_PRIV, tracee);
 			break;
 
 		case PTRACE_EVENT_SIGNAL:
-			if (voluntary)
-				ctx->signr = sig;
+			ctx->signr = sig;
 			ctx->resume = UTRACE_DETACH;
 			action = UTRACE_RESUME;
 			break;
 		}
 	}
 
-	ptrace_wake_up(tracee, engine, action, voluntary);
+	ptrace_wake_up(tracee, engine, action, explicit);
+
+	if (action != UTRACE_DETACH)
+		ctx->options = PTRACE_O_DETACHED;
+
 	utrace_engine_put(engine);
 }
 
@@ -403,6 +449,11 @@ static u32 ptrace_report_syscall_entry(u32 action, struct utrace_engine *engine,
 	return UTRACE_SYSCALL_RUN | UTRACE_STOP;
 }
 
+static inline bool is_step_resume(enum utrace_resume_action resume)
+{
+	return resume == UTRACE_BLOCKSTEP || resume == UTRACE_SINGLESTEP;
+}
+
 static u32 ptrace_report_syscall_exit(u32 action, struct utrace_engine *engine,
 				      struct pt_regs *regs)
 {
@@ -411,11 +462,7 @@ static u32 ptrace_report_syscall_exit(u32 action, struct utrace_engine *engine,
 	if (ptrace_event_pending(ctx))
 		return UTRACE_STOP;
 
-	if (ctx->resume != UTRACE_RESUME) {
-		WARN_ON(ctx->resume != UTRACE_BLOCKSTEP &&
-			ctx->resume != UTRACE_SINGLESTEP);
-		ctx->resume = UTRACE_RESUME;
-
+	if (is_step_resume(ctx->resume)) {
 		ctx->signr = SIGTRAP;
 		return UTRACE_INTERRUPT;
 	}
@@ -503,10 +550,7 @@ static u32 ptrace_report_signal(u32 action, struct utrace_engine *engine,
 		if (WARN_ON(ctx->siginfo))
 			ctx->siginfo = NULL;
 
-		if (resume != UTRACE_RESUME) {
-			WARN_ON(resume != UTRACE_BLOCKSTEP &&
-				resume != UTRACE_SINGLESTEP);
-
+		if (is_step_resume(resume)) {
 			set_stop_code(ctx, PTRACE_EVENT_SIGTRAP);
 			return UTRACE_STOP | UTRACE_SIGNAL_IGN;
 		}
@@ -533,6 +577,11 @@ static u32 ptrace_report_signal(u32 action, struct utrace_engine *engine,
 	}
 
 	WARN_ON(ctx->siginfo);
+
+	/* Raced with the exiting tracer ? */
+	if (resume == UTRACE_DETACH)
+		return action;
+
 	ctx->siginfo = info;
 	/*
 	 * ctx->siginfo points to the caller's stack.
@@ -748,7 +797,7 @@ void exit_ptrace(struct task_struct *tracer)
 static int ptrace_set_options(struct task_struct *tracee,
 				struct utrace_engine *engine, long data)
 {
-	BUILD_BUG_ON(PTRACE_O_MASK & PTRACE_O_SYSEMU);
+	BUILD_BUG_ON(PTRACE_O_MASK & (PTRACE_O_SYSEMU | PTRACE_O_DETACHED));
 
 	ptrace_set_events(tracee, engine, data & PTRACE_O_MASK);
 	return (data & ~PTRACE_O_MASK) ? -EINVAL : 0;

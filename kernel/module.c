@@ -810,16 +810,8 @@ SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
 		return -EFAULT;
 	name[MODULE_NAME_LEN-1] = '\0';
 
-	/* Create stop_machine threads since free_module relies on
-	 * a non-failing stop_machine call. */
-	ret = stop_machine_create();
-	if (ret)
-		return ret;
-
-	if (mutex_lock_interruptible(&module_mutex) != 0) {
-		ret = -EINTR;
-		goto out_stop;
-	}
+	if (mutex_lock_interruptible(&module_mutex) != 0)
+		return -EINTR;
 
 	mod = find_module(name);
 	if (!mod) {
@@ -874,13 +866,10 @@ SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
 	mutex_lock(&module_mutex);
 	/* Store the name of the last unloaded module for diagnostic purposes */
 	strlcpy(last_unloaded_module, mod->name, sizeof(last_unloaded_module));
-	ddebug_remove_module(mod->name);
 	free_module(mod);
 
  out:
 	mutex_unlock(&module_mutex);
-out_stop:
-	stop_machine_destroy();
 	return ret;
 }
 
@@ -1537,6 +1526,9 @@ static void free_module(struct module *mod)
 	remove_sect_attrs(mod);
 	mod_kobject_remove(mod);
 
+	/* Remove dynamic debug info */
+	ddebug_remove_module(mod->name);
+
 	/* Arch-specific cleanup. */
 	module_arch_cleanup(mod);
 
@@ -2046,6 +2038,12 @@ static void dynamic_debug_setup(struct _ddebug *debug, unsigned int num)
 #endif
 }
 
+static void dynamic_debug_remove(struct _ddebug *debug)
+{
+	if (debug)
+		ddebug_remove_module(debug->modname);
+}
+
 static void *module_alloc_update_bounds(unsigned long size)
 {
 	void *ret = module_alloc(size);
@@ -2107,6 +2105,8 @@ static noinline struct module *load_module(void __user *umod,
 	struct module *mod;
 	long err = 0;
 	void *percpu = NULL, *ptr = NULL; /* Stops spurious gcc warning */
+	struct _ddebug *debug = NULL;
+	unsigned int num_debug = 0;
 	unsigned long symoffs, stroffs, *strmap;
 	int gpgsig_ok;
 
@@ -2478,9 +2478,6 @@ static noinline struct module *load_module(void __user *umod,
 	strmap = NULL;
 
 	if (!mod->taints) {
-		struct _ddebug *debug;
-		unsigned int num_debug;
-
 		debug = section_objs(hdr, sechdrs, secstrings, "__verbose",
 				     sizeof(*debug), &num_debug);
 		if (debug)
@@ -2489,7 +2486,7 @@ static noinline struct module *load_module(void __user *umod,
 
 	err = module_finalize(hdr, sechdrs, mod);
 	if (err < 0)
-		goto cleanup;
+		goto ddebug;
 
 	/* flush the icache in correct context */
 	old_fs = get_fs();
@@ -2546,6 +2543,8 @@ static noinline struct module *load_module(void __user *umod,
 	list_del_rcu(&mod->list);
 	synchronize_sched();
 	module_arch_cleanup(mod);
+ ddebug:
+	dynamic_debug_remove(debug);
  cleanup:
 	free_modinfo(mod);
 	kobject_del(&mod->mkobj.kobj);
@@ -2900,6 +2899,8 @@ static char *module_flags(struct module *mod, char *buf)
 			buf[bx++] = 'F';
 		if (mod->taints & (1 << TAINT_CRAP))
 			buf[bx++] = 'C';
+		if (mod->taints & (1 << TAINT_TECH_PREVIEW))
+			buf[bx++] = 'T';
 		/*
 		 * TAINT_FORCED_RMMOD: could be added.
 		 * TAINT_UNSAFE_SMP, TAINT_MACHINE_CHECK, TAINT_BAD_PAGE don't

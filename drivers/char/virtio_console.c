@@ -386,6 +386,10 @@ static void discard_port_data(struct port *port)
 	unsigned int len;
 	int ret;
 
+	if (!port->portdev) {
+		/* Device has been unplugged.  vqs are already gone. */
+		return;
+	}
 	vq = port->in_vq;
 	if (port->inbuf)
 		buf = port->inbuf;
@@ -468,6 +472,10 @@ static void reclaim_consumed_buffers(struct port *port)
 	void *buf;
 	unsigned int len;
 
+	if (!port->portdev) {
+		/* Device has been unplugged.  vqs are already gone. */
+		return;
+	}
 	while ((buf = virtqueue_get_buf(port->out_vq, &len))) {
 		kfree(buf);
 		port->outvq_full = false;
@@ -808,6 +816,8 @@ static int port_fops_open(struct inode *inode, struct file *filp)
 	reclaim_consumed_buffers(port);
 	spin_unlock_irq(&port->outvq_lock);
 
+	nonseekable_open(inode, filp);
+
 	/* Notify host of port being opened */
 	send_control_msg(filp->private_data, VIRTIO_CONSOLE_PORT_OPEN, 1);
 
@@ -839,6 +849,7 @@ static const struct file_operations port_fops = {
 	.poll  = port_fops_poll,
 	.release = port_fops_release,
 	.fasync = port_fops_fasync,
+	.llseek = no_llseek,
 };
 
 /*
@@ -1554,31 +1565,16 @@ static int init_vqs(struct ports_device *portdev)
 	nr_queues = use_multiport(portdev) ? (nr_ports + 1) * 2 : 2;
 
 	vqs = kmalloc(nr_queues * sizeof(struct virtqueue *), GFP_KERNEL);
-	if (!vqs) {
-		err = -ENOMEM;
-		goto fail;
-	}
 	io_callbacks = kmalloc(nr_queues * sizeof(vq_callback_t *), GFP_KERNEL);
-	if (!io_callbacks) {
-		err = -ENOMEM;
-		goto free_vqs;
-	}
 	io_names = kmalloc(nr_queues * sizeof(char *), GFP_KERNEL);
-	if (!io_names) {
-		err = -ENOMEM;
-		goto free_callbacks;
-	}
 	portdev->in_vqs = kmalloc(nr_ports * sizeof(struct virtqueue *),
 				  GFP_KERNEL);
-	if (!portdev->in_vqs) {
-		err = -ENOMEM;
-		goto free_names;
-	}
 	portdev->out_vqs = kmalloc(nr_ports * sizeof(struct virtqueue *),
 				   GFP_KERNEL);
-	if (!portdev->out_vqs) {
+	if (!vqs || !io_callbacks || !io_names || !portdev->in_vqs ||
+			!portdev->out_vqs) {
 		err = -ENOMEM;
-		goto free_invqs;
+		goto free;
 	}
 
 	/*
@@ -1612,7 +1608,7 @@ static int init_vqs(struct ports_device *portdev)
 					      io_callbacks,
 					      (const char **)io_names);
 	if (err)
-		goto free_outvqs;
+		goto free;
 
 	j = 0;
 	portdev->in_vqs[0] = vqs[0];
@@ -1628,23 +1624,19 @@ static int init_vqs(struct ports_device *portdev)
 			portdev->out_vqs[i] = vqs[j + 1];
 		}
 	}
-	kfree(io_callbacks);
 	kfree(io_names);
+	kfree(io_callbacks);
 	kfree(vqs);
 
 	return 0;
 
-free_names:
-	kfree(io_names);
-free_callbacks:
-	kfree(io_callbacks);
-free_outvqs:
+free:
 	kfree(portdev->out_vqs);
-free_invqs:
 	kfree(portdev->in_vqs);
-free_vqs:
+	kfree(io_names);
+	kfree(io_callbacks);
 	kfree(vqs);
-fail:
+
 	return err;
 }
 

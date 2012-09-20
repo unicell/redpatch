@@ -11,10 +11,24 @@
 extern int pci_uevent(struct device *dev, struct kobj_uevent_env *env);
 extern int pci_create_sysfs_dev_files(struct pci_dev *pdev);
 extern void pci_remove_sysfs_dev_files(struct pci_dev *pdev);
+#if !defined(CONFIG_DMI) && !defined(CONFIG_ACPI)
+static inline void pci_create_firmware_label_files(struct pci_dev *pdev)
+{ return; }
+static inline void pci_remove_firmware_label_files(struct pci_dev *pdev)
+{ return; }
+#else
+extern void pci_create_firmware_label_files(struct pci_dev *pdev);
+extern void pci_remove_firmware_label_files(struct pci_dev *pdev);
+#endif
 extern void pci_cleanup_rom(struct pci_dev *dev);
 #ifdef HAVE_PCI_MMAP
+enum pci_mmap_api {
+	PCI_MMAP_SYSFS,	/* mmap on /sys/bus/pci/devices/<BDF>/resource<N> */
+	PCI_MMAP_PROCFS	/* mmap on /proc/bus/pci/<BDF> */
+};
 extern int pci_mmap_fits(struct pci_dev *pdev, int resno,
-			 struct vm_area_struct *vma);
+			 struct vm_area_struct *vmai,
+			 enum pci_mmap_api mmap_api);
 #endif
 int pci_probe_reset_function(struct pci_dev *dev);
 
@@ -124,8 +138,10 @@ static inline void pci_msi_init_pci_dev(struct pci_dev *dev) { }
 
 #ifdef CONFIG_PCIEAER
 void pci_no_aer(void);
+bool pci_aer_available(void);
 #else
 static inline void pci_no_aer(void) { }
+static inline bool pci_aer_available(void) { return false; }
 #endif
 
 static inline int pci_no_d1d2(struct pci_dev *dev)

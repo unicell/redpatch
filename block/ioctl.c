@@ -124,8 +124,7 @@ static int blk_ioctl_discard(struct block_device *bdev, uint64_t start,
 
 	if (start + len > (i_size_read(bdev->bd_inode) >> 9))
 		return -EINVAL;
-	return blkdev_issue_discard(bdev, start, len, GFP_KERNEL,
-				    DISCARD_FL_WAIT);
+	return blkdev_issue_discard(bdev, start, len, GFP_KERNEL, 0);
 }
 
 static int put_ushort(unsigned long arg, unsigned short val)

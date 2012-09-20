@@ -10,6 +10,7 @@
  */
 #include <linux/debug_locks.h>
 #include <linux/interrupt.h>
+#include <linux/kmsg_dump.h>
 #include <linux/kallsyms.h>
 #include <linux/notifier.h>
 #include <linux/module.h>
@@ -80,6 +81,8 @@ NORET_TYPE void panic(const char * fmt, ...)
 	 * Do we want to call this before we try to display a message?
 	 */
 	crash_kexec(NULL);
+
+	kmsg_dump(KMSG_DUMP_PANIC);
 
 	/*
 	 * Note smp_send_stop is the usual smp shutdown function, which
@@ -161,7 +164,7 @@ static const struct tnt tnts[] = {
 	{ TAINT_OVERRIDDEN_ACPI_TABLE,	'A', ' ' },
 	{ TAINT_WARN,			'W', ' ' },
 	{ TAINT_CRAP,			'C', ' ' },
-	{ TAINT_FIRMWARE_WORKAROUND,	'I', ' ' }, /* not in RHEL6 */
+	{ TAINT_FIRMWARE_WORKAROUND,	'I', ' ' },
 	{ TAINT_12,			'?', '-' },
 	{ TAINT_13,			'?', '-' },
 	{ TAINT_14,			'?', '-' },
@@ -179,6 +182,7 @@ static const struct tnt tnts[] = {
 	{ TAINT_26,			'?', '-' },
 	{ TAINT_27,			'?', '-' },
 	{ TAINT_HARDWARE_UNSUPPORTED,	'H', ' ' },
+	{ TAINT_TECH_PREVIEW,		'T', ' ' },
 };
 
 /**
@@ -195,7 +199,7 @@ static const struct tnt tnts[] = {
  *  'A' - ACPI table overridden.
  *  'W' - Taint on warning.
  *  'C' - modules from drivers/staging are loaded.
- *  'I' - Working around severe firmware bug, unusued in RHEL6
+ *  'I' - Working around severe firmware bug.
  *  'H' - Hardware is unsupported.
  *
  *	The string is overwritten by the next call to print_tainted().
@@ -360,6 +364,7 @@ void oops_exit(void)
 {
 	do_oops_enter_exit();
 	print_oops_end_marker();
+	kmsg_dump(KMSG_DUMP_OOPS);
 }
 
 #ifdef WANT_WARN_ON_SLOWPATH

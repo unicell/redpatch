@@ -204,6 +204,7 @@ struct domain_device {
         };
 
         void *lldd_dev;
+	int gone;
 };
 
 struct sas_discovery_event {
@@ -359,6 +360,8 @@ struct sas_ha_struct {
 	/* The class calls this to send a task for execution. */
 	int lldd_max_execute_num;
 	int lldd_queue_size;
+	int strict_wide_ports; /* both sas_addr and attached_sas_addr must match
+				* their siblings when forming wide ports */
 
 	/* LLDD calls these to notify the class of an event. */
 	void (*notify_ha_event)(struct sas_ha_struct *, enum ha_event);
@@ -399,6 +402,19 @@ static inline void sas_phy_disconnected(struct asd_sas_phy *phy)
 {
 	phy->oob_mode = OOB_NOT_CONNECTED;
 	phy->linkrate = SAS_LINK_RATE_UNKNOWN;
+}
+
+/* Before returning from ->scan_finished() an LLDD calls this routine to
+ * ensure that all port notifications have been promoted to domain
+ * discovery events, and that initial domain discovery has completed
+ */
+static inline void sas_flush_discovery(struct Scsi_Host *shost)
+{
+	/* flush port events */
+	scsi_flush_work(shost);
+
+	/* flush domain discovery events queued by the port events */
+	scsi_flush_work(shost);
 }
 
 /* ---------- Tasks ---------- */

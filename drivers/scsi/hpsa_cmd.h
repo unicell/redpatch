@@ -1,15 +1,3 @@
-/************************ inventory ***************************
-   This file is part of an export that includes these revisions:
-
-File sbe/src/2.6/hpsa/.gitignore is new; hpsa_1_1_1_2010_04_14 revision 1.1.2.1
-File sbe/src/2.6/hpsa/drivers/scsi/Makefile is new; hpsa_1_1_1_2010_04_14 revision 1.1.2.1
-File sbe/src/2.6/hpsa/drivers/scsi/hpsa.c is new; hpsa_1_1_1_2010_04_14 revision 1.57.2.150
-File sbe/src/2.6/hpsa/drivers/scsi/hpsa.h is new; hpsa_1_1_1_2010_04_14 revision 1.19.2.32
-File sbe/src/2.6/hpsa/drivers/scsi/hpsa_cmd.h is new; hpsa_1_1_1_2010_04_14 revision 1.12.2.21
-File sbe/src/2.6/hpsa/kernel_patches/hpsa_kernel_config.patch is new; hpsa_1_1_1_2010_04_14 revision 1.1
-
-**************************************************************/
-
 /*
  *    Disk Array driver for HP Smart Array SAS controllers
  *    Copyright 2000, 2009 Hewlett-Packard Development Company, L.P.
@@ -116,6 +104,7 @@ File sbe/src/2.6/hpsa/kernel_patches/hpsa_kernel_config.patch is new; hpsa_1_1_1
 
 #define CFGTBL_Trans_Simple     0x00000002l
 #define CFGTBL_Trans_Performant 0x00000004l
+#define CFGTBL_Trans_use_short_tags 0x20000000l
 
 #define CFGTBL_BusType_Ultra2   0x00000001l
 #define CFGTBL_BusType_Ultra3   0x00000002l
@@ -164,21 +153,6 @@ struct SenseSubsystem_info {
 	u8 portname[8];
 	u8 reserved1[1108];
 };
-
-#define HPSA_READ_CAPACITY 0x25 /* Read Capacity */
-struct ReadCapdata {
-	u8 total_size[4];	/* Total size in blocks */
-	u8 block_size[4];	/* Size of blocks in bytes */
-};
-
-#if 0
-/* 12 byte commands not implemented in firmware yet. */
-#define HPSA_READ 	0xa8
-#define HPSA_WRITE	0xaa
-#endif
-
-#define HPSA_READ   0x28    /* Read(10) */
-#define HPSA_WRITE  0x2a    /* Write(10) */
 
 /* BMIC commands */
 #define BMIC_READ 0x26
@@ -292,6 +266,7 @@ struct ErrorInfo {
 
 #define DIRECT_LOOKUP_SHIFT 5
 #define DIRECT_LOOKUP_BIT 0x10
+#define DIRECT_LOOKUP_MASK (~((1 << DIRECT_LOOKUP_SHIFT) - 1))
 
 #define HPSA_ERROR_BIT          0x02
 struct ctlr_info; /* defined in hpsa.h */
@@ -318,7 +293,7 @@ struct CommandList {
 	struct ctlr_info	   *h;
 	int			   cmd_type;
 	long			   cmdindex;
-	struct hlist_node list;
+	struct list_head list;
 	struct request *rq;
 	struct completion *waiting;
 	void   *scsi_cmd;

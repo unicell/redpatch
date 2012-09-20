@@ -65,7 +65,6 @@ static void gfs2_tune_init(struct gfs2_tune *gt)
 	gt->gt_quota_scale_den = 1;
 	gt->gt_new_files_jdata = 0;
 	gt->gt_max_readahead = 1 << 18;
-	gt->gt_stall_secs = 600;
 	gt->gt_complain_secs = 10;
 }
 
@@ -488,7 +487,7 @@ static int gfs2_lookup_root(struct super_block *sb, struct dentry **dptr,
 	struct dentry *dentry;
 	struct inode *inode;
 
-	inode = gfs2_inode_lookup(sb, DT_DIR, no_addr, 0);
+	inode = gfs2_inode_lookup(sb, DT_DIR, no_addr, 0, 0);
 	if (IS_ERR(inode)) {
 		fs_err(sdp, "can't read in %s inode: %ld\n", name, PTR_ERR(inode));
 		return PTR_ERR(inode);
@@ -985,17 +984,9 @@ static const match_table_t nolock_tokens = {
 	{ Opt_err, NULL },
 };
 
-static void nolock_put_lock(struct kmem_cache *cachep, struct gfs2_glock *gl)
-{
-	struct gfs2_sbd *sdp = gl->gl_sbd;
-	kmem_cache_free(cachep, gl);
-	if (atomic_dec_and_test(&sdp->sd_glock_disposal))
-		wake_up(&sdp->sd_glock_wait);
-}
-
 static const struct lm_lockops nolock_ops = {
 	.lm_proto_name = "lock_nolock",
-	.lm_put_lock = nolock_put_lock,
+	.lm_put_lock = gfs2_glock_free,
 	.lm_tokens = &nolock_tokens,
 };
 
@@ -1241,10 +1232,9 @@ fail_sb:
 fail_locking:
 	init_locking(sdp, &mount_gh, UNDO);
 fail_lm:
+	invalidate_inodes(sb, true);
 	gfs2_gl_hash_clear(sdp);
 	gfs2_lm_unmount(sdp);
-	while (invalidate_inodes(sb))
-		yield();
 fail_sys:
 	gfs2_sys_fs_del(sdp);
 fail:

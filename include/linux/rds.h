@@ -82,6 +82,10 @@
 #define RDS_CMSG_RDMA_MAP		3
 #define RDS_CMSG_RDMA_STATUS		4
 #define RDS_CMSG_CONG_UPDATE		5
+#define RDS_CMSG_ATOMIC_FADD		6
+#define RDS_CMSG_ATOMIC_CSWP		7
+#define RDS_CMSG_MASKED_ATOMIC_FADD	8
+#define RDS_CMSG_MASKED_ATOMIC_CSWP	9
 
 #define RDS_INFO_FIRST			10000
 #define RDS_INFO_COUNTERS		10000
@@ -246,6 +250,33 @@ struct rds_rdma_args {
 	u_int64_t	user_token;
 };
 
+struct rds_atomic_args {
+	rds_rdma_cookie_t cookie;
+	uint64_t 	local_addr;
+	uint64_t 	remote_addr;
+	union {
+		struct {
+			uint64_t	compare;
+			uint64_t	swap;
+		} cswp;
+		struct {
+			uint64_t	add;
+		} fadd;
+		struct {
+			uint64_t	compare;
+			uint64_t	swap;
+			uint64_t	compare_mask;
+			uint64_t	swap_mask;
+		} m_cswp;
+		struct {
+			uint64_t	add;
+			uint64_t	nocarry_mask;
+		} m_fadd;
+	};
+	uint64_t	flags;
+	uint64_t	user_token;
+};
+
 struct rds_rdma_notify {
 	u_int64_t	user_token;
 	int32_t		status;
@@ -266,5 +297,6 @@ struct rds_rdma_notify {
 #define RDS_RDMA_USE_ONCE	0x0008	/* free MR after use */
 #define RDS_RDMA_DONTWAIT	0x0010	/* Don't wait in SET_BARRIER */
 #define RDS_RDMA_NOTIFY_ME	0x0020	/* Notify when operation completes */
+#define RDS_RDMA_SILENT		0x0040	/* Do not interrupt remote */
 
 #endif /* IB_RDS_H */

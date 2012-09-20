@@ -1000,10 +1000,10 @@ static int uv_ptc_seq_show(struct seq_file *file, void *data)
 static ssize_t tunables_read(struct file *file, char __user *userbuf,
 						size_t count, loff_t *ppos)
 {
-	char buf[300];
+	char *buf;
 	int ret;
 
-	ret = snprintf(buf, 300, "%s %s %s\n%d %d %d %d %d %d %d %d %d\n",
+	buf = kasprintf(GFP_KERNEL, "%s %s %s\n%d %d %d %d %d %d %d %d %d\n",
 		"max_bau_concurrent plugged_delay plugsb4reset",
 		"timeoutsb4reset ipi_reset_limit complete_threshold",
 		"congested_response_us congested_reps congested_period",
@@ -1011,7 +1011,12 @@ static ssize_t tunables_read(struct file *file, char __user *userbuf,
 		timeoutsb4reset, ipi_reset_limit, complete_threshold,
 		congested_response_us, congested_reps, congested_period);
 
-	return simple_read_from_buffer(userbuf, count, ppos, buf, ret);
+	if (!buf)
+		return -ENOMEM;
+
+	ret = simple_read_from_buffer(userbuf, count, ppos, buf, strlen(buf));
+	kfree(buf);
+	return ret;
 }
 
 /*
@@ -1334,7 +1339,7 @@ uv_activation_descriptor_init(int node, int pnode)
 
 	/*
 	 * each bau_desc is 64 bytes; there are 8 (UV_ITEMS_PER_DESCRIPTOR)
-	 * per cpu; and up to 32 (UV_ADP_SIZE) cpu's per uvhub
+	 * per cpu; and one per cpu on the uvhub (UV_ADP_SIZE)
 	 */
 	bau_desc = (struct bau_desc *)kmalloc_node(sizeof(struct bau_desc)*
 		UV_ADP_SIZE*UV_ITEMS_PER_DESCRIPTOR, GFP_KERNEL, node);
@@ -1357,11 +1362,11 @@ uv_activation_descriptor_init(int node, int pnode)
 		memset(bd2, 0, sizeof(struct bau_desc));
 		bd2->header.sw_ack_flag = 1;
 		/*
-		 * base_dest_nodeid is the nasid (pnode<<1) of the first uvhub
+		 * base_dest_nodeid is the nasid of the first uvhub
 		 * in the partition. The bit map will indicate uvhub numbers,
 		 * which are 0-N in a partition. Pnodes are unique system-wide.
 		 */
-		bd2->header.base_dest_nodeid = uv_partition_base_pnode << 1;
+		bd2->header.base_dest_nodeid = UV_PNODE_TO_NASID(uv_partition_base_pnode);
 		bd2->header.dest_subnodeid = 0x10; /* the LB */
 		bd2->header.command = UV_NET_ENDPOINT_INTD;
 		bd2->header.int_both = 1;
@@ -1483,15 +1488,16 @@ calculate_destination_timeout(void)
 /*
  * initialize the bau_control structure for each cpu
  */
-static void uv_init_per_cpu(int nuvhubs)
+static int __init uv_init_per_cpu(int nuvhubs)
 {
 	int i;
 	int cpu;
 	int pnode;
 	int uvhub;
+	int have_hmaster;
 	short socket = 0;
 	unsigned short socket_mask;
-	unsigned int uvhub_mask;
+	unsigned char *uvhub_mask;
 	struct bau_control *bcp;
 	struct uvhub_desc *bdp;
 	struct socket_desc *sdp;
@@ -1499,7 +1505,7 @@ static void uv_init_per_cpu(int nuvhubs)
 	struct bau_control *smaster = NULL;
 	struct socket_desc {
 		short num_cpus;
-		short cpu_number[16];
+		short cpu_number[MAX_CPUS_PER_SOCKET];
 	};
 	struct uvhub_desc {
 		unsigned short socket_mask;
@@ -1515,28 +1521,33 @@ static void uv_init_per_cpu(int nuvhubs)
 	uvhub_descs = (struct uvhub_desc *)
 		kmalloc(nuvhubs * sizeof(struct uvhub_desc), GFP_KERNEL);
 	memset(uvhub_descs, 0, nuvhubs * sizeof(struct uvhub_desc));
+	uvhub_mask = kzalloc((nuvhubs+7)/8, GFP_KERNEL);
 	for_each_present_cpu(cpu) {
 		bcp = &per_cpu(bau_control, cpu);
 		memset(bcp, 0, sizeof(struct bau_control));
 		pnode = uv_cpu_hub_info(cpu)->pnode;
 		uvhub = uv_cpu_hub_info(cpu)->numa_blade_id;
-		uvhub_mask |= (1 << uvhub);
+		*(uvhub_mask + (uvhub/8)) |= (1 << (uvhub%8));
 		bdp = &uvhub_descs[uvhub];
 		bdp->num_cpus++;
 		bdp->uvhub = uvhub;
 		bdp->pnode = pnode;
 		/* kludge: 'assuming' one node per socket, and assuming that
 		   disabling a socket just leaves a gap in node numbers */
-		socket = (cpu_to_node(cpu) & 1);;
+		socket = (cpu_to_node(cpu) & 1);
 		bdp->socket_mask |= (1 << socket);
 		sdp = &bdp->socket[socket];
 		sdp->cpu_number[sdp->num_cpus] = cpu;
 		sdp->num_cpus++;
+		if (sdp->num_cpus > MAX_CPUS_PER_SOCKET) {
+			printk(KERN_EMERG "%d cpus per socket invalid\n", sdp->num_cpus);
+			return 1;
+		}
 	}
-	uvhub = 0;
-	while (uvhub_mask) {
-		if (!(uvhub_mask & 1))
-			goto nexthub;
+	for (uvhub = 0; uvhub < nuvhubs; uvhub++) {
+		if (!(*(uvhub_mask + (uvhub/8)) & (1 << (uvhub%8))))
+			continue;
+		have_hmaster = 0;
 		bdp = &uvhub_descs[uvhub];
 		socket_mask = bdp->socket_mask;
 		socket = 0;
@@ -1550,8 +1561,10 @@ static void uv_init_per_cpu(int nuvhubs)
 				bcp->cpu = cpu;
 				if (i == 0) {
 					smaster = bcp;
-					if (socket == 0)
+					if (!have_hmaster) {
+						have_hmaster++;
 						hmaster = bcp;
+					}
 				}
 				bcp->cpus_in_uvhub = bdp->num_cpus;
 				bcp->cpus_in_socket = sdp->num_cpus;
@@ -1560,16 +1573,20 @@ static void uv_init_per_cpu(int nuvhubs)
 				bcp->uvhub_master = hmaster;
 				bcp->uvhub_cpu = uv_cpu_hub_info(cpu)->
 						blade_processor_id;
+				if (bcp->uvhub_cpu >= MAX_CPUS_PER_UVHUB) {
+					printk(KERN_EMERG
+						"%d cpus per uvhub invalid\n",
+						bcp->uvhub_cpu);
+					return 1;
+				}
 			}
 nextsocket:
 			socket++;
 			socket_mask = (socket_mask >> 1);
 		}
-nexthub:
-		uvhub++;
-		uvhub_mask = (uvhub_mask >> 1);
 	}
 	kfree(uvhub_descs);
+	kfree(uvhub_mask);
 	for_each_present_cpu(cpu) {
 		bcp = &per_cpu(bau_control, cpu);
 		bcp->baudisabled = 0;
@@ -1587,6 +1604,7 @@ nexthub:
 		bcp->congested_reps = congested_reps;
 		bcp->congested_period = congested_period;
 	}
+	return 0;
 }
 
 /*
@@ -1617,7 +1635,10 @@ static int __init uv_bau_init(void)
 	spin_lock_init(&disable_lock);
 	congested_cycles = microsec_2_cycles(congested_response_us);
 
-	uv_init_per_cpu(nuvhubs);
+	if (uv_init_per_cpu(nuvhubs)) {
+		nobau = 1;
+		return 0;
+	}
 
 	uv_partition_base_pnode = 0x7fffffff;
 	for (uvhub = 0; uvhub < nuvhubs; uvhub++)
@@ -1634,12 +1655,16 @@ static int __init uv_bau_init(void)
 	alloc_intr_gate(vector, uv_bau_message_intr1);
 
 	for_each_possible_blade(uvhub) {
-		pnode = uv_blade_to_pnode(uvhub);
-		/* INIT the bau */
-		uv_write_global_mmr64(pnode, UVH_LB_BAU_SB_ACTIVATION_CONTROL,
-				      ((unsigned long)1 << 63));
-		mmr = 1; /* should be 1 to broadcast to both sockets */
-		uv_write_global_mmr64(pnode, UVH_BAU_DATA_BROADCAST, mmr);
+		if (uv_blade_nr_possible_cpus(uvhub)) {
+			pnode = uv_blade_to_pnode(uvhub);
+			/* INIT the bau */
+			uv_write_global_mmr64(pnode,
+					UVH_LB_BAU_SB_ACTIVATION_CONTROL,
+					((unsigned long)1 << 63));
+			mmr = 1; /* should be 1 to broadcast to both sockets */
+			uv_write_global_mmr64(pnode, UVH_BAU_DATA_BROADCAST,
+						mmr);
+		}
 	}
 
 	return 0;

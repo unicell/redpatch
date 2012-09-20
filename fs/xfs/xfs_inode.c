@@ -1927,6 +1927,11 @@ xfs_iunlink_remove(
 	return 0;
 }
 
+/*
+ * A big issue when freeing the inode cluster is is that we _cannot_ skip any
+ * inodes that are in memory - they all must be marked stale and attached to
+ * the cluster buffer.
+ */
 STATIC void
 xfs_ifree_cluster(
 	xfs_inode_t	*free_ip,
@@ -1937,10 +1942,10 @@ xfs_ifree_cluster(
 	int			blks_per_cluster;
 	int			nbufs;
 	int			ninodes;
-	int			i, j, found, pre_flushed;
+	int			i, j;
 	xfs_daddr_t		blkno;
 	xfs_buf_t		*bp;
-	xfs_inode_t		*ip, **ip_found;
+	xfs_inode_t		*ip;
 	xfs_inode_log_item_t	*iip;
 	xfs_log_item_t		*lip;
 	struct xfs_perag	*pag;
@@ -1957,89 +1962,29 @@ xfs_ifree_cluster(
 		nbufs = XFS_IALLOC_BLOCKS(mp) / blks_per_cluster;
 	}
 
-	ip_found = kmem_alloc(ninodes * sizeof(xfs_inode_t *), KM_NOFS);
-
 	for (j = 0; j < nbufs; j++, inum += ninodes) {
 		blkno = XFS_AGB_TO_DADDR(mp, XFS_INO_TO_AGNO(mp, inum),
 					 XFS_INO_TO_AGBNO(mp, inum));
 
-
 		/*
-		 * Look for each inode in memory and attempt to lock it,
-		 * we can be racing with flush and tail pushing here.
-		 * any inode we get the locks on, add to an array of
-		 * inode items to process later.
-		 *
-		 * The get the buffer lock, we could beat a flush
-		 * or tail pushing thread to the lock here, in which
-		 * case they will go looking for the inode buffer
-		 * and fail, we need some other form of interlock
-		 * here.
+		 * We obtain and lock the backing buffer first in the process
+		 * here, as we have to ensure that any dirty inode that we
+		 * can't get the flush lock on is attached to the buffer.
+		 * If we scan the in-memory inodes first, then buffer IO can
+		 * complete before we get a lock on it, and hence we may fail
+		 * to mark all the active inodes on the buffer stale.
 		 */
-		found = 0;
-		for (i = 0; i < ninodes; i++) {
-			read_lock(&pag->pag_ici_lock);
-			ip = radix_tree_lookup(&pag->pag_ici_root,
-					XFS_INO_TO_AGINO(mp, (inum + i)));
-
-			/* Inode not in memory or we found it already,
-			 * nothing to do
-			 */
-			if (!ip || xfs_iflags_test(ip, XFS_ISTALE)) {
-				read_unlock(&pag->pag_ici_lock);
-				continue;
-			}
-
-			if (xfs_inode_clean(ip)) {
-				read_unlock(&pag->pag_ici_lock);
-				continue;
-			}
-
-			/* If we can get the locks then add it to the
-			 * list, otherwise by the time we get the bp lock
-			 * below it will already be attached to the
-			 * inode buffer.
-			 */
-
-			/* This inode will already be locked - by us, lets
-			 * keep it that way.
-			 */
-
-			if (ip == free_ip) {
-				if (xfs_iflock_nowait(ip)) {
-					xfs_iflags_set(ip, XFS_ISTALE);
-					if (xfs_inode_clean(ip)) {
-						xfs_ifunlock(ip);
-					} else {
-						ip_found[found++] = ip;
-					}
-				}
-				read_unlock(&pag->pag_ici_lock);
-				continue;
-			}
-
-			if (xfs_ilock_nowait(ip, XFS_ILOCK_EXCL)) {
-				if (xfs_iflock_nowait(ip)) {
-					xfs_iflags_set(ip, XFS_ISTALE);
-
-					if (xfs_inode_clean(ip)) {
-						xfs_ifunlock(ip);
-						xfs_iunlock(ip, XFS_ILOCK_EXCL);
-					} else {
-						ip_found[found++] = ip;
-					}
-				} else {
-					xfs_iunlock(ip, XFS_ILOCK_EXCL);
-				}
-			}
-			read_unlock(&pag->pag_ici_lock);
-		}
-
-		bp = xfs_trans_get_buf(tp, mp->m_ddev_targp, blkno, 
+		bp = xfs_trans_get_buf(tp, mp->m_ddev_targp, blkno,
 					mp->m_bsize * blks_per_cluster,
 					XBF_LOCK);
 
-		pre_flushed = 0;
+		/*
+		 * Walk the inodes already attached to the buffer and mark them
+		 * stale. These will all have the flush locks held, so an
+		 * in-memory inode walk can't lock them. By marking them all
+		 * stale first, we will not attempt to lock them in the loop
+		 * below as the XFS_ISTALE flag will be set.
+		 */
 		lip = XFS_BUF_FSPRIVATE(bp, xfs_log_item_t *);
 		while (lip) {
 			if (lip->li_type == XFS_LI_INODE) {
@@ -2050,16 +1995,58 @@ xfs_ifree_cluster(
 							&iip->ili_flush_lsn,
 							&iip->ili_item.li_lsn);
 				xfs_iflags_set(iip->ili_inode, XFS_ISTALE);
-				pre_flushed++;
 			}
 			lip = lip->li_bio_list;
 		}
 
-		for (i = 0; i < found; i++) {
-			ip = ip_found[i];
-			iip = ip->i_itemp;
 
-			if (!iip) {
+		/*
+		 * For each inode in memory attempt to add it to the inode
+		 * buffer and set it up for being staled on buffer IO
+		 * completion.  This is safe as we've locked out tail pushing
+		 * and flushing by locking the buffer.
+		 *
+		 * We have already marked every inode that was part of a
+		 * transaction stale above, which means there is no point in
+		 * even trying to lock them.
+		 */
+		for (i = 0; i < ninodes; i++) {
+retry:
+			read_lock(&pag->pag_ici_lock);
+			ip = radix_tree_lookup(&pag->pag_ici_root,
+					XFS_INO_TO_AGINO(mp, (inum + i)));
+
+			/* Inode not in memory or stale, nothing to do */
+			if (!ip || xfs_iflags_test(ip, XFS_ISTALE)) {
+				read_unlock(&pag->pag_ici_lock);
+				continue;
+			}
+
+			/*
+			 * Don't try to lock/unlock the current inode, but we
+			 * _cannot_ skip the other inodes that we did not find
+			 * in the list attached to the buffer and are not
+			 * already marked stale. If we can't lock it, back off
+			 * and retry.
+			 */
+			if (ip != free_ip &&
+			    !xfs_ilock_nowait(ip, XFS_ILOCK_EXCL)) {
+				read_unlock(&pag->pag_ici_lock);
+				delay(1);
+				goto retry;
+			}
+			read_unlock(&pag->pag_ici_lock);
+
+			xfs_iflock(ip);
+			xfs_iflags_set(ip, XFS_ISTALE);
+
+			/*
+			 * we don't need to attach clean inodes or those only
+			 * with unlogged changes (which we throw away, anyway).
+			 */
+			iip = ip->i_itemp;
+			if (!iip || xfs_inode_clean(ip)) {
+				ASSERT(ip != free_ip);
 				ip->i_update_core = 0;
 				xfs_ifunlock(ip);
 				xfs_iunlock(ip, XFS_ILOCK_EXCL);
@@ -2075,17 +2062,15 @@ xfs_ifree_cluster(
 			xfs_buf_attach_iodone(bp,
 				(void(*)(xfs_buf_t*,xfs_log_item_t*))
 				xfs_istale_done, (xfs_log_item_t *)iip);
-			if (ip != free_ip) {
+
+			if (ip != free_ip)
 				xfs_iunlock(ip, XFS_ILOCK_EXCL);
-			}
 		}
 
-		if (found || pre_flushed)
-			xfs_trans_stale_inode_buf(tp, bp);
+		xfs_trans_stale_inode_buf(tp, bp);
 		xfs_trans_binval(tp, bp);
 	}
 
-	kmem_free(ip_found);
 	xfs_perag_put(pag);
 }
 

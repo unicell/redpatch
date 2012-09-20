@@ -358,7 +358,10 @@ static int qib_post_one_send(struct qib_qp *qp, struct ib_send_wr *wr)
 	 * undefined operations.
 	 * Make sure buffer is large enough to hold the result for atomics.
 	 */
-	if (qp->ibqp.qp_type == IB_QPT_UC) {
+	if (wr->opcode == IB_WR_FAST_REG_MR) {
+		if (qib_fast_reg_mr(qp, wr))
+			goto bail_inval;
+	} else if (qp->ibqp.qp_type == IB_QPT_UC) {
 		if ((unsigned) wr->opcode >= IB_WR_RDMA_READ)
 			goto bail_inval;
 	} else if (qp->ibqp.qp_type != IB_QPT_RC) {
@@ -529,154 +532,6 @@ bail:
 	return ret;
 }
 
-static void qib_dump_hdr(u32 control, u32 plen, __be32 *hdr, unsigned hlen)
-{
-	qib_cdbg(VPKT, "PBC %08x %x HDR len %u\n", control, plen, hlen);
-	while (hlen >= 8) {
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x %08x %08x %08x\n",
-			be32_to_cpu(hdr[0]),
-			be32_to_cpu(hdr[1]),
-			be32_to_cpu(hdr[2]),
-			be32_to_cpu(hdr[3]),
-			be32_to_cpu(hdr[4]),
-			be32_to_cpu(hdr[5]),
-			be32_to_cpu(hdr[6]),
-			be32_to_cpu(hdr[7]));
-		hlen -= 8;
-		hdr += 8;
-	}
-	switch (hlen) {
-	case 1:
-		qib_cdbg(VPKT, "%08x\n", be32_to_cpu(hdr[0]));
-		break;
-
-	case 2:
-		qib_cdbg(VPKT, "%08x %08x\n",
-			be32_to_cpu(hdr[0]),
-			be32_to_cpu(hdr[1]));
-		break;
-
-	case 3:
-		qib_cdbg(VPKT, "%08x %08x %08x\n",
-			be32_to_cpu(hdr[0]),
-			be32_to_cpu(hdr[1]),
-			be32_to_cpu(hdr[2]));
-		break;
-
-	case 4:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x\n",
-			be32_to_cpu(hdr[0]),
-			be32_to_cpu(hdr[1]),
-			be32_to_cpu(hdr[2]),
-			be32_to_cpu(hdr[3]));
-		break;
-
-	case 5:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x\n",
-			be32_to_cpu(hdr[0]),
-			be32_to_cpu(hdr[1]),
-			be32_to_cpu(hdr[2]),
-			be32_to_cpu(hdr[3]),
-			be32_to_cpu(hdr[4]));
-		break;
-
-	case 6:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x %08x\n",
-			be32_to_cpu(hdr[0]),
-			be32_to_cpu(hdr[1]),
-			be32_to_cpu(hdr[2]),
-			be32_to_cpu(hdr[3]),
-			be32_to_cpu(hdr[4]),
-			be32_to_cpu(hdr[5]));
-		break;
-
-	case 7:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x %08x %08x\n",
-			be32_to_cpu(hdr[0]),
-			be32_to_cpu(hdr[1]),
-			be32_to_cpu(hdr[2]),
-			be32_to_cpu(hdr[3]),
-			be32_to_cpu(hdr[4]),
-			be32_to_cpu(hdr[5]),
-			be32_to_cpu(hdr[6]));
-		break;
-	}
-}
-
-static void qib_dump_data(char *msg, __be32 *dat, unsigned dlen)
-{
-	qib_cdbg(VPKT, "%s len %u\n", msg, dlen);
-	while (dlen >= 8) {
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x %08x %08x %08x\n",
-			be32_to_cpu(dat[0]),
-			be32_to_cpu(dat[1]),
-			be32_to_cpu(dat[2]),
-			be32_to_cpu(dat[3]),
-			be32_to_cpu(dat[4]),
-			be32_to_cpu(dat[5]),
-			be32_to_cpu(dat[6]),
-			be32_to_cpu(dat[7]));
-		dlen -= 8;
-		dat += 8;
-	}
-	switch (dlen) {
-	case 1:
-		qib_cdbg(VPKT, "%08x\n", be32_to_cpu(dat[0]));
-		break;
-
-	case 2:
-		qib_cdbg(VPKT, "%08x %08x\n",
-			be32_to_cpu(dat[0]),
-			be32_to_cpu(dat[1]));
-		break;
-
-	case 3:
-		qib_cdbg(VPKT, "%08x %08x %08x\n",
-			be32_to_cpu(dat[0]),
-			be32_to_cpu(dat[1]),
-			be32_to_cpu(dat[2]));
-		break;
-
-	case 4:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x\n",
-			be32_to_cpu(dat[0]),
-			be32_to_cpu(dat[1]),
-			be32_to_cpu(dat[2]),
-			be32_to_cpu(dat[3]));
-		break;
-
-	case 5:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x\n",
-			be32_to_cpu(dat[0]),
-			be32_to_cpu(dat[1]),
-			be32_to_cpu(dat[2]),
-			be32_to_cpu(dat[3]),
-			be32_to_cpu(dat[4]));
-		break;
-
-	case 6:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x %08x\n",
-			be32_to_cpu(dat[0]),
-			be32_to_cpu(dat[1]),
-			be32_to_cpu(dat[2]),
-			be32_to_cpu(dat[3]),
-			be32_to_cpu(dat[4]),
-			be32_to_cpu(dat[5]));
-		break;
-
-	case 7:
-		qib_cdbg(VPKT, "%08x %08x %08x %08x %08x %08x %08x\n",
-			be32_to_cpu(dat[0]),
-			be32_to_cpu(dat[1]),
-			be32_to_cpu(dat[2]),
-			be32_to_cpu(dat[3]),
-			be32_to_cpu(dat[4]),
-			be32_to_cpu(dat[5]),
-			be32_to_cpu(dat[6]));
-		break;
-	}
-}
-
 /**
  * qib_qp_rcv - processing an incoming packet on a QP
  * @rcd: the context pointer
@@ -695,20 +550,19 @@ static void qib_qp_rcv(struct qib_ctxtdata *rcd, struct qib_ib_header *hdr,
 {
 	struct qib_ibport *ibp = &rcd->ppd->ibport_data;
 
+	spin_lock(&qp->r_lock);
+
 	/* Check for valid receive state. */
 	if (!(ib_qib_state_ops[qp->state] & QIB_PROCESS_RECV_OK)) {
 		ibp->n_pkt_drops++;
-		return;
+		goto unlock;
 	}
 
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_SMI:
 	case IB_QPT_GSI:
-		if (ib_qib_disable_sma) {
-			qib_cdbg(ERRPKT, "Dropped typ %x qp%u SMA disabled\n",
-				 qp->ibqp.qp_type, qp->ibqp.qp_num);
+		if (ib_qib_disable_sma)
 			break;
-		}
 		/* FALLTHROUGH */
 	case IB_QPT_UD:
 		qib_ud_rcv(ibp, hdr, has_grh, data, tlen, qp);
@@ -725,6 +579,9 @@ static void qib_qp_rcv(struct qib_ctxtdata *rcd, struct qib_ib_header *hdr,
 	default:
 		break;
 	}
+
+unlock:
+	spin_unlock(&qp->r_lock);
 }
 
 /**
@@ -783,10 +640,6 @@ void qib_ib_rcv(struct qib_ctxtdata *rcd, void *rhdr, void *data, u32 tlen)
 
 	/* Get the destination QP number. */
 	qp_num = be32_to_cpu(ohdr->bth[1]) & QIB_QPN_MASK;
-	if (qp_num <= 1) {
-		qib_dump_data("RHDR", rhdr, 7); /* LRH+BTH+DETH */
-		qib_dump_data("RDATA", data, 32); /* first 128 bytes */
-	}
 	if (qp_num == QIB_MULTICAST_QPN) {
 		struct qib_mcast *mcast;
 		struct qib_mcast_qp *p;
@@ -921,8 +774,6 @@ static void copy_io(u32 __iomem *piobuf, struct qib_sge_state *ss,
 	u32 data = 0;
 	u32 last;
 
-	qib_cdbg(VPKT, "UDATA len %u (bytes) %u %lu\n", length, ss->num_sge,
-		(unsigned long)ss->sge.vaddr & (sizeof(u32) - 1));
 	while (1) {
 		u32 len = ss->sge.length;
 		u32 off;
@@ -1019,7 +870,6 @@ static void copy_io(u32 __iomem *piobuf, struct qib_sge_state *ss,
 			 * packet.
 			 */
 			w = (len + 3) >> 2;
-			qib_dump_data("UDATA", (__be32 *) ss->sge.vaddr, w);
 			qib_pio_copy(piobuf, ss->sge.vaddr, w - 1);
 			piobuf += w - 1;
 			last = ((u32 *) ss->sge.vaddr)[w - 1];
@@ -1027,7 +877,6 @@ static void copy_io(u32 __iomem *piobuf, struct qib_sge_state *ss,
 		} else {
 			u32 w = len >> 2;
 
-			qib_dump_data("UDATA", (__be32 *) ss->sge.vaddr, w);
 			qib_pio_copy(piobuf, ss->sge.vaddr, w);
 			piobuf += w;
 
@@ -1400,7 +1249,6 @@ static int qib_verbs_send_pio(struct qib_qp *qp, struct qib_ib_header *ibhdr,
 	 * We have to flush after the PBC for correctness on some cpus
 	 * or WC buffer can be written out of order.
 	 */
-	qib_dump_hdr(control, plen, (__be32 *)hdr, hdrwords);
 	writeq(pbc, piobuf);
 	piobuf_orig = piobuf;
 	piobuf += 2;
@@ -1433,7 +1281,6 @@ static int qib_verbs_send_pio(struct qib_qp *qp, struct qib_ib_header *ibhdr,
 		   !((unsigned long)ss->sge.vaddr & (sizeof(u32) - 1)))) {
 		u32 *addr = (u32 *) ss->sge.vaddr;
 
-		qib_dump_data("DATA", ss->sge.vaddr, dwords);
 		/* Update address before sending packet. */
 		update_sge(ss, len);
 		if (flush_wc) {
@@ -1895,6 +1742,11 @@ static int qib_dealloc_pd(struct ib_pd *ibpd)
 
 int qib_check_ah(struct ib_device *ibdev, struct ib_ah_attr *ah_attr)
 {
+	/* A multicast address requires a GRH (see ch. 8.4.1). */
+	if (ah_attr->dlid >= QIB_MULTICAST_LID_BASE &&
+	    ah_attr->dlid != QIB_PERMISSIVE_LID &&
+	    !(ah_attr->ah_flags & IB_AH_GRH))
+		goto bail;
 	if ((ah_attr->ah_flags & IB_AH_GRH) &&
 	    ah_attr->grh.sgid_index >= QIB_GUIDS_PER_PORT)
 		goto bail;
@@ -1928,13 +1780,6 @@ static struct ib_ah *qib_create_ah(struct ib_pd *pd,
 	struct qib_ibdev *dev = to_idev(pd->device);
 	unsigned long flags;
 
-	/* A multicast address requires a GRH (see ch. 8.4.1). */
-	if (ah_attr->dlid >= QIB_MULTICAST_LID_BASE &&
-	    ah_attr->dlid != QIB_PERMISSIVE_LID &&
-	    !(ah_attr->ah_flags & IB_AH_GRH)) {
-		ret = ERR_PTR(-EINVAL);
-		goto bail;
-	}
 	if (qib_check_ah(pd->device, ah_attr)) {
 		ret = ERR_PTR(-EINVAL);
 		goto bail;
@@ -1979,16 +1824,26 @@ static int qib_destroy_ah(struct ib_ah *ibah)
 	struct qib_ah *ah = to_iah(ibah);
 	unsigned long flags;
 
-	if (atomic_read(&ah->refcount) != 0) {
-		qib_dbg("AH busy (cnt %u)\n", atomic_read(&ah->refcount));
+	if (atomic_read(&ah->refcount) != 0)
 		return -EBUSY;
-	}
 
 	spin_lock_irqsave(&dev->n_ahs_lock, flags);
 	dev->n_ahs_allocated--;
 	spin_unlock_irqrestore(&dev->n_ahs_lock, flags);
 
 	kfree(ah);
+
+	return 0;
+}
+
+static int qib_modify_ah(struct ib_ah *ibah, struct ib_ah_attr *ah_attr)
+{
+	struct qib_ah *ah = to_iah(ibah);
+
+	if (qib_check_ah(ibah->device, ah_attr))
+		return -EINVAL;
+
+	ah->attr = *ah_attr;
 
 	return 0;
 }
@@ -2227,8 +2082,9 @@ int qib_register_ib_device(struct qib_devdata *dd)
 		(1ull << IB_USER_VERBS_CMD_ALLOC_PD)            |
 		(1ull << IB_USER_VERBS_CMD_DEALLOC_PD)          |
 		(1ull << IB_USER_VERBS_CMD_CREATE_AH)           |
-		(1ull << IB_USER_VERBS_CMD_DESTROY_AH)          |
+		(1ull << IB_USER_VERBS_CMD_MODIFY_AH)           |
 		(1ull << IB_USER_VERBS_CMD_QUERY_AH)            |
+		(1ull << IB_USER_VERBS_CMD_DESTROY_AH)          |
 		(1ull << IB_USER_VERBS_CMD_REG_MR)              |
 		(1ull << IB_USER_VERBS_CMD_DEREG_MR)            |
 		(1ull << IB_USER_VERBS_CMD_CREATE_COMP_CHANNEL) |
@@ -2266,6 +2122,7 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	ibdev->dealloc_pd = qib_dealloc_pd;
 	ibdev->create_ah = qib_create_ah;
 	ibdev->destroy_ah = qib_destroy_ah;
+	ibdev->modify_ah = qib_modify_ah;
 	ibdev->query_ah = qib_query_ah;
 	ibdev->create_srq = qib_create_srq;
 	ibdev->modify_srq = qib_modify_srq;
@@ -2287,6 +2144,9 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	ibdev->reg_phys_mr = qib_reg_phys_mr;
 	ibdev->reg_user_mr = qib_reg_user_mr;
 	ibdev->dereg_mr = qib_dereg_mr;
+	ibdev->alloc_fast_reg_mr = qib_alloc_fast_reg_mr;
+	ibdev->alloc_fast_reg_page_list = qib_alloc_fast_reg_page_list;
+	ibdev->free_fast_reg_page_list = qib_free_fast_reg_page_list;
 	ibdev->alloc_fmr = qib_alloc_fmr;
 	ibdev->map_phys_fmr = qib_map_phys_fmr;
 	ibdev->unmap_fmr = qib_unmap_fmr;
@@ -2297,7 +2157,10 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	ibdev->mmap = qib_mmap;
 	ibdev->dma_ops = &qib_dma_mapping_ops;
 
-	ret = ib_register_device(ibdev);
+	snprintf(ibdev->node_desc, sizeof(ibdev->node_desc),
+		 QIB_IDSTR " %s", init_utsname()->nodename);
+
+	ret = ib_register_device(ibdev, qib_create_port_files);
 	if (ret)
 		goto err_reg;
 

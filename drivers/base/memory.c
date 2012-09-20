@@ -71,6 +71,20 @@ void unregister_memory_notifier(struct notifier_block *nb)
 }
 EXPORT_SYMBOL(unregister_memory_notifier);
 
+static ATOMIC_NOTIFIER_HEAD(memory_isolate_chain);
+
+int register_memory_isolate_notifier(struct notifier_block *nb)
+{
+	return atomic_notifier_chain_register(&memory_isolate_chain, nb);
+}
+EXPORT_SYMBOL(register_memory_isolate_notifier);
+
+void unregister_memory_isolate_notifier(struct notifier_block *nb)
+{
+	atomic_notifier_chain_unregister(&memory_isolate_chain, nb);
+}
+EXPORT_SYMBOL(unregister_memory_isolate_notifier);
+
 /*
  * register_memory - Setup a sysfs device for a memory block
  */
@@ -173,6 +187,11 @@ static ssize_t show_mem_state(struct sys_device *dev,
 int memory_notify(unsigned long val, void *v)
 {
 	return blocking_notifier_call_chain(&memory_chain, val, v);
+}
+
+int memory_isolate_notify(unsigned long val, void *v)
+{
+	return atomic_notifier_call_chain(&memory_isolate_chain, val, v);
 }
 
 /*
@@ -423,6 +442,37 @@ static inline int memory_fail_init(void)
  * differentiation between which *physical* devices each
  * section belongs to...
  */
+int __weak arch_get_memory_phys_device(unsigned long start_pfn)
+{
+	return 0;
+}
+
+struct memory_block *find_memory_block_hinted(struct mem_section *section,
+					      struct memory_block *hint)
+{
+	struct kobject *kobj;
+	struct sys_device *sysdev;
+	struct memory_block *mem;
+	char name[sizeof(MEMORY_CLASS_NAME) + 9 + 1];
+	int block_id = base_memory_block_id(__section_nr(section));
+
+	kobj = hint ? &hint->sysdev.kobj : NULL;
+
+	/*
+	 * This only works because we know that section == sysdev->id
+	 * slightly redundant with sysdev_register()
+	 */
+	sprintf(&name[0], "%s%d", MEMORY_CLASS_NAME, block_id);
+
+	kobj = kset_find_obj_hinted(&memory_sysdev_class.kset, name, kobj);
+	if (!kobj)
+		return NULL;
+
+	sysdev = container_of(kobj, struct sys_device, kobj);
+	mem = container_of(sysdev, struct memory_block, sysdev);
+
+	return mem;
+}
 
 /*
  * For now, we have a linear search to go find the appropriate
@@ -434,33 +484,14 @@ static inline int memory_fail_init(void)
  */
 struct memory_block *find_memory_block(struct mem_section *section)
 {
-	struct kobject *kobj;
-	struct sys_device *sysdev;
-	struct memory_block *mem;
-	char name[sizeof(MEMORY_CLASS_NAME) + 9 + 1];
-	int block_id = base_memory_block_id(__section_nr(section));
-
-	/*
-	 * This only works because we know that section == sysdev->id
-	 * slightly redundant with sysdev_register()
-	 */
-	sprintf(&name[0], "%s%d", MEMORY_CLASS_NAME, block_id);
-
-	kobj = kset_find_obj(&memory_sysdev_class.kset, name);
-	if (!kobj)
-		return NULL;
-
-	sysdev = container_of(kobj, struct sys_device, kobj);
-	mem = container_of(sysdev, struct memory_block, sysdev);
-
-	return mem;
+	return find_memory_block_hinted(section, NULL);
 }
 
 static int init_memory_block(struct memory_block **memory,
-			     struct mem_section *section, int phys_device,
-			     unsigned long state)
+			     struct mem_section *section, unsigned long state)
 {
 	struct memory_block *mem;
+	unsigned long start_pfn;
 	int ret = 0;
 
 	mem = kzalloc(sizeof(*mem), GFP_KERNEL);
@@ -472,7 +503,8 @@ static int init_memory_block(struct memory_block **memory,
 	mem->state = state;
 	atomic_set(&mem->section_count, 1);
 	mutex_init(&mem->state_mutex);
-	mem->phys_device = phys_device;
+	start_pfn = section_nr_to_pfn(mem->start_phys_index);
+	mem->phys_device = arch_get_memory_phys_device(start_pfn);
 
 	ret = register_memory(mem);
 	if (!ret)
@@ -491,7 +523,7 @@ static int init_memory_block(struct memory_block **memory,
 }
 
 static int add_memory_section(int nid, struct mem_section *section,
-			unsigned long state, int phys_device, enum mem_add_context context)
+			unsigned long state, enum mem_add_context context)
 {
 	struct memory_block *mem;
 	int ret = 0;
@@ -501,7 +533,7 @@ static int add_memory_section(int nid, struct mem_section *section,
 		atomic_inc(&mem->section_count);
 		kobject_put(&mem->sysdev.kobj);
 	} else
-		ret = init_memory_block(&mem, section, phys_device, state);
+		ret = init_memory_block(&mem, section, state);
 
 	if (!ret) {
 		if (context == HOTPLUG &&
@@ -574,7 +606,7 @@ EXPORT_SYMBOL(set_memory_state);
  */
 int register_new_memory(int nid, struct mem_section *section)
 {
-	return add_memory_section(nid, section, MEM_OFFLINE, 0, HOTPLUG);
+	return add_memory_section(nid, section, MEM_OFFLINE, HOTPLUG);
 }
 
 int unregister_memory_section(struct mem_section *section)
@@ -611,7 +643,7 @@ int __init memory_dev_init(void)
 	unsigned int i;
 	int ret;
 	int err;
-	int block_sz;
+	u32 block_sz;
 
 	memory_sysdev_class.kset.uevent_ops = &memory_uevent_ops;
 	ret = sysdev_class_register(&memory_sysdev_class);
@@ -629,7 +661,7 @@ int __init memory_dev_init(void)
 		if (!present_section_nr(i))
 			continue;
 		err = add_memory_section(0, __nr_to_section(i), MEM_ONLINE,
-					0, BOOT);
+					 BOOT);
 		if (!ret)
 			ret = err;
 	}

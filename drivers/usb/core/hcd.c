@@ -38,12 +38,12 @@
 #include <asm/unaligned.h>
 #include <linux/platform_device.h>
 #include <linux/workqueue.h>
+#include <linux/mutex.h>
 
 #include <linux/usb.h>
+#include <linux/usb/hcd.h>
 
 #include "usb.h"
-#include "hcd.h"
-#include "hub.h"
 
 
 /*-------------------------------------------------------------------------*/
@@ -1589,18 +1589,33 @@ rescan:
 	}
 }
 
-/* Check whether a new configuration or alt setting for an interface
- * will exceed the bandwidth for the bus (or the host controller resources).
- * Only pass in a non-NULL config or interface, not both!
- * Passing NULL for both new_config and new_intf means the device will be
- * de-configured by issuing a set configuration 0 command.
+/**
+ * usb_hcd_alloc_bandwidth - check whether a new bandwidth setting exceeds
+ *				the bus bandwidth
+ * @udev: target &usb_device
+ * @new_config: new configuration to install
+ * @cur_alt: the current alternate interface setting
+ * @new_alt: alternate interface setting that is being installed
+ *
+ * To change configurations, pass in the new configuration in new_config,
+ * and pass NULL for cur_alt and new_alt.
+ *
+ * To reset a device's configuration (put the device in the ADDRESSED state),
+ * pass in NULL for new_config, cur_alt, and new_alt.
+ *
+ * To change alternate interface settings, pass in NULL for new_config,
+ * pass in the current alternate interface setting in cur_alt,
+ * and pass in the new alternate interface setting in new_alt.
+ *
+ * Returns an error if the requested bandwidth change exceeds the
+ * bus bandwidth or host controller internal resources.
  */
-int usb_hcd_check_bandwidth(struct usb_device *udev,
+int usb_hcd_alloc_bandwidth(struct usb_device *udev,
 		struct usb_host_config *new_config,
-		struct usb_interface *new_intf)
+		struct usb_host_interface *cur_alt,
+		struct usb_host_interface *new_alt)
 {
 	int num_intfs, i, j;
-	struct usb_interface_cache *intf_cache;
 	struct usb_host_interface *alt = 0;
 	int ret = 0;
 	struct usb_hcd *hcd;
@@ -1611,7 +1626,7 @@ int usb_hcd_check_bandwidth(struct usb_device *udev,
 		return 0;
 
 	/* Configuration is being removed - set configuration 0 */
-	if (!new_config && !new_intf) {
+	if (!new_config && !cur_alt) {
 		for (i = 1; i < 16; ++i) {
 			ep = udev->ep_out[i];
 			if (ep)
@@ -1648,24 +1663,56 @@ int usb_hcd_check_bandwidth(struct usb_device *udev,
 			}
 		}
 		for (i = 0; i < num_intfs; ++i) {
+			struct usb_host_interface *first_alt;
+			int iface_num;
 
-			/* Dig the endpoints for alt setting 0 out of the
-			 * interface cache for this interface
-			 */
-			intf_cache = new_config->intf_cache[i];
-			for (j = 0; j < intf_cache->num_altsetting; j++) {
-				if (intf_cache->altsetting[j].desc.bAlternateSetting == 0)
-					alt = &intf_cache->altsetting[j];
-			}
-			if (!alt) {
-				printk(KERN_DEBUG "Did not find alt setting 0 for intf %d\n", i);
-				continue;
-			}
+			first_alt = &new_config->intf_cache[i]->altsetting[0];
+			iface_num = first_alt->desc.bInterfaceNumber;
+			/* Set up endpoints for alternate interface setting 0 */
+			alt = usb_find_alt_setting(new_config, iface_num, 0);
+			if (!alt)
+				/* No alt setting 0? Pick the first setting. */
+				alt = first_alt;
+
 			for (j = 0; j < alt->desc.bNumEndpoints; j++) {
 				ret = hcd->driver->add_endpoint(hcd, udev, &alt->endpoint[j]);
 				if (ret < 0)
 					goto reset;
 			}
+		}
+	}
+	if (cur_alt && new_alt) {
+		struct usb_interface *iface = usb_ifnum_to_if(udev,
+				cur_alt->desc.bInterfaceNumber);
+
+		if (iface->resetting_device) {
+			/*
+			 * The USB core just reset the device, so the xHCI host
+			 * and the device will think alt setting 0 is installed.
+			 * However, the USB core will pass in the alternate
+			 * setting installed before the reset as cur_alt.  Dig
+			 * out the alternate setting 0 structure, or the first
+			 * alternate setting if a broken device doesn't have alt
+			 * setting 0.
+			 */
+			cur_alt = usb_altnum_to_altsetting(iface, 0);
+			if (!cur_alt)
+				cur_alt = &iface->altsetting[0];
+		}
+
+		/* Drop all the endpoints in the current alt setting */
+		for (i = 0; i < cur_alt->desc.bNumEndpoints; i++) {
+			ret = hcd->driver->drop_endpoint(hcd, udev,
+					&cur_alt->endpoint[i]);
+			if (ret < 0)
+				goto reset;
+		}
+		/* Add all the endpoints in the new alt setting */
+		for (i = 0; i < new_alt->desc.bNumEndpoints; i++) {
+			ret = hcd->driver->add_endpoint(hcd, udev,
+					&new_alt->endpoint[i]);
+			if (ret < 0)
+				goto reset;
 		}
 	}
 	ret = hcd->driver->check_bandwidth(hcd, udev);
@@ -1719,6 +1766,75 @@ void usb_hcd_reset_endpoint(struct usb_device *udev,
 			usb_settoggle(udev, epnum, !is_out, 0);
 	}
 }
+
+/**
+ * usb_alloc_streams - allocate bulk endpoint stream IDs.
+ * @interface:		alternate setting that includes all endpoints.
+ * @eps:		array of endpoints that need streams.
+ * @num_eps:		number of endpoints in the array.
+ * @num_streams:	number of streams to allocate.
+ * @mem_flags:		flags hcd should use to allocate memory.
+ *
+ * Sets up a group of bulk endpoints to have num_streams stream IDs available.
+ * Drivers may queue multiple transfers to different stream IDs, which may
+ * complete in a different order than they were queued.
+ */
+int usb_alloc_streams(struct usb_interface *interface,
+		struct usb_host_endpoint **eps, unsigned int num_eps,
+		unsigned int num_streams, gfp_t mem_flags)
+{
+	struct usb_hcd *hcd;
+	struct usb_device *dev;
+	int i;
+
+	dev = interface_to_usbdev(interface);
+	hcd = bus_to_hcd(dev->bus);
+	if (!hcd->driver->alloc_streams || !hcd->driver->free_streams)
+		return -EINVAL;
+	if (dev->speed != USB_SPEED_SUPER)
+		return -EINVAL;
+
+	/* Streams only apply to bulk endpoints. */
+	for (i = 0; i < num_eps; i++)
+		if (!usb_endpoint_xfer_bulk(&eps[i]->desc))
+			return -EINVAL;
+
+	return hcd->driver->alloc_streams(hcd, dev, eps, num_eps,
+			num_streams, mem_flags);
+}
+EXPORT_SYMBOL_GPL(usb_alloc_streams);
+
+/**
+ * usb_free_streams - free bulk endpoint stream IDs.
+ * @interface:	alternate setting that includes all endpoints.
+ * @eps:	array of endpoints to remove streams from.
+ * @num_eps:	number of endpoints in the array.
+ * @mem_flags:	flags hcd should use to allocate memory.
+ *
+ * Reverts a group of bulk endpoints back to not using stream IDs.
+ * Can fail if we are given bad arguments, or HCD is broken.
+ */
+void usb_free_streams(struct usb_interface *interface,
+		struct usb_host_endpoint **eps, unsigned int num_eps,
+		gfp_t mem_flags)
+{
+	struct usb_hcd *hcd;
+	struct usb_device *dev;
+	int i;
+
+	dev = interface_to_usbdev(interface);
+	hcd = bus_to_hcd(dev->bus);
+	if (dev->speed != USB_SPEED_SUPER)
+		return;
+
+	/* Streams only apply to bulk endpoints. */
+	for (i = 0; i < num_eps; i++)
+		if (!usb_endpoint_xfer_bulk(&eps[i]->desc))
+			return;
+
+	hcd->driver->free_streams(hcd, dev, eps, num_eps, mem_flags);
+}
+EXPORT_SYMBOL_GPL(usb_free_streams);
 
 /* Protect against drivers that try to unlink URBs after the device
  * is gone, by waiting until all unlinks for @udev are finished.
@@ -1915,6 +2031,7 @@ irqreturn_t usb_hcd_irq (int irq, void *__hcd)
 	local_irq_restore(flags);
 	return rc;
 }
+EXPORT_SYMBOL_GPL(usb_hcd_irq);
 
 /*-------------------------------------------------------------------------*/
 
@@ -1984,6 +2101,7 @@ struct usb_hcd *usb_create_hcd (const struct hc_driver *driver,
 #ifdef CONFIG_PM
 	INIT_WORK(&hcd->wakeup_work, hcd_resume_work);
 #endif
+	mutex_init(&hcd->bandwidth_mutex);
 
 	hcd->driver = driver;
 	hcd->product_desc = (driver->product_desc) ? driver->product_desc :

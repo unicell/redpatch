@@ -101,13 +101,36 @@ void __cpuinit fpu_init(void)
 
 	mxcsr_feature_mask_init();
 	/* clean state in init */
-	if (cpu_has_xsave)
-		current_thread_info()->status = TS_XSAVE;
-	else
-		current_thread_info()->status = 0;
+	current_thread_info()->status = 0;
 	clear_used_math();
 }
 #endif	/* CONFIG_X86_64 */
+
+static void fpu_finit(struct fpu *fpu)
+{
+#ifdef CONFIG_X86_32
+	if (!HAVE_HWFP) {
+		finit_soft_fpu(&fpu->state->soft);
+		return;
+	}
+#endif
+
+	if (cpu_has_fxsr) {
+		struct i387_fxsave_struct *fx = &fpu->state->fxsave;
+
+		memset(fx, 0, xstate_size);
+		fx->cwd = 0x37f;
+		if (cpu_has_xmm)
+			fx->mxcsr = MXCSR_DEFAULT;
+	} else {
+		struct i387_fsave_struct *fp = &fpu->state->fsave;
+		memset(fp, 0, xstate_size);
+		fp->cwd = 0xffff037fu;
+		fp->swd = 0xffff0000u;
+		fp->twd = 0xffffffffu;
+		fp->fos = 0xffff0000u;
+	}
+}
 
 /*
  * The _current_ task is using the FPU for the first time
@@ -117,6 +140,8 @@ void __cpuinit fpu_init(void)
  */
 int init_fpu(struct task_struct *tsk)
 {
+	int ret;
+
 	if (tsk_used_math(tsk)) {
 		if (HAVE_HWFP && tsk == current)
 			unlazy_fpu(tsk);
@@ -126,40 +151,12 @@ int init_fpu(struct task_struct *tsk)
 	/*
 	 * Memory allocation at the first usage of the FPU and other state.
 	 */
-	if (!tsk->thread.xstate) {
-		tsk->thread.xstate = kmem_cache_alloc(task_xstate_cachep,
-						      GFP_KERNEL);
-		if (!tsk->thread.xstate)
-			return -ENOMEM;
-	}
+	ret = fpu_alloc((struct fpu *)&tsk->thread.xstate);
+	if (ret)
+		return ret;
 
-#ifdef CONFIG_X86_32
-	if (!HAVE_HWFP) {
-		memset(tsk->thread.xstate, 0, xstate_size);
-		finit_task(tsk);
-		set_stopped_child_used_math(tsk);
-		return 0;
-	}
-#endif
+	fpu_finit((struct fpu *)&tsk->thread.xstate);
 
-	if (cpu_has_fxsr) {
-		struct i387_fxsave_struct *fx = &tsk->thread.xstate->fxsave;
-
-		memset(fx, 0, xstate_size);
-		fx->cwd = 0x37f;
-		if (cpu_has_xmm)
-			fx->mxcsr = MXCSR_DEFAULT;
-	} else {
-		struct i387_fsave_struct *fp = &tsk->thread.xstate->fsave;
-		memset(fp, 0, xstate_size);
-		fp->cwd = 0xffff037fu;
-		fp->swd = 0xffff0000u;
-		fp->twd = 0xffffffffu;
-		fp->fos = 0xffff0000u;
-	}
-	/*
-	 * Only the device not available exception or ptrace can call init_fpu.
-	 */
 	set_stopped_child_used_math(tsk);
 	return 0;
 }
@@ -192,6 +189,8 @@ int xfpregs_get(struct task_struct *target, const struct user_regset *regset,
 	if (ret)
 		return ret;
 
+	sanitize_i387_state(target);
+
 	return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
 				   &target->thread.xstate->fxsave, 0, -1);
 }
@@ -208,6 +207,8 @@ int xfpregs_set(struct task_struct *target, const struct user_regset *regset,
 	ret = init_fpu(target);
 	if (ret)
 		return ret;
+
+	sanitize_i387_state(target);
 
 	ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
 				 &target->thread.xstate->fxsave, 0, -1);
@@ -448,6 +449,8 @@ int fpregs_get(struct task_struct *target, const struct user_regset *regset,
 					   -1);
 	}
 
+	sanitize_i387_state(target);
+
 	if (kbuf && pos == 0 && count == sizeof(env)) {
 		convert_from_fxsr(kbuf, target);
 		return 0;
@@ -468,6 +471,8 @@ int fpregs_set(struct task_struct *target, const struct user_regset *regset,
 	ret = init_fpu(target);
 	if (ret)
 		return ret;
+
+	sanitize_i387_state(target);
 
 	if (!HAVE_HWFP)
 		return fpregs_soft_set(target, regset, pos, count, kbuf, ubuf);
@@ -534,6 +539,9 @@ static int save_i387_xsave(void __user *buf)
 	struct task_struct *tsk = current;
 	struct _fpstate_ia32 __user *fx = buf;
 	int err = 0;
+
+
+	sanitize_i387_state(tsk);
 
 	/*
 	 * For legacy compatible, we always set FP/SSE bits in the bit

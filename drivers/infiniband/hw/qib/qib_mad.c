@@ -260,7 +260,7 @@ static int subn_get_nodedescription(struct ib_smp *smp,
 	if (smp->attr_mod)
 		smp->status |= IB_SMP_INVALID_FIELD;
 
-	strncpy(smp->data, ibdev->node_desc, sizeof(smp->data));
+	memcpy(smp->data, ibdev->node_desc, sizeof(smp->data));
 
 	return reply(smp);
 }
@@ -708,10 +708,6 @@ static int subn_set_portinfo(struct ib_smp *smp, struct ib_device *ibdev,
 			lwe = ppd->link_width_supported;
 		else if (lwe >= 16 || (lwe & ~ppd->link_width_supported))
 			goto err;
-		if (lwe != ppd->link_width_enabled)
-			qib_cdbg(INIT, "IB%u:%u linkwidth set from %x to %x\n",
-				 ppd->dd->unit, ppd->port,
-				ppd->link_width_enabled, lwe);
 		set_link_width_enabled(ppd, lwe);
 	}
 
@@ -726,10 +722,6 @@ static int subn_set_portinfo(struct ib_smp *smp, struct ib_device *ibdev,
 			lse = ppd->link_speed_supported;
 		else if (lse >= 8 || (lse & ~ppd->link_speed_supported))
 			goto err;
-		if (lse != ppd->link_speed_enabled)
-			qib_cdbg(INIT, "IB%u:%u speed set from %x to %x\n",
-				 ppd->dd->unit, ppd->port,
-				ppd->link_speed_enabled, lse);
 		set_link_speed_enabled(ppd, lse);
 	}
 
@@ -803,16 +795,6 @@ static int subn_set_portinfo(struct ib_smp *smp, struct ib_device *ibdev,
 		goto err;
 
 	/*
-	 * interesting stuff reported elsewhere, so verbose only,
-	 * unless a link changes is requested
-	 */
-	if (lstate || state)
-		qib_dbg("IB%u:%u state %u lstate %u lflags %x\n",
-			dd->unit, ppd->port, state, lstate, ppd->lflags);
-	else
-		qib_cdbg(LINKVERB, "IB%u:%u state %u lstate %u lflags %x\n",
-			dd->unit, ppd->port, state, lstate, ppd->lflags);
-	/*
 	 * Only state changes of DOWN, ARM, and ACTIVE are valid
 	 * and must be in the correct state to take effect (see 7.2.6).
 	 */
@@ -865,7 +847,6 @@ static int subn_set_portinfo(struct ib_smp *smp, struct ib_device *ibdev,
 	goto done;
 
 err:
-	qib_dbg("invalid field\n");
 	smp->status |= IB_SMP_INVALID_FIELD;
 get_only:
 	ret = subn_get_portinfo(smp, ibdev, port);
@@ -1522,7 +1503,7 @@ static int pma_get_portcounters_cong(struct ib_perf *pmp,
 	struct qib_ibport *ibp = to_iport(ibdev, port);
 	struct qib_pportdata *ppd = ppd_from_ibp(ibp);
 	struct qib_devdata *dd = dd_from_ppd(ppd);
-	u32 port_select = cpu_to_be32(pmp->attr_mod) & 0xFF;
+	u32 port_select = be32_to_cpu(pmp->attr_mod) & 0xFF;
 	u64 xmit_wait_counter;
 	unsigned long flags;
 
@@ -1532,8 +1513,7 @@ static int pma_get_portcounters_cong(struct ib_perf *pmp,
 	 */
 	if (!dd->psxmitwait_supported)
 		pmp->status |= IB_SMP_UNSUP_METH_ATTR;
-	if ((!(ibp->port_cap_flags & IB_PMA_CLASS_CAP_ALLPORTSELECT) &&
-	     port_select == 0xFF) || port_select != port)
+	if (port_select != port)
 		pmp->status |= IB_SMP_INVALID_FIELD;
 
 	qib_get_counters(ppd, &cntrs);
@@ -1735,8 +1715,7 @@ static int pma_set_portcounters_cong(struct ib_perf *pmp,
 	struct qib_pportdata *ppd = ppd_from_ibp(ibp);
 	struct qib_devdata *dd = dd_from_ppd(ppd);
 	struct qib_verbs_counters cntrs;
-	u32 counter_select =
-		(cpu_to_be32(pmp->attr_mod) >> 24) & 0xFF;
+	u32 counter_select = (be32_to_cpu(pmp->attr_mod) >> 24) & 0xFF;
 	int ret = 0;
 	unsigned long flags;
 
@@ -1826,33 +1805,6 @@ static int process_subn(struct ib_device *ibdev, int mad_flags,
 	struct qib_ibport *ibp = to_iport(ibdev, port);
 	struct qib_pportdata *ppd = ppd_from_ibp(ibp);
 	int ret;
-
-	if (in_mad->mad_hdr.mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE &&
-	    in_mad->mad_hdr.method == IB_MGMT_METHOD_SET &&
-	    in_mad->mad_hdr.attr_id == IB_SMP_ATTR_PORT_INFO) {
-		struct ib_smp *ismp = (struct ib_smp *)in_mad;
-		struct ib_port_info *pip = (struct ib_port_info *)ismp->data;
-
-		if (ismp->hop_cnt > 60 && ismp->hop_ptr > 60) {
-			ppd->std_mode_flag = 1;
-			in_mad->mad_hdr.method = IB_MGMT_METHOD_GET;
-		} else if (((pip->portphysstate_linkdown >> 4) & 0xF) == 3) {
-			/* disabled */
-			ppd->std_mode_flag = 0;
-		}
-	} else if (in_mad->mad_hdr.mgmt_class ==
-			IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE &&
-		   in_mad->mad_hdr.method == IB_MGMT_METHOD_GET &&
-		   in_mad->mad_hdr.attr_id == IB_SMP_ATTR_NODE_INFO &&
-		   ((struct ib_smp*)in_mad)->hop_cnt > 60 &&
-		   ((struct ib_smp*)in_mad)->hop_ptr > 60) {
-		ppd->std_mode_flag = 1;
-		in_mad->mad_hdr.attr_id = IB_SMP_ATTR_PORT_INFO;
-	} else if (in_mad->mad_hdr.mgmt_class ==
-			IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE &&
-		   ((struct ib_smp*)in_mad)->dr_dlid == cpu_to_be16(0x61ff)) {
-		ppd->std_mode_flag = 1;
-	}
 
 	*out_mad = *in_mad;
 	if (smp->class_version != 1) {

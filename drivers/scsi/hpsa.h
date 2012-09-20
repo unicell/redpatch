@@ -1,15 +1,3 @@
-/************************ inventory ***************************
-   This file is part of an export that includes these revisions:
-
-File sbe/src/2.6/hpsa/.gitignore is new; hpsa_1_1_1_2010_04_14 revision 1.1.2.1
-File sbe/src/2.6/hpsa/drivers/scsi/Makefile is new; hpsa_1_1_1_2010_04_14 revision 1.1.2.1
-File sbe/src/2.6/hpsa/drivers/scsi/hpsa.c is new; hpsa_1_1_1_2010_04_14 revision 1.57.2.150
-File sbe/src/2.6/hpsa/drivers/scsi/hpsa.h is new; hpsa_1_1_1_2010_04_14 revision 1.19.2.32
-File sbe/src/2.6/hpsa/drivers/scsi/hpsa_cmd.h is new; hpsa_1_1_1_2010_04_14 revision 1.12.2.21
-File sbe/src/2.6/hpsa/kernel_patches/hpsa_kernel_config.patch is new; hpsa_1_1_1_2010_04_14 revision 1.1
-
-**************************************************************/
-
 /*
  *    Disk Array driver for HP Smart Array SAS controllers
  *    Copyright 2000, 2009 Hewlett-Packard Development Company, L.P.
@@ -57,7 +45,6 @@ struct hpsa_scsi_dev_t {
 	unsigned char device_id[16];    /* from inquiry pg. 0x83 */
 	unsigned char vendor[8];        /* bytes 8-15 of inquiry data */
 	unsigned char model[16];        /* bytes 16-31 of inquiry data */
-	unsigned char revision[4];      /* bytes 32-35 of inquiry data */
 	unsigned char raid_level;	/* from inquiry page 0xC1 */
 };
 
@@ -65,7 +52,6 @@ struct ctlr_info {
 	int	ctlr;
 	char	devname[8];
 	char    *product_name;
-	char	firm_ver[4]; /* Firmware version */
 	struct pci_dev *pdev;
 	u32	board_id;
 	void __iomem *vaddr;
@@ -86,11 +72,12 @@ struct ctlr_info {
 	unsigned int intr[4];
 	unsigned int msix_vector;
 	unsigned int msi_vector;
+	int intr_mode; /* either PERF_MODE_INT or SIMPLE_MODE_INT */
 	struct access_method access;
 
 	/* queue and queue Info */
-	struct hlist_head reqQ;
-	struct hlist_head cmpQ;
+	struct list_head reqQ;
+	struct list_head cmpQ;
 	unsigned int Qdepth;
 	unsigned int maxQsinceinit;
 	unsigned int maxSG;
@@ -168,11 +155,15 @@ struct ctlr_info {
  * HPSA_BOARD_READY_ITERATIONS are derived from those.
  */
 #define HPSA_BOARD_READY_WAIT_SECS (120)
+#define HPSA_BOARD_NOT_READY_WAIT_SECS (10)
 #define HPSA_BOARD_READY_POLL_INTERVAL_MSECS (100)
 #define HPSA_BOARD_READY_POLL_INTERVAL \
 	((HPSA_BOARD_READY_POLL_INTERVAL_MSECS * HZ) / 1000)
 #define HPSA_BOARD_READY_ITERATIONS \
 	((HPSA_BOARD_READY_WAIT_SECS * 1000) / \
+		HPSA_BOARD_READY_POLL_INTERVAL_MSECS)
+#define HPSA_BOARD_NOT_READY_ITERATIONS \
+	((HPSA_BOARD_NOT_READY_WAIT_SECS * 1000) / \
 		HPSA_BOARD_READY_POLL_INTERVAL_MSECS)
 #define HPSA_POST_RESET_PAUSE_MSECS (3000)
 #define HPSA_POST_RESET_NOOP_RETRIES (12)
@@ -221,6 +212,7 @@ static void SA5_submit_command(struct ctlr_info *h,
 	dev_dbg(&h->pdev->dev, "Sending %x, tag = %x\n", c->busaddr,
 		c->Header.Tag.lower);
 	writel(c->busaddr, h->vaddr + SA5_REQUEST_PORT_OFFSET);
+	(void) readl(h->vaddr + SA5_SCRATCHPAD_OFFSET);
 	h->commands_outstanding++;
 	if (h->commands_outstanding > h->max_outstanding)
 		h->max_outstanding = h->commands_outstanding;

@@ -9,7 +9,6 @@
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/cpumask.h>
-#include <acpi/acpi_hest.h>
 #include <linux/pci-aspm.h>
 #include "pci.h"
 
@@ -716,12 +715,6 @@ static void set_pcie_hotplug_bridge(struct pci_dev *pdev)
 		pdev->is_hotplug_bridge = 1;
 }
 
-static void set_pci_aer_firmware_first(struct pci_dev *pdev)
-{
-	if (acpi_hest_firmware_first_pci(pdev))
-		pdev->aer_firmware_first = 1;
-}
-
 #define LEGACY_IO_RESOURCE	(IORESOURCE_IO | IORESOURCE_PCI_FIXED)
 
 /**
@@ -750,7 +743,6 @@ int pci_setup_device(struct pci_dev *dev)
 	dev->multifunction = !!(hdr_type & 0x80);
 	dev->error_state = pci_channel_io_normal;
 	set_pcie_port_type(dev);
-	set_pci_aer_firmware_first(dev);
 
 	list_for_each_entry(slot, &dev->bus->slots, list)
 		if (PCI_SLOT(dev->devfn) == slot->number)
@@ -876,7 +868,7 @@ static void pci_release_dev(struct device *dev)
 
 	pci_dev = to_pci_dev(dev);
 	pci_release_capabilities(pci_dev);
-	kfree(pci_dev);
+	kfree_pci_dev(pci_dev);
 }
 
 /**
@@ -946,11 +938,24 @@ struct pci_dev *alloc_pci_dev(void)
 	if (!dev)
 		return NULL;
 
+	dev->rh_reserved1 = kzalloc(sizeof(struct pci_dev_rh1), GFP_KERNEL);
+	if (!dev->rh_reserved1) {
+		kfree(dev);
+		return NULL;
+	}
+
 	INIT_LIST_HEAD(&dev->bus_list);
 
 	return dev;
 }
 EXPORT_SYMBOL(alloc_pci_dev);
+
+void kfree_pci_dev(struct pci_dev *dev)
+{
+	kfree(dev->rh_reserved1);
+	kfree(dev);
+}
+EXPORT_SYMBOL(kfree_pci_dev);
 
 /*
  * Read the config data for a PCI device, sanity-check it
@@ -996,7 +1001,7 @@ static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
 	dev->device = (l >> 16) & 0xffff;
 
 	if (pci_setup_device(dev)) {
-		kfree(dev);
+		kfree_pci_dev(dev);
 		return NULL;
 	}
 

@@ -677,7 +677,7 @@ struct qib_ibport {
 	u32 n_loop_pkts;
 	u32 n_pkt_drops;
 	u32 n_vl15_dropped;
-	u32 n_timeouts;
+	u32 n_rc_timeouts;
 	u32 n_dmawait;
 	u32 n_unaligned;
 	u32 n_rc_dupreq;
@@ -806,6 +806,7 @@ static inline int qib_send_ok(struct qib_qp *qp)
 }
 
 extern struct workqueue_struct *qib_wq;
+extern struct workqueue_struct *qib_cq_wq;
 
 /*
  * This must be called with s_lock held.
@@ -977,6 +978,15 @@ struct ib_mr *qib_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 			      struct ib_udata *udata);
 
 int qib_dereg_mr(struct ib_mr *ibmr);
+
+struct ib_mr *qib_alloc_fast_reg_mr(struct ib_pd *pd, int max_page_list_len);
+
+struct ib_fast_reg_page_list *qib_alloc_fast_reg_page_list(
+				struct ib_device *ibdev, int page_list_len);
+
+void qib_free_fast_reg_page_list(struct ib_fast_reg_page_list *pl);
+
+int qib_fast_reg_mr(struct qib_qp *qp, struct ib_send_wr *wr);
 
 struct ib_fmr *qib_alloc_fmr(struct ib_pd *pd, int mr_access_flags,
 			     struct ib_fmr_attr *fmr_attr);

@@ -667,11 +667,9 @@ static void qib_6120_put_tid_2(struct qib_devdata *, u64 __iomem *,
  */
 static void qib_6120_txe_recover(struct qib_devdata *dd)
 {
-	if (qib_unordered_wc())
-		qib_dbg("Recovering from TXE PIO parity error\n");
-	else
+	if (!qib_unordered_wc())
 		qib_devinfo(dd->pcidev,
-			 "Recovering from TXE PIO parity error\n");
+			    "Recovering from TXE PIO parity error\n");
 }
 
 /* enable/disable chip from delivering interrupts */
@@ -752,15 +750,9 @@ static void qib_handle_6120_hwerrors(struct qib_devdata *dd, char *msg,
 	int log_idx;
 
 	hwerrs = qib_read_kreg64(dd, kr_hwerrstatus);
-	if (!hwerrs) {
-		/*
-		 * better than printing cofusing messages
-		 * This seems to be related to clearing the crc error, or
-		 * the pll error during init.
-		 */
-		qib_cdbg(VERBOSE, "Called but no hardware errors set\n");
+	if (!hwerrs)
 		return;
-	} else if (hwerrs == ~0ULL) {
+	if (hwerrs == ~0ULL) {
 		qib_dev_err(dd, "Read of hardware error status failed "
 			    "(all bits set); ignoring\n");
 		return;
@@ -786,8 +778,7 @@ static void qib_handle_6120_hwerrors(struct qib_devdata *dd, char *msg,
 	 * Make sure we get this much out, unless told to be quiet,
 	 * or it's occurred within the last 5 seconds.
 	 */
-	if ((hwerrs & ~(TXE_PIO_PARITY | RXEMEMPARITYERR_EAGERTID)) ||
-	    (qib_debug & __QIB_VERBDBG))
+	if (hwerrs & ~(TXE_PIO_PARITY | RXEMEMPARITYERR_EAGERTID))
 		qib_devinfo(dd->pcidev, "Hardware error: hwerr=0x%llx "
 			 "(cleared)\n", (unsigned long long) hwerrs);
 
@@ -815,8 +806,6 @@ static void qib_handle_6120_hwerrors(struct qib_devdata *dd, char *msg,
 			static u32 freeze_cnt;
 
 			freeze_cnt++;
-			qib_dbg("Clearing freezemode on ignored or recovered "
-				"hardware error (%u)\n", freeze_cnt);
 			qib_6120_clear_freeze(dd);
 		} else
 			isfatal = 1;
@@ -907,22 +896,6 @@ static int qib_decode_6120_err(struct qib_devdata *dd, char *buf, size_t blen,
 	if (err & QLOGIC_IB_E_PKTERRS) {
 		if (!(err & ~QLOGIC_IB_E_PKTERRS))
 			iserr = 0;
-		if (qib_debug & __QIB_ERRPKTDBG) {
-			if (err & ERR_MASK(RcvEBPErr))
-				strlcat(buf, "EBP ", blen);
-			if (err & ERR_MASK(RcvVCRCErr))
-				strlcat(buf, "VCRC ", blen);
-			if (err & ERR_MASK(RcvICRCErr)) {
-				strlcat(buf, "CRC ", blen);
-				err &= ERR_MASK(RcvICRCErr);
-			}
-			if (err & ERR_MASK(RcvShortPktLenErr))
-				strlcat(buf, "rshortpktlen ", blen);
-			if (err & ERR_MASK(SendDroppedDataPktErr))
-				strlcat(buf, "sdroppeddatapkt ", blen);
-			if (err & ERR_MASK(SendPktLenErr))
-				strlcat(buf, "spktlen ", blen);
-		}
 		if ((err & ERR_MASK(RcvICRCErr)) &&
 		    !(err&(ERR_MASK(RcvVCRCErr)|ERR_MASK(RcvEBPErr))))
 			strlcat(buf, "CRC ", blen);
@@ -1014,7 +987,6 @@ static int chk_6120_linkrecovery(struct qib_devdata *dd, u64 ibcs)
 		/* and no more until active again */
 		dd->cspec->lastlinkrecov = 0;
 		qib_set_linkstate(dd->pport, QIB_IB_LINKDOWN);
-		dd->pport->std_mode_flag = 0;
 		ret = 0;
 	}
 	if (ibstate == IB_PORT_ACTIVE)
@@ -1060,13 +1032,7 @@ static void handle_6120_errors(struct qib_devdata *dd, u64 errs)
 			 * isn't valid.  We don't want to confuse people, so
 			 * we just don't print them, except at debug
 			 */
-			qib_dbg("Ignoring pkt errors %Lx; link not up\n",
-				(u64)errs);
 			ignore_this_time = errs & E_SUM_LINK_PKTERRS;
-		} else if (qib_debug & __QIB_ERRPKTDBG) {
-			qib_decode_6120_err(dd, msg, sizeof dd->cspec->emsgbuf,
-					    errs);
-			qib_cdbg(ERRPKT, "cleared sendbuferrs: %s\n", msg);
 		}
 	} else if ((errs & E_SUM_LINK_PKTERRS) &&
 		   !(ppd->lflags & QIBL_LINKACTIVE)) {
@@ -1077,8 +1043,6 @@ static void handle_6120_errors(struct qib_devdata *dd, u64 errs)
 		 * valid.  We don't want to confuse people, so we just
 		 * don't print them, except at debug
 		 */
-		qib_dbg("Ignoring pkt errors %Lx; link not up\n",
-			(u64)errs);
 		ignore_this_time = errs & E_SUM_LINK_PKTERRS;
 	}
 
@@ -1121,7 +1085,7 @@ static void handle_6120_errors(struct qib_devdata *dd, u64 errs)
 					    IB_PHYSPORTSTATE_LINK_ERR_RECOVER)
 			handle = 0;
 		if (handle)
-			handle_e_ibstatuschanged(ppd, ibcs);
+			qib_handle_e_ibstatuschanged(ppd, ibcs);
 	}
 
 	if (errs & ERR_MASK(ResetNegated)) {
@@ -1136,11 +1100,8 @@ static void handle_6120_errors(struct qib_devdata *dd, u64 errs)
 	if (*msg && iserr)
 		qib_dev_porterr(dd, ppd->port, "%s error\n", msg);
 
-	if (ppd->state_wanted & ppd->lflags) {
-		qib_cdbg(VERBOSE, "driver wanted state %x, iflags now %x, "
-			 "waking\n", ppd->state_wanted, ppd->lflags);
+	if (ppd->state_wanted & ppd->lflags)
 		wake_up_interruptible(&ppd->state_wait);
-	}
 
 	/*
 	 * If there were hdrq or egrfull errors, wake up any processes
@@ -1179,8 +1140,6 @@ static void qib_6120_init_hwerrors(struct qib_devdata *dd)
 
 	if (!(extsval & QLOGIC_IB_EXTS_MEMBIST_ENDTEST))
 		qib_dev_err(dd, "MemBIST did not complete!\n");
-	if (extsval & QLOGIC_IB_EXTS_MEMBIST_FOUND)
-		qib_dbg("MemBIST corrected\n");
 
 	/* init so all hwerrors interrupt, and enter freeze, ajdust below */
 	val = ~0ULL;
@@ -1240,12 +1199,6 @@ static void qib_set_ib_6120_lstate(struct qib_pportdata *ppd, u16 linkcmd,
 	u64 mod_wd;
 	struct qib_devdata *dd = ppd->dd;
 	unsigned long flags;
-	static const char *what[4] = {
-		[0] = "NOP",
-		[QLOGIC_IB_IBCC_LINKCMD_DOWN] = "DOWN",
-		[QLOGIC_IB_IBCC_LINKCMD_ARMED] = "ARM",
-		[QLOGIC_IB_IBCC_LINKCMD_ACTIVE] = "ACTIVE"
-	};
 
 	if (linitcmd == QLOGIC_IB_IBCC_LINKINITCMD_DISABLE) {
 		/*
@@ -1268,8 +1221,6 @@ static void qib_set_ib_6120_lstate(struct qib_pportdata *ppd, u16 linkcmd,
 
 	mod_wd = (linkcmd << QLOGIC_IB_IBCC_LINKCMD_SHIFT) |
 		(linitcmd << QLOGIC_IB_IBCC_LINKINITCMD_SHIFT);
-	qib_cdbg(LINKVERB, "Moving IB %u:%u to %s (initcmd=0x%x)\n",
-		 dd->unit, ppd->port, what[linkcmd], linitcmd);
 
 	qib_write_kreg(dd, kr_ibcctrl, dd->cspec->ibcctrl | mod_wd);
 	/* write to chip to prevent back-to-back writes of control reg */
@@ -1284,8 +1235,6 @@ static int qib_6120_bringup_serdes(struct qib_pportdata *ppd)
 {
 	struct qib_devdata *dd = ppd->dd;
 	u64 val, config1, prev_val, hwstat, ibc;
-
-	qib_cdbg(VERBOSE, "Trying to bringup serdes IB%u\n", ppd->port);
 
 	/* Put IBC in reset, sends disabled */
 	dd->control &= ~QLOGIC_IB_C_LINKENABLE;
@@ -1320,18 +1269,10 @@ static int qib_6120_bringup_serdes(struct qib_pportdata *ppd)
 	/* initially come up waiting for TS1, without sending anything. */
 	val = dd->cspec->ibcctrl | (QLOGIC_IB_IBCC_LINKINITCMD_DISABLE <<
 		QLOGIC_IB_IBCC_LINKINITCMD_SHIFT);
-	qib_cdbg(INIT, "Writing IB%u:%u ibcctrl as 0x%Lx (shadow %LX), "
-		 "ibmaxlen 0x%x\n", dd->unit, ppd->port, val,
-		 dd->cspec->ibcctrl, ppd->ibmaxlen);
 	qib_write_kreg(dd, kr_ibcctrl, val);
 
 	val = qib_read_kreg64(dd, kr_serdes_cfg0);
 	config1 = qib_read_kreg64(dd, kr_serdes_cfg1);
-
-	qib_cdbg(INIT, "SerDes status config0=%llx config1=%llx, "
-		 "xgxsconfig %llx\n", (unsigned long long) val,
-		 (unsigned long long) config1, (unsigned long long)
-		 qib_read_kreg64(dd, kr_xgxs_cfg));
 
 	/*
 	 * Force reset on, also set rxdetect enable.  Must do before reading
@@ -1365,8 +1306,6 @@ static int qib_6120_bringup_serdes(struct qib_pportdata *ppd)
 		SYM_MASK(SerdesCfg0, ResetC) |
 		SYM_MASK(SerdesCfg0, ResetD)) |
 		SYM_MASK(SerdesCfg0, TxIdeEnX);
-	qib_cdbg(INIT, "Clearing pll reset and setting lane resets "
-		 "and txidle (%llx)\n", (unsigned long long) val);
 	qib_write_kreg(dd, kr_serdes_cfg0, val);
 	/* be sure chip saw it */
 	(void) qib_read_kreg64(dd, kr_scratch);
@@ -1379,8 +1318,6 @@ static int qib_6120_bringup_serdes(struct qib_pportdata *ppd)
 		  SYM_MASK(SerdesCfg0, ResetD)) |
 		 SYM_MASK(SerdesCfg0, TxIdeEnX));
 
-	qib_cdbg(INIT, "Clearing lane resets and txidle "
-		 "(writing %llx)\n", (unsigned long long) val);
 	qib_write_kreg(dd, kr_serdes_cfg0, val);
 	/* be sure chip saw it */
 	(void) qib_read_kreg64(dd, kr_scratch);
@@ -1410,12 +1347,6 @@ static int qib_6120_bringup_serdes(struct qib_pportdata *ppd)
 	/* base and port guid same for single port */
 	ppd->guid = dd->base_guid;
 
-	qib_cdbg(INIT, "done: SerDes status config0=%llx "
-		 "config1=%llx, sstatus=%llx xgxs=%llx\n",
-		 (unsigned long long) val, (unsigned long long) config1,
-		 (unsigned long long) qib_read_kreg64(dd, kr_serdes_stat),
-		 (unsigned long long) qib_read_kreg64(dd, kr_xgxs_cfg));
-
 	/*
 	 * the process of setting and un-resetting the serdes normally
 	 * causes a serdes PLL error, so check for that and clear it
@@ -1424,12 +1355,8 @@ static int qib_6120_bringup_serdes(struct qib_pportdata *ppd)
 	hwstat = qib_read_kreg64(dd, kr_hwerrstatus);
 	if (hwstat) {
 		/* should just have PLL, clear all set, in an case */
-		if (hwstat & ~QLOGIC_IB_HWE_SERDESPLLFAILED)
-			qib_dbg("HWerror (%Lx), not just SerDesPLL\n",
-				hwstat);
-			qib_write_kreg(dd, kr_hwerrclear, hwstat);
-			qib_write_kreg(dd, kr_errclear,
-				       ERR_MASK(HardwareErr));
+		qib_write_kreg(dd, kr_hwerrclear, hwstat);
+		qib_write_kreg(dd, kr_errclear, ERR_MASK(HardwareErr));
 	}
 
 	dd->control |= QLOGIC_IB_C_LINKENABLE;
@@ -1486,8 +1413,6 @@ static void qib_6120_quiet_serdes(struct qib_pportdata *ppd)
 
 	val = qib_read_kreg64(dd, kr_serdes_cfg0);
 	val |= SYM_MASK(SerdesCfg0, TxIdeEnX);
-	qib_dbg("Setting TxIdleEn on serdes (config0 = %llx)\n",
-		(unsigned long long) val);
 	qib_write_kreg(dd, kr_serdes_cfg0, val);
 }
 
@@ -1558,8 +1483,6 @@ static void qib_6120_setup_setextled(struct qib_pportdata *ppd, u32 on)
 static void qib_6120_free_irq(struct qib_devdata *dd)
 {
 	if (dd->cspec->irq) {
-		qib_cdbg(VERBOSE, "unit %u free irq %d\n",
-			 dd->unit, dd->cspec->irq);
 		free_irq(dd->cspec->irq, dd);
 		dd->cspec->irq = 0;
 	}
@@ -1641,18 +1564,12 @@ static noinline void unlikely_6120_intr(struct qib_devdata *dd, u64 istat)
 			 * Count appropriately, clear bits out of our copy,
 			 * as they have been "handled".
 			 */
-			if (gpiostatus & (1 << GPIO_RXUVL_BIT)) {
-				qib_dbg("FlowCtl on UnsupVL\n");
+			if (gpiostatus & (1 << GPIO_RXUVL_BIT))
 				dd->cspec->rxfc_unsupvl_errs++;
-			}
-			if (gpiostatus & (1 << GPIO_OVRUN_BIT)) {
-				qib_dbg("Overrun Threshold exceeded\n");
+			if (gpiostatus & (1 << GPIO_OVRUN_BIT))
 				dd->cspec->overrun_thresh_errs++;
-			}
-			if (gpiostatus & (1 << GPIO_LLI_BIT)) {
-				qib_dbg("Local Link Integrity error\n");
+			if (gpiostatus & (1 << GPIO_LLI_BIT))
 				dd->cspec->lli_errs++;
-			}
 			gpiostatus &= ~GPIO_ERRINTR_MASK;
 		}
 		if (gpiostatus) {
@@ -1663,20 +1580,13 @@ static noinline void unlikely_6120_intr(struct qib_devdata *dd, u64 istat)
 			 * the mask. It is almost certainly due to error.
 			 */
 			const u32 mask = qib_read_kreg32(dd, kr_gpio_mask);
-			const u32 mask_shad = (u32) dd->cspec->gpio_mask;
 
 			/*
 			 * Also check that the chip reflects our shadow,
 			 * and report issues, If they caused the interrupt.
 			 * we will suppress by refreshing from the shadow.
 			 */
-			if (mask != mask_shad)
-				qib_dbg("GPIOMask %04X != shadow %04X, fix\n",
-					mask, mask_shad);
-
 			if (mask & gpiostatus) {
-				qib_dbg("Unexpected GPIO IRQ bits %x\n",
-					gpiostatus & mask);
 				to_clear |= (gpiostatus & mask);
 				dd->cspec->gpio_mask &= ~(gpiostatus & mask);
 				qib_write_kreg(dd, kr_gpio_mask,
@@ -1913,17 +1823,10 @@ static int qib_6120_setup_reset(struct qib_devdata *dd)
 		 */
 		val = readq(&dd->kregbase[kr_revision]);
 		if (val == dd->revision) {
-			qib_cdbg(INIT, "Got matching revision "
-				 "register %llx on try %d\n",
-				 (unsigned long long) val, i);
 			dd->flags |= QIB_PRESENT; /* it's back */
 			ret = qib_reinit_intr(dd);
 			goto bail;
 		}
-		/* Probably getting -1 back */
-		qib_dbg("Didn't get expected revision register, "
-			"got %llx, try %d\n", (unsigned long long) val,
-			i + 1);
 	}
 	ret = 0; /* failed */
 
@@ -2076,7 +1979,6 @@ static void qib_6120_clear_tids(struct qib_devdata *dd,
 		return;
 
 	ctxt = rcd->ctxt;
-	qib_cdbg(VERBOSE, "Invalidate TIDs for ctxt %u\n", ctxt);
 
 	tidinv = dd->tidinvalid;
 	tidbase = (u64 __iomem *)
@@ -2142,11 +2044,8 @@ int __attribute__((weak)) qib_unordered_wc(void)
 static int qib_6120_get_base_info(struct qib_ctxtdata *rcd,
 				  struct qib_base_info *kinfo)
 {
-	if (qib_unordered_wc()) {
+	if (qib_unordered_wc())
 		kinfo->spi_runtime_flags |= QIB_RUNTIME_FORCE_WC_ORDER;
-		qib_cdbg(PROC, "Intel processor, forcing WC order\n");
-	} else
-		qib_cdbg(PROC, "Not Intel processor, WC ordered\n");
 
 	kinfo->spi_runtime_flags |= QIB_RUNTIME_PCIE |
 		QIB_RUNTIME_FORCE_PIOAVAIL | QIB_RUNTIME_PIO_REGSWAPPED;
@@ -2623,8 +2522,7 @@ static void init_6120_cntrnames(struct qib_devdata *dd)
 	dd->cspec->cntrs = kmalloc(dd->cspec->ncntrs
 		* sizeof(u64), GFP_KERNEL);
 	if (!dd->cspec->cntrs)
-		qib_dev_err(dd,
-			"Failed allocation for counters\n");
+		qib_dev_err(dd, "Failed allocation for counters\n");
 
 	for (i = 0, s = (char *)portcntr6120names; s; i++)
 		s = strchr(s + 1, '\n');
@@ -2633,8 +2531,7 @@ static void init_6120_cntrnames(struct qib_devdata *dd)
 	dd->cspec->portcntrs = kmalloc(dd->cspec->nportcntrs
 		* sizeof(u64), GFP_KERNEL);
 	if (!dd->cspec->portcntrs)
-		qib_dev_err(dd, "Failed allocation for"
-			    " portcounters\n");
+		qib_dev_err(dd, "Failed allocation for portcounters\n");
 }
 
 static u32 qib_read_6120cntrs(struct qib_devdata *dd, loff_t pos, char **namep,
@@ -2739,10 +2636,7 @@ static void qib_chk_6120_errormask(struct qib_devdata *dd)
 			 "errormask fixed(%u) %lx->%lx, ctrl %x hwerr %lx\n",
 			 fixed, errormask, (unsigned long)dd->cspec->errormask,
 			 ctrl, hwerrs);
-	} else
-		qib_dbg("errormask fixed(%u) %lx -> %lx, no freeze\n",
-			fixed, errormask,
-			(unsigned long)dd->cspec->errormask);
+	}
 }
 
 /**
@@ -2929,7 +2823,6 @@ static int qib_6120_set_ib_cfg(struct qib_pportdata *ppd, int which, u32 val)
 		val64 = (u64) ppd->pkeys[0] | ((u64) ppd->pkeys[1] << 16) |
 			((u64) ppd->pkeys[2] << 32) |
 			((u64) ppd->pkeys[3] << 48);
-		qib_cdbg(VERBOSE, "kctxt new pkey reg %Lx\n", val64);
 		qib_write_kreg(dd, kr_partitionkey, val64);
 		break;
 
@@ -2954,10 +2847,6 @@ static int qib_6120_set_ib_cfg(struct qib_pportdata *ppd, int which, u32 val)
 		 * on changes.
 		 */
 		val = (ppd->ibmaxlen >> 2) + 1;
-		if ((val << SYM_LSB(IBCCtrl, MaxPktLen)) !=
-		    (dd->cspec->ibcctrl & SYM_MASK(IBCCtrl, MaxPktLen)))
-			qib_dbg("New maxpktlen 0x%x words, mtu 0x%x\n",
-				ppd->ibmaxlen, ppd->ibmtu);
 		dd->cspec->ibcctrl &= ~SYM_MASK(IBCCtrl, MaxPktLen);
 		dd->cspec->ibcctrl |= (u64)val <<
 			SYM_LSB(IBCCtrl, MaxPktLen);
@@ -3254,22 +3143,12 @@ static void get_6120_chip_params(struct qib_devdata *dd)
 		 * ever buf allocate
 		 */
 		dd->align4k = ALIGN(dd->piosize4k, dd->palign);
-		qib_cdbg(INIT, "%u 2k(%x) piobufs @ %p, %u 4k(%x) @ %p "
-			 "(%x aligned)\n",
-			 dd->piobcnt2k, dd->piosize2k,
-			 dd->pio2kbase, dd->piobcnt4k,
-			 dd->piosize4k, dd->pio4kbase,
-			 dd->align4k);
-	} else
-		qib_cdbg(INIT, "%u 2k piobufs @ %p\n",
-			 dd->piobcnt2k, dd->pio2kbase);
+	}
 
 	piobufs = dd->piobcnt4k + dd->piobcnt2k;
 
-	dd->pioavregs = ALIGN(piobufs, sizeof(u64) * BITS_PER_BYTE / 2)
-		/ (sizeof(u64) * BITS_PER_BYTE / 2);
-	qib_cdbg(INIT, "%d sndbuffs, %d pioavregs\n", piobufs,
-		 dd->pioavregs);
+	dd->pioavregs = ALIGN(piobufs, sizeof(u64) * BITS_PER_BYTE / 2) /
+		(sizeof(u64) * BITS_PER_BYTE / 2);
 }
 
 /*
@@ -3333,7 +3212,6 @@ static int init_6120_variables(struct qib_devdata *dd)
 	spin_lock_init(&dd->cspec->gpio_lock);
 
 	/* we haven't yet set QIB_PRESENT, so use read directly */
-	qib_cdbg(VERBOSE, "Try to read chip revision\n");
 	dd->revision = readq(&dd->kregbase[kr_revision]);
 
 	if ((dd->revision & 0xffffffffU) == 0xffffffffU) {
@@ -3464,7 +3342,7 @@ bail:
  * time periods, covered by the chip reads done here and as part of the
  * flush.
  */
-u32 __iomem *get_6120_link_buf(struct qib_pportdata *ppd, u32 *bnum)
+static u32 __iomem *get_6120_link_buf(struct qib_pportdata *ppd, u32 *bnum)
 {
 	u32 __iomem *buf;
 	u32 lbuf = ppd->dd->piobcnt2k + ppd->dd->piobcnt4k - 1;
@@ -3488,7 +3366,6 @@ done:
 	return buf;
 }
 
-
 static u32 __iomem *qib_6120_getsendbuf(struct qib_pportdata *ppd, u64 pbc,
 					u32 *pbufnum)
 {
@@ -3510,10 +3387,6 @@ static u32 __iomem *qib_6120_getsendbuf(struct qib_pportdata *ppd, u64 pbc,
 		buf = qib_getsendbuf_range(dd, pbufnum, first, last);
 	}
 	return buf;
-}
-
-static void dump_sdma_6120_state(struct qib_pportdata *ppd)
-{
 }
 
 static int init_sdma_6120_regs(struct qib_pportdata *ppd)
@@ -3601,14 +3474,6 @@ struct qib_devdata *qib_init_iba6120_funcs(struct pci_dev *pdev,
 	struct qib_devdata *dd;
 	int ret;
 
-#ifndef CONFIG_PCI_MSI
-	qib_early_err(&pdev->dev, "QLogic PCIE device 0x%x cannot "
-	      "work if CONFIG_PCI_MSI is not enabled\n",
-	      ent->device);
-	dd = ERR_PTR(-ENODEV);
-	goto bail;
-#endif
-
 	dd = qib_alloc_devdata(pdev, sizeof(struct qib_pportdata) +
 			       sizeof(struct qib_chip_specific));
 	if (IS_ERR(dd))
@@ -3640,7 +3505,6 @@ struct qib_devdata *qib_init_iba6120_funcs(struct pci_dev *pdev,
 	dd->f_read_portcntrs    = qib_read_6120portcntrs;
 	dd->f_reset             = qib_6120_setup_reset;
 	dd->f_init_sdma_regs    = init_sdma_6120_regs;
-	dd->f_dump_sdma_state   = dump_sdma_6120_state;
 	dd->f_sdma_busy         = qib_sdma_6120_busy;
 	dd->f_sdma_gethead      = qib_sdma_6120_gethead;
 	dd->f_sdma_sendctrl     = qib_6120_sdma_sendctrl;
@@ -3670,10 +3534,8 @@ struct qib_devdata *qib_init_iba6120_funcs(struct pci_dev *pdev,
 	 * init_6120_variables.
 	 */
 	ret = qib_pcie_ddinit(dd, pdev, ent);
-	if (ret < 0) {
-		qib_dbg("pcie_ddinit code failed: %d\n", ret);
+	if (ret < 0)
 		goto bail_free;
-	}
 
 	/* initialize chip-specific variables */
 	ret = init_6120_variables(dd);
@@ -3682,10 +3544,6 @@ struct qib_devdata *qib_init_iba6120_funcs(struct pci_dev *pdev,
 
 	if (qib_mini_init)
 		goto bail;
-
-#ifndef CONFIG_PCI_MSI
-	qib_dev_err(dd, "PCI_MSI not configured, NO interrupts\n");
-#endif
 
 	if (qib_pcie_params(dd, 8, NULL, NULL))
 		qib_dev_err(dd, "Failed to setup PCIe or interrupts; "
@@ -3696,12 +3554,9 @@ struct qib_devdata *qib_init_iba6120_funcs(struct pci_dev *pdev,
 	qib_write_kreg(dd, kr_hwdiagctrl, 0);
 
 	if (qib_read_kreg64(dd, kr_hwerrstatus) &
-	    QLOGIC_IB_HWE_SERDESPLLFAILED) {
-		qib_cdbg(INIT, "At start, serdes PLL failed bit set "
-			 "in hwerrstatus, clearing and continuing\n");
+	    QLOGIC_IB_HWE_SERDESPLLFAILED)
 		qib_write_kreg(dd, kr_hwerrclear,
 			       QLOGIC_IB_HWE_SERDESPLLFAILED);
-	}
 
 	/* setup interrupt handler (interrupt type handled above) */
 	qib_setup_6120_interrupt(dd);

@@ -31,6 +31,7 @@
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/netdevice.h>
 
 #include "e1000_regs.h"
 #include "e1000_defines.h"
@@ -53,6 +54,11 @@ struct e1000_hw;
 #define E1000_DEV_ID_82580_SERDES             0x1510
 #define E1000_DEV_ID_82580_SGMII              0x1511
 #define E1000_DEV_ID_82580_COPPER_DUAL        0x1516
+#define E1000_DEV_ID_82580_QUAD_FIBER         0x1527
+#define E1000_DEV_ID_DH89XXCC_SGMII           0x0438
+#define E1000_DEV_ID_DH89XXCC_SERDES          0x043A
+#define E1000_DEV_ID_DH89XXCC_BACKPLANE       0x043C
+#define E1000_DEV_ID_DH89XXCC_SFP             0x0440
 #define E1000_DEV_ID_I350_COPPER              0x1521
 #define E1000_DEV_ID_I350_FIBER               0x1522
 #define E1000_DEV_ID_I350_SERDES              0x1523
@@ -242,6 +248,10 @@ struct e1000_hw_stats {
 	u64 scvpc;
 	u64 hrmpc;
 	u64 doosync;
+	u64 o2bgptc;
+	u64 o2bspc;
+	u64 b2ospc;
+	u64 b2ogprc;
 };
 
 struct e1000_phy_stats {
@@ -326,6 +336,8 @@ struct e1000_nvm_operations {
 	s32  (*read)(struct e1000_hw *, u16, u16, u16 *);
 	void (*release)(struct e1000_hw *);
 	s32  (*write)(struct e1000_hw *, u16, u16, u16 *);
+	s32  (*update)(struct e1000_hw *);
+	s32  (*validate)(struct e1000_hw *);
 };
 
 struct e1000_info {
@@ -345,19 +357,12 @@ struct e1000_mac_info {
 
 	enum e1000_mac_type type;
 
-	u32 collision_delta;
 	u32 ledctl_default;
 	u32 ledctl_mode1;
 	u32 ledctl_mode2;
 	u32 mc_filter_type;
-	u32 tx_packet_delta;
 	u32 txcw;
 
-	u16 current_ifs_val;
-	u16 ifs_max_val;
-	u16 ifs_min_val;
-	u16 ifs_ratio;
-	u16 ifs_step_size;
 	u16 mta_reg_count;
 	u16 uta_reg_count;
 
@@ -419,7 +424,6 @@ struct e1000_phy_info {
 
 struct e1000_nvm_info {
 	struct e1000_nvm_operations ops;
-
 	enum e1000_nvm_type type;
 	enum e1000_nvm_override override;
 
@@ -485,6 +489,7 @@ struct e1000_mbx_info {
 struct e1000_dev_spec_82575 {
 	bool sgmii_active;
 	bool global_device_reset;
+	bool eee_disable;
 };
 
 struct e1000_hw {
@@ -514,14 +519,11 @@ struct e1000_hw {
 	u8  revision_id;
 };
 
-#ifdef DEBUG
-extern char *igb_get_hw_dev_name(struct e1000_hw *hw);
+extern struct net_device *igb_get_hw_dev(struct e1000_hw *hw);
 #define hw_dbg(format, arg...) \
-	printk(KERN_DEBUG "%s: " format, igb_get_hw_dev_name(hw), ##arg)
-#else
-#define hw_dbg(format, arg...)
-#endif
-#endif
+	netdev_dbg(igb_get_hw_dev(hw), format, ##arg)
+
 /* These functions must be implemented by drivers */
 s32  igb_read_pcie_cap_reg(struct e1000_hw *hw, u32 reg, u16 *value);
 s32  igb_write_pcie_cap_reg(struct e1000_hw *hw, u32 reg, u16 *value);
+#endif /* _E1000_HW_H_ */

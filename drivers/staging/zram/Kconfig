@@ -1,5 +1,6 @@
 config ZRAM
 	tristate "Compressed RAM block device support"
+	depends on BLOCK && SYSFS
 	select LZO_COMPRESS
 	select LZO_DECOMPRESS
 	default n
@@ -15,14 +16,10 @@ config ZRAM
 	  See zram.txt for more information.
 	  Project home: http://compcache.googlecode.com/
 
-config ZRAM_STATS
-	bool "Enable statistics for compressed RAM disks"
+config ZRAM_DEBUG
+	bool "Compressed RAM block device debug support"
 	depends on ZRAM
-	default y
+	default n
 	help
-	  Enable statistics collection for compressed RAM devices. Statistics
-	  are exported through ioctl interface, so you have to use zramconfig
-	  program to get them. This adds only a minimal overhead.
-
-	  If unsure, say Y.
-
+	  This option adds additional debugging code to the compressed
+	  RAM block device driver.

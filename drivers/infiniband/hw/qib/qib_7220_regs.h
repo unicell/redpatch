@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009 QLogic Corporation. All rights reserved.
+ * Copyright (c) 2008, 2009, 2010 QLogic Corporation. All rights reserved.
  *
  *
  * This software is available to you under a choice of one of two
@@ -74,54 +74,6 @@
 
 #define QIB_7220_PortCnt_OFFS 0x18
 
-#define QIB_7220_DbgPortSel_OFFS 0x20
-#define QIB_7220_DbgPortSel_EnhMode_SrcMuxSelWrEn_LSB 0x3F
-#define QIB_7220_DbgPortSel_EnhMode_SrcMuxSelWrEn_RMASK 0x1
-#define QIB_7220_DbgPortSel_EnhMode_SrcMuxSelIndex_LSB 0x35
-#define QIB_7220_DbgPortSel_EnhMode_SrcMuxSelIndex_RMASK 0x3FF
-#define QIB_7220_DbgPortSel_EnEnhancedDebugMode_LSB 0x34
-#define QIB_7220_DbgPortSel_EnEnhancedDebugMode_RMASK 0x1
-#define QIB_7220_DbgPortSel_EnDbgPort_LSB 0x33
-#define QIB_7220_DbgPortSel_EnDbgPort_RMASK 0x1
-#define QIB_7220_DbgPortSel_DbgClkPortSel_LSB 0x2E
-#define QIB_7220_DbgPortSel_DbgClkPortSel_RMASK 0x1F
-#define QIB_7220_DbgPortSel_SrcMuxSel_LSB 0x20
-#define QIB_7220_DbgPortSel_SrcMuxSel_RMASK 0x3FFF
-#define QIB_7220_DbgPortSel_NibbleSel7_LSB 0x1C
-#define QIB_7220_DbgPortSel_NibbleSel7_RMASK 0xF
-#define QIB_7220_DbgPortSel_NibbleSel6_LSB 0x18
-#define QIB_7220_DbgPortSel_NibbleSel6_RMASK 0xF
-#define QIB_7220_DbgPortSel_NibbleSel5_LSB 0x14
-#define QIB_7220_DbgPortSel_NibbleSel5_RMASK 0xF
-#define QIB_7220_DbgPortSel_NibbleSel4_LSB 0x10
-#define QIB_7220_DbgPortSel_NibbleSel4_RMASK 0xF
-#define QIB_7220_DbgPortSel_NibbleSel3_LSB 0xC
-#define QIB_7220_DbgPortSel_NibbleSel3_RMASK 0xF
-#define QIB_7220_DbgPortSel_NibbleSel2_LSB 0x8
-#define QIB_7220_DbgPortSel_NibbleSel2_RMASK 0xF
-#define QIB_7220_DbgPortSel_NibbleSel1_LSB 0x4
-#define QIB_7220_DbgPortSel_NibbleSel1_RMASK 0xF
-#define QIB_7220_DbgPortSel_NibbleSel0_LSB 0x0
-#define QIB_7220_DbgPortSel_NibbleSel0_RMASK 0xF
-
-#define QIB_7220_DebugSigsIntSel_OFFS 0x28
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_epb_pcie_LSB 0x14
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_epb_pcie_RMASK 0x1
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_xgxs_LSB 0x10
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_xgxs_RMASK 0xF
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcie_rx_tx_LSB 0xF
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcie_rx_tx_RMASK 0x1
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_rxdet_encdec_lane_LSB 0xB
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_rxdet_encdec_lane_RMASK 0xF
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_symlock_elfifo_lane_LSB 0x7
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_symlock_elfifo_lane_RMASK 0xF
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_sdout_LSB 0x6
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_sdout_RMASK 0x1
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_pipe_lane815_LSB 0x3
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_pipe_lane815_RMASK 0x7
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_pipe_lane07_LSB 0x0
-#define QIB_7220_DebugSigsIntSel_debug_port_sel_pcs_pipe_lane07_RMASK 0x7
-
 #define QIB_7220_SendRegBase_OFFS 0x30
 
 #define QIB_7220_UserRegBase_OFFS 0x38
@@ -129,98 +81,6 @@
 #define QIB_7220_CntrRegBase_OFFS 0x40
 
 #define QIB_7220_Scratch_OFFS 0x48
-
-#define QIB_7220_REG_000050_OFFS 0x50
-
-#define QIB_7220_IntBlocked_OFFS 0x60
-#define QIB_7220_IntBlocked_SDmaIntBlocked_LSB 0x3F
-#define QIB_7220_IntBlocked_SDmaIntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_SDmaDisabledBlocked_LSB 0x3E
-#define QIB_7220_IntBlocked_SDmaDisabledBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_Reserved_LSB 0x31
-#define QIB_7220_IntBlocked_Reserved_RMASK 0x1FFF
-#define QIB_7220_IntBlocked_RcvUrg16IntBlocked_LSB 0x30
-#define QIB_7220_IntBlocked_RcvUrg16IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg15IntBlocked_LSB 0x2F
-#define QIB_7220_IntBlocked_RcvUrg15IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg14IntBlocked_LSB 0x2E
-#define QIB_7220_IntBlocked_RcvUrg14IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg13IntBlocked_LSB 0x2D
-#define QIB_7220_IntBlocked_RcvUrg13IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg12IntBlocked_LSB 0x2C
-#define QIB_7220_IntBlocked_RcvUrg12IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg11IntBlocked_LSB 0x2B
-#define QIB_7220_IntBlocked_RcvUrg11IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg10IntBlocked_LSB 0x2A
-#define QIB_7220_IntBlocked_RcvUrg10IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg9IntBlocked_LSB 0x29
-#define QIB_7220_IntBlocked_RcvUrg9IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg8IntBlocked_LSB 0x28
-#define QIB_7220_IntBlocked_RcvUrg8IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg7IntBlocked_LSB 0x27
-#define QIB_7220_IntBlocked_RcvUrg7IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg6IntBlocked_LSB 0x26
-#define QIB_7220_IntBlocked_RcvUrg6IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg5IntBlocked_LSB 0x25
-#define QIB_7220_IntBlocked_RcvUrg5IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg4IntBlocked_LSB 0x24
-#define QIB_7220_IntBlocked_RcvUrg4IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg3IntBlocked_LSB 0x23
-#define QIB_7220_IntBlocked_RcvUrg3IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg2IntBlocked_LSB 0x22
-#define QIB_7220_IntBlocked_RcvUrg2IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg1IntBlocked_LSB 0x21
-#define QIB_7220_IntBlocked_RcvUrg1IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvUrg0IntBlocked_LSB 0x20
-#define QIB_7220_IntBlocked_RcvUrg0IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_ErrorIntBlocked_LSB 0x1F
-#define QIB_7220_IntBlocked_ErrorIntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_PioSetIntBlocked_LSB 0x1E
-#define QIB_7220_IntBlocked_PioSetIntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_PioBufAvailIntBlocked_LSB 0x1D
-#define QIB_7220_IntBlocked_PioBufAvailIntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_assertGPIOIntBlocked_LSB 0x1C
-#define QIB_7220_IntBlocked_assertGPIOIntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_IBSerdesTrimDoneIntBlocked_LSB 0x1B
-#define QIB_7220_IntBlocked_IBSerdesTrimDoneIntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_JIntBlocked_LSB 0x1A
-#define QIB_7220_IntBlocked_JIntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_Reserved1_LSB 0x11
-#define QIB_7220_IntBlocked_Reserved1_RMASK 0x1FF
-#define QIB_7220_IntBlocked_RcvAvail16IntBlocked_LSB 0x10
-#define QIB_7220_IntBlocked_RcvAvail16IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail15IntBlocked_LSB 0xF
-#define QIB_7220_IntBlocked_RcvAvail15IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail14IntBlocked_LSB 0xE
-#define QIB_7220_IntBlocked_RcvAvail14IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail13IntBlocked_LSB 0xD
-#define QIB_7220_IntBlocked_RcvAvail13IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail12IntBlocked_LSB 0xC
-#define QIB_7220_IntBlocked_RcvAvail12IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail11IntBlocked_LSB 0xB
-#define QIB_7220_IntBlocked_RcvAvail11IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail10IntBlocked_LSB 0xA
-#define QIB_7220_IntBlocked_RcvAvail10IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail9IntBlocked_LSB 0x9
-#define QIB_7220_IntBlocked_RcvAvail9IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail8IntBlocked_LSB 0x8
-#define QIB_7220_IntBlocked_RcvAvail8IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail7IntBlocked_LSB 0x7
-#define QIB_7220_IntBlocked_RcvAvail7IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail6IntBlocked_LSB 0x6
-#define QIB_7220_IntBlocked_RcvAvail6IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail5IntBlocked_LSB 0x5
-#define QIB_7220_IntBlocked_RcvAvail5IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail4IntBlocked_LSB 0x4
-#define QIB_7220_IntBlocked_RcvAvail4IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail3IntBlocked_LSB 0x3
-#define QIB_7220_IntBlocked_RcvAvail3IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail2IntBlocked_LSB 0x2
-#define QIB_7220_IntBlocked_RcvAvail2IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail1IntBlocked_LSB 0x1
-#define QIB_7220_IntBlocked_RcvAvail1IntBlocked_RMASK 0x1
-#define QIB_7220_IntBlocked_RcvAvail0IntBlocked_LSB 0x0
-#define QIB_7220_IntBlocked_RcvAvail0IntBlocked_RMASK 0x1
 
 #define QIB_7220_IntMask_OFFS 0x68
 #define QIB_7220_IntMask_SDmaIntMask_LSB 0x3F
@@ -1150,40 +1010,6 @@
 
 #define QIB_7220_HRTBT_GUID_OFFS 0x188
 
-#define QIB_7220_IB_SDTEST_IF_TX_OFFS 0x190
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_RX_CFG_LSB 0x30
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_RX_CFG_RMASK 0xFFFF
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_TX_CFG_LSB 0x20
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_TX_CFG_RMASK 0xFFFF
-#define QIB_7220_IB_SDTEST_IF_TX_Reserved_LSB 0x10
-#define QIB_7220_IB_SDTEST_IF_TX_Reserved_RMASK 0xFFFF
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_SPEED_LSB 0xD
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_SPEED_RMASK 0x7
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_OPCODE_LSB 0xB
-#define QIB_7220_IB_SDTEST_IF_TX_TS_TX_OPCODE_RMASK 0x3
-#define QIB_7220_IB_SDTEST_IF_TX_Reserved1_LSB 0x2
-#define QIB_7220_IB_SDTEST_IF_TX_Reserved1_RMASK 0x1FF
-#define QIB_7220_IB_SDTEST_IF_TX_TS_3_TX_VALID_LSB 0x1
-#define QIB_7220_IB_SDTEST_IF_TX_TS_3_TX_VALID_RMASK 0x1
-#define QIB_7220_IB_SDTEST_IF_TX_TS_T_TX_VALID_LSB 0x0
-#define QIB_7220_IB_SDTEST_IF_TX_TS_T_TX_VALID_RMASK 0x1
-
-#define QIB_7220_IB_SDTEST_IF_RX_OFFS 0x198
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_RX_CFG_LSB 0x30
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_RX_CFG_RMASK 0xFFFF
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_TX_CFG_LSB 0x20
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_TX_CFG_RMASK 0xFFFF
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_B_LSB 0x18
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_B_RMASK 0xFF
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_A_LSB 0x10
-#define QIB_7220_IB_SDTEST_IF_RX_TS_RX_A_RMASK 0xFF
-#define QIB_7220_IB_SDTEST_IF_RX_Reserved_LSB 0x2
-#define QIB_7220_IB_SDTEST_IF_RX_Reserved_RMASK 0x3FFF
-#define QIB_7220_IB_SDTEST_IF_RX_TS_3_RX_VALID_LSB 0x1
-#define QIB_7220_IB_SDTEST_IF_RX_TS_3_RX_VALID_RMASK 0x1
-#define QIB_7220_IB_SDTEST_IF_RX_TS_T_RX_VALID_LSB 0x0
-#define QIB_7220_IB_SDTEST_IF_RX_TS_T_RX_VALID_RMASK 0x1
-
 #define QIB_7220_IBCDDRCtrl2_OFFS 0x1A0
 #define QIB_7220_IBCDDRCtrl2_IB_BACK_PORCH_LSB 0x5
 #define QIB_7220_IBCDDRCtrl2_IB_BACK_PORCH_RMASK 0x1F
@@ -1375,27 +1201,17 @@
 #define QIB_7220_SendBufErr0_SendBufErr_63_0_LSB 0x0
 #define QIB_7220_SendBufErr0_SendBufErr_63_0_RMASK 0x0
 
-#define QIB_7220_REG_000258_OFFS 0x258
-
-#define QIB_7220_AvailUpdCount_OFFS 0x268
-#define QIB_7220_AvailUpdCount_AvailUpdCount_LSB 0x0
-#define QIB_7220_AvailUpdCount_AvailUpdCount_RMASK 0x1F
-
 #define QIB_7220_RcvHdrAddr0_OFFS 0x270
 #define QIB_7220_RcvHdrAddr0_RcvHdrAddr0_LSB 0x2
 #define QIB_7220_RcvHdrAddr0_RcvHdrAddr0_RMASK 0x3FFFFFFFFF
 #define QIB_7220_RcvHdrAddr0_Reserved_LSB 0x0
 #define QIB_7220_RcvHdrAddr0_Reserved_RMASK 0x3
 
-#define QIB_7220_REG_0002F8_OFFS 0x2F8
-
 #define QIB_7220_RcvHdrTailAddr0_OFFS 0x300
 #define QIB_7220_RcvHdrTailAddr0_RcvHdrTailAddr0_LSB 0x2
 #define QIB_7220_RcvHdrTailAddr0_RcvHdrTailAddr0_RMASK 0x3FFFFFFFFF
 #define QIB_7220_RcvHdrTailAddr0_Reserved_LSB 0x0
 #define QIB_7220_RcvHdrTailAddr0_Reserved_RMASK 0x3
-
-#define QIB_7220_REG_000388_OFFS 0x388
 
 #define QIB_7220_ibsd_epb_access_ctrl_OFFS 0x3C0
 #define QIB_7220_ibsd_epb_access_ctrl_sw_ib_epb_req_granted_LSB 0x8
@@ -1426,8 +1242,6 @@
 #define QIB_7220_ibsd_epb_transaction_reg_ib_epb_address_RMASK 0x7FFF
 #define QIB_7220_ibsd_epb_transaction_reg_ib_epb_data_LSB 0x0
 #define QIB_7220_ibsd_epb_transaction_reg_ib_epb_data_RMASK 0xFF
-
-#define QIB_7220_REG_0003D0_OFFS 0x3D0
 
 #define QIB_7220_XGXSCfg_OFFS 0x3D8
 #define QIB_7220_XGXSCfg_sel_link_down_for_fctrl_lane_sync_reset_LSB 0x3F
@@ -1477,32 +1291,6 @@
 #define QIB_7220_IBSerDesCtrl_ResetIB_uC_Core_LSB 0x0
 #define QIB_7220_IBSerDesCtrl_ResetIB_uC_Core_RMASK 0x1
 
-#define QIB_7220_EEPCtlStat_OFFS 0x3E8
-#define QIB_7220_EEPCtlStat_CtlrStat_LSB 0x1F
-#define QIB_7220_EEPCtlStat_CtlrStat_RMASK 0x1
-#define QIB_7220_EEPCtlStat_Reserved_LSB 0x7
-#define QIB_7220_EEPCtlStat_Reserved_RMASK 0xFFFFFF
-#define QIB_7220_EEPCtlStat_CmdWrErr_LSB 0x6
-#define QIB_7220_EEPCtlStat_CmdWrErr_RMASK 0x1
-#define QIB_7220_EEPCtlStat_LstDatWr_LSB 0x5
-#define QIB_7220_EEPCtlStat_LstDatWr_RMASK 0x1
-#define QIB_7220_EEPCtlStat_PageMode_LSB 0x4
-#define QIB_7220_EEPCtlStat_PageMode_RMASK 0x1
-#define QIB_7220_EEPCtlStat_ByteProg_LSB 0x3
-#define QIB_7220_EEPCtlStat_ByteProg_RMASK 0x1
-#define QIB_7220_EEPCtlStat_EPReset_LSB 0x2
-#define QIB_7220_EEPCtlStat_EPReset_RMASK 0x1
-#define QIB_7220_EEPCtlStat_EPAccEn_LSB 0x0
-#define QIB_7220_EEPCtlStat_EPAccEn_RMASK 0x3
-
-#define QIB_7220_EEPAddrCmd_OFFS 0x3F0
-#define QIB_7220_EEPAddrCmd_EPCmd_LSB 0x18
-#define QIB_7220_EEPAddrCmd_EPCmd_RMASK 0xFF
-#define QIB_7220_EEPAddrCmd_EPAddr_LSB 0x0
-#define QIB_7220_EEPAddrCmd_EPAddr_RMASK 0xFFFFFF
-
-#define QIB_7220_EEPData_OFFS 0x3F8
-
 #define QIB_7220_pciesd_epb_access_ctrl_OFFS 0x400
 #define QIB_7220_pciesd_epb_access_ctrl_sw_pcie_epb_req_granted_LSB 0x8
 #define QIB_7220_pciesd_epb_access_ctrl_sw_pcie_epb_req_granted_RMASK 0x1
@@ -1533,107 +1321,11 @@
 #define QIB_7220_pciesd_epb_transaction_reg_pcie_epb_data_LSB 0x0
 #define QIB_7220_pciesd_epb_transaction_reg_pcie_epb_data_RMASK 0xFF
 
-#define QIB_7220_efuse_control_reg_OFFS 0x410
-#define QIB_7220_efuse_control_reg_rdy_LSB 0x1F
-#define QIB_7220_efuse_control_reg_rdy_RMASK 0x1
-#define QIB_7220_efuse_control_reg_Reserved_LSB 0x4
-#define QIB_7220_efuse_control_reg_Reserved_RMASK 0x7FFFFFF
-#define QIB_7220_efuse_control_reg_req_error_LSB 0x3
-#define QIB_7220_efuse_control_reg_req_error_RMASK 0x1
-#define QIB_7220_efuse_control_reg_read_valid_LSB 0x2
-#define QIB_7220_efuse_control_reg_read_valid_RMASK 0x1
-#define QIB_7220_efuse_control_reg_operation_LSB 0x1
-#define QIB_7220_efuse_control_reg_operation_RMASK 0x1
-#define QIB_7220_efuse_control_reg_start_op_LSB 0x0
-#define QIB_7220_efuse_control_reg_start_op_RMASK 0x1
-
-#define QIB_7220_efuse_rddata0_reg_OFFS 0x418
-
-#define QIB_7220_procmon_register_OFFS 0x438
-#define QIB_7220_procmon_register_procmon_count_valid_LSB 0x1F
-#define QIB_7220_procmon_register_procmon_count_valid_RMASK 0x1
-#define QIB_7220_procmon_register_Reserved_LSB 0x19
-#define QIB_7220_procmon_register_Reserved_RMASK 0x3F
-#define QIB_7220_procmon_register_procmon_count_LSB 0x10
-#define QIB_7220_procmon_register_procmon_count_RMASK 0x1FF
-#define QIB_7220_procmon_register_start_counter_LSB 0xF
-#define QIB_7220_procmon_register_start_counter_RMASK 0x1
-#define QIB_7220_procmon_register_clear_counter_LSB 0xE
-#define QIB_7220_procmon_register_clear_counter_RMASK 0x1
-#define QIB_7220_procmon_register_Reserved1_LSB 0xC
-#define QIB_7220_procmon_register_Reserved1_RMASK 0x3
-#define QIB_7220_procmon_register_interval_time_LSB 0x0
-#define QIB_7220_procmon_register_interval_time_RMASK 0xFFF
-
-#define QIB_7220_PcieRbufTestReg0_OFFS 0x440
-
-#define QIB_7220_PcieRBufTestReg1_OFFS 0x448
-
-#define QIB_7220_SPC_JTAG_ACCESS_REG_OFFS 0x460
-#define QIB_7220_SPC_JTAG_ACCESS_REG_SPC_JTAG_ACCESS_EN_LSB 0xA
-#define QIB_7220_SPC_JTAG_ACCESS_REG_SPC_JTAG_ACCESS_EN_RMASK 0x1
-#define QIB_7220_SPC_JTAG_ACCESS_REG_bist_en_LSB 0x5
-#define QIB_7220_SPC_JTAG_ACCESS_REG_bist_en_RMASK 0x1F
-#define QIB_7220_SPC_JTAG_ACCESS_REG_opcode_LSB 0x3
-#define QIB_7220_SPC_JTAG_ACCESS_REG_opcode_RMASK 0x3
-#define QIB_7220_SPC_JTAG_ACCESS_REG_tdi_LSB 0x2
-#define QIB_7220_SPC_JTAG_ACCESS_REG_tdi_RMASK 0x1
-#define QIB_7220_SPC_JTAG_ACCESS_REG_tdo_LSB 0x1
-#define QIB_7220_SPC_JTAG_ACCESS_REG_tdo_RMASK 0x1
-#define QIB_7220_SPC_JTAG_ACCESS_REG_rdy_LSB 0x0
-#define QIB_7220_SPC_JTAG_ACCESS_REG_rdy_RMASK 0x1
-
-#define QIB_7220_LAControlReg_OFFS 0x468
-#define QIB_7220_LAControlReg_Reserved_LSB 0x1F
-#define QIB_7220_LAControlReg_Reserved_RMASK 0x1
-#define QIB_7220_LAControlReg_Delay_LSB 0xB
-#define QIB_7220_LAControlReg_Delay_RMASK 0xFFFFF
-#define QIB_7220_LAControlReg_Mode_LSB 0x9
-#define QIB_7220_LAControlReg_Mode_RMASK 0x3
-#define QIB_7220_LAControlReg_Address_LSB 0x1
-#define QIB_7220_LAControlReg_Address_RMASK 0xFF
-#define QIB_7220_LAControlReg_Finished_LSB 0x0
-#define QIB_7220_LAControlReg_Finished_RMASK 0x1
-
-#define QIB_7220_GPIODebugSelReg_OFFS 0x470
-#define QIB_7220_GPIODebugSelReg_SelPulse_LSB 0x10
-#define QIB_7220_GPIODebugSelReg_SelPulse_RMASK 0xFFFF
-#define QIB_7220_GPIODebugSelReg_GPIOSourceSelDebug_LSB 0x0
-#define QIB_7220_GPIODebugSelReg_GPIOSourceSelDebug_RMASK 0xFFFF
-
-#define QIB_7220_DebugPortValueReg_OFFS 0x478
-
-#define QIB_7220_SendDmaBufUsed0_OFFS 0x480
-#define QIB_7220_SendDmaBufUsed0_BufUsed_63_0_LSB 0x0
-#define QIB_7220_SendDmaBufUsed0_BufUsed_63_0_RMASK 0x0
-
-#define QIB_7220_SendDmaReqTagUsed_OFFS 0x498
-#define QIB_7220_SendDmaReqTagUsed_Reserved_LSB 0x10
-#define QIB_7220_SendDmaReqTagUsed_Reserved_RMASK 0xFFFFFFFFFFFF
-#define QIB_7220_SendDmaReqTagUsed_ReqTagUsed_7_0_LSB 0x0
-#define QIB_7220_SendDmaReqTagUsed_ReqTagUsed_7_0_RMASK 0xFF
-
-#define QIB_7220_efuse_pgm_data0_OFFS 0x4A0
-
-#define QIB_7220_MEM_0004B0_OFFS 0x4B0
-
 #define QIB_7220_SerDes_DDSRXEQ0_OFFS 0x500
 #define QIB_7220_SerDes_DDSRXEQ0_reg_addr_LSB 0x4
 #define QIB_7220_SerDes_DDSRXEQ0_reg_addr_RMASK 0x3F
 #define QIB_7220_SerDes_DDSRXEQ0_element_num_LSB 0x0
 #define QIB_7220_SerDes_DDSRXEQ0_element_num_RMASK 0xF
-
-#define QIB_7220_MEM_0005F0_OFFS 0x5F0
-
-#define QIB_7220_LAMemory_OFFS 0x600
-
-#define QIB_7220_MEM_0007F0_OFFS 0x7F0
-
-#define QIB_7220_SendBufAvail0_OFFS 0x1000
-#define QIB_7220_SendBufAvail0_SendBuf_31_0_LSB 0x0
-#define QIB_7220_SendBufAvail0_SendBuf_31_0_RMASK 0x0
-
-#define QIB_7220_MEM_001028_OFFS 0x1028
 
 #define QIB_7220_LBIntCnt_OFFS 0x13000
 
@@ -1802,275 +1494,3 @@
 #define QIB_7220_SendBuf0_MA_OFFS 0x100000
 
 #define QIB_7220_MEM_1A0000_OFFS 0x1A0000
-
-#define QIB_7220_RcvHdrTail0_OFFS 0x200000
-
-#define QIB_7220_RcvHdrHead0_OFFS 0x200008
-#define QIB_7220_RcvHdrHead0_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead0_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead0_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead0_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead0_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead0_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail0_OFFS 0x200010
-
-#define QIB_7220_RcvEgrIndexHead0_OFFS 0x200018
-
-#define QIB_7220_MEM_200020_OFFS 0x200020
-
-#define QIB_7220_RcvHdrTail1_OFFS 0x210000
-
-#define QIB_7220_RcvHdrHead1_OFFS 0x210008
-#define QIB_7220_RcvHdrHead1_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead1_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead1_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead1_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead1_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead1_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail1_OFFS 0x210010
-
-#define QIB_7220_RcvEgrIndexHead1_OFFS 0x210018
-
-#define QIB_7220_MEM_210020_OFFS 0x210020
-
-#define QIB_7220_RcvHdrTail2_OFFS 0x220000
-
-#define QIB_7220_RcvHdrHead2_OFFS 0x220008
-#define QIB_7220_RcvHdrHead2_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead2_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead2_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead2_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead2_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead2_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail2_OFFS 0x220010
-
-#define QIB_7220_RcvEgrIndexHead2_OFFS 0x220018
-
-#define QIB_7220_MEM_220020_OFFS 0x220020
-
-#define QIB_7220_RcvHdrTail3_OFFS 0x230000
-
-#define QIB_7220_RcvHdrHead3_OFFS 0x230008
-#define QIB_7220_RcvHdrHead3_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead3_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead3_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead3_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead3_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead3_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail3_OFFS 0x230010
-
-#define QIB_7220_RcvEgrIndexHead3_OFFS 0x230018
-
-#define QIB_7220_MEM_230020_OFFS 0x230020
-
-#define QIB_7220_RcvHdrTail4_OFFS 0x240000
-
-#define QIB_7220_RcvHdrHead4_OFFS 0x240008
-#define QIB_7220_RcvHdrHead4_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead4_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead4_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead4_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead4_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead4_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail4_OFFS 0x240010
-
-#define QIB_7220_RcvEgrIndexHead4_OFFS 0x240018
-
-#define QIB_7220_MEM_240020_OFFS 0x240020
-
-#define QIB_7220_RcvHdrTail5_OFFS 0x250000
-
-#define QIB_7220_RcvHdrHead5_OFFS 0x250008
-#define QIB_7220_RcvHdrHead5_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead5_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead5_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead5_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead5_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead5_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail5_OFFS 0x250010
-
-#define QIB_7220_RcvEgrIndexHead5_OFFS 0x250018
-
-#define QIB_7220_MEM_250020_OFFS 0x250020
-
-#define QIB_7220_RcvHdrTail6_OFFS 0x260000
-
-#define QIB_7220_RcvHdrHead6_OFFS 0x260008
-#define QIB_7220_RcvHdrHead6_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead6_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead6_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead6_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead6_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead6_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail6_OFFS 0x260010
-
-#define QIB_7220_RcvEgrIndexHead6_OFFS 0x260018
-
-#define QIB_7220_MEM_260020_OFFS 0x260020
-
-#define QIB_7220_RcvHdrTail7_OFFS 0x270000
-
-#define QIB_7220_RcvHdrHead7_OFFS 0x270008
-#define QIB_7220_RcvHdrHead7_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead7_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead7_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead7_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead7_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead7_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail7_OFFS 0x270010
-
-#define QIB_7220_RcvEgrIndexHead7_OFFS 0x270018
-
-#define QIB_7220_MEM_270020_OFFS 0x270020
-
-#define QIB_7220_RcvHdrTail8_OFFS 0x280000
-
-#define QIB_7220_RcvHdrHead8_OFFS 0x280008
-#define QIB_7220_RcvHdrHead8_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead8_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead8_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead8_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead8_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead8_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail8_OFFS 0x280010
-
-#define QIB_7220_RcvEgrIndexHead8_OFFS 0x280018
-
-#define QIB_7220_MEM_280020_OFFS 0x280020
-
-#define QIB_7220_RcvHdrTail9_OFFS 0x290000
-
-#define QIB_7220_RcvHdrHead9_OFFS 0x290008
-#define QIB_7220_RcvHdrHead9_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead9_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead9_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead9_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead9_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead9_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail9_OFFS 0x290010
-
-#define QIB_7220_RcvEgrIndexHead9_OFFS 0x290018
-
-#define QIB_7220_MEM_290020_OFFS 0x290020
-
-#define QIB_7220_RcvHdrTail10_OFFS 0x2A0000
-
-#define QIB_7220_RcvHdrHead10_OFFS 0x2A0008
-#define QIB_7220_RcvHdrHead10_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead10_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead10_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead10_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead10_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead10_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail10_OFFS 0x2A0010
-
-#define QIB_7220_RcvEgrIndexHead10_OFFS 0x2A0018
-
-#define QIB_7220_MEM_2A0020_OFFS 0x2A0020
-
-#define QIB_7220_RcvHdrTail11_OFFS 0x2B0000
-
-#define QIB_7220_RcvHdrHead11_OFFS 0x2B0008
-#define QIB_7220_RcvHdrHead11_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead11_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead11_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead11_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead11_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead11_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail11_OFFS 0x2B0010
-
-#define QIB_7220_RcvEgrIndexHead11_OFFS 0x2B0018
-
-#define QIB_7220_MEM_2B0020_OFFS 0x2B0020
-
-#define QIB_7220_RcvHdrTail12_OFFS 0x2C0000
-
-#define QIB_7220_RcvHdrHead12_OFFS 0x2C0008
-#define QIB_7220_RcvHdrHead12_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead12_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead12_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead12_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead12_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead12_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail12_OFFS 0x2C0010
-
-#define QIB_7220_RcvEgrIndexHead12_OFFS 0x2C0018
-
-#define QIB_7220_MEM_2C0020_OFFS 0x2C0020
-
-#define QIB_7220_RcvHdrTail13_OFFS 0x2D0000
-
-#define QIB_7220_RcvHdrHead13_OFFS 0x2D0008
-#define QIB_7220_RcvHdrHead13_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead13_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead13_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead13_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead13_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead13_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail13_OFFS 0x2D0010
-
-#define QIB_7220_RcvEgrIndexHead13_OFFS 0x2D0018
-
-#define QIB_7220_MEM_2D0020_OFFS 0x2D0020
-
-#define QIB_7220_RcvHdrTail14_OFFS 0x2E0000
-
-#define QIB_7220_RcvHdrHead14_OFFS 0x2E0008
-#define QIB_7220_RcvHdrHead14_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead14_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead14_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead14_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead14_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead14_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail14_OFFS 0x2E0010
-
-#define QIB_7220_RcvEgrIndexHead14_OFFS 0x2E0018
-
-#define QIB_7220_MEM_2E0020_OFFS 0x2E0020
-
-#define QIB_7220_RcvHdrTail15_OFFS 0x2F0000
-
-#define QIB_7220_RcvHdrHead15_OFFS 0x2F0008
-#define QIB_7220_RcvHdrHead15_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead15_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead15_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead15_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead15_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead15_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail15_OFFS 0x2F0010
-
-#define QIB_7220_RcvEgrIndexHead15_OFFS 0x2F0018
-
-#define QIB_7220_MEM_2F0020_OFFS 0x2F0020
-
-#define QIB_7220_RcvHdrTail16_OFFS 0x300000
-
-#define QIB_7220_RcvHdrHead16_OFFS 0x300008
-#define QIB_7220_RcvHdrHead16_Reserved_LSB 0x30
-#define QIB_7220_RcvHdrHead16_Reserved_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead16_counter_LSB 0x20
-#define QIB_7220_RcvHdrHead16_counter_RMASK 0xFFFF
-#define QIB_7220_RcvHdrHead16_RcvHeadPointer_LSB 0x0
-#define QIB_7220_RcvHdrHead16_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_7220_RcvEgrIndexTail16_OFFS 0x300010
-
-#define QIB_7220_RcvEgrIndexHead16_OFFS 0x300018
-
-#define QIB_7220_MEM_300020_OFFS 0x300020

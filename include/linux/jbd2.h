@@ -646,6 +646,7 @@ struct transaction_s
 	 * waiting for it to finish.
 	 */
 	unsigned int t_synchronous_commit:1;
+	unsigned int t_flushed_data_blocks:1;
 
 	/*
 	 * For use by the filesystem to store fs-specific data
@@ -1035,11 +1036,12 @@ void __jbd2_journal_insert_checkpoint(struct journal_head *, transaction_t *);
 
 struct jbd2_buffer_trigger_type {
 	/*
-	 * Fired just before a buffer is written to the journal.
-	 * mapped_data is a mapped buffer that is the frozen data for
-	 * commit.
+	 * Fired a the moment data to write to the journal are known to be
+	 * stable - so either at the moment b_frozen_data is created or just
+	 * before a buffer is written to the journal.  mapped_data is a mapped
+	 * buffer that is the frozen data for commit.
 	 */
-	void (*t_commit)(struct jbd2_buffer_trigger_type *type,
+	void (*t_frozen)(struct jbd2_buffer_trigger_type *type,
 			 struct buffer_head *bh, void *mapped_data,
 			 size_t size);
 
@@ -1051,7 +1053,7 @@ struct jbd2_buffer_trigger_type {
 			struct buffer_head *bh);
 };
 
-extern void jbd2_buffer_commit_trigger(struct journal_head *jh,
+extern void jbd2_buffer_frozen_trigger(struct journal_head *jh,
 				       void *mapped_data,
 				       struct jbd2_buffer_trigger_type *triggers);
 extern void jbd2_buffer_abort_trigger(struct journal_head *jh,

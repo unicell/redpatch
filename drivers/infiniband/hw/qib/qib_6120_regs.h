@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2009 QLogic Corporation. All rights reserved.
+ * Copyright (c) 2008, 2009, 2010 QLogic Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -64,50 +64,6 @@
 
 #define QIB_6120_PortCnt_OFFS 0x18
 
-#define QIB_6120_DbgPortSel_OFFS 0x20
-#define QIB_6120_DbgPortSel_EnhMode_SrcMuxSelWrEn_LSB 0x3D
-#define QIB_6120_DbgPortSel_EnhMode_SrcMuxSelWrEn_RMASK 0x1
-#define QIB_6120_DbgPortSel_EnhMode_SrcMuxSelIndex_LSB 0x33
-#define QIB_6120_DbgPortSel_EnhMode_SrcMuxSelIndex_RMASK 0x3FF
-#define QIB_6120_DbgPortSel_EnEnhancedDebugMode_LSB 0x32
-#define QIB_6120_DbgPortSel_EnEnhancedDebugMode_RMASK 0x1
-#define QIB_6120_DbgPortSel_EnDbgPort_LSB 0x31
-#define QIB_6120_DbgPortSel_EnDbgPort_RMASK 0x1
-#define QIB_6120_DbgPortSel_DbgClkPortSel_LSB 0x2D
-#define QIB_6120_DbgPortSel_DbgClkPortSel_RMASK 0xF
-#define QIB_6120_DbgPortSel_Reserved_LSB 0x2C
-#define QIB_6120_DbgPortSel_Reserved_RMASK 0x1
-#define QIB_6120_DbgPortSel_SrcMuxSel_LSB 0x20
-#define QIB_6120_DbgPortSel_SrcMuxSel_RMASK 0xFFF
-#define QIB_6120_DbgPortSel_NibbleSel7_LSB 0x1C
-#define QIB_6120_DbgPortSel_NibbleSel7_RMASK 0xF
-#define QIB_6120_DbgPortSel_NibbleSel6_LSB 0x18
-#define QIB_6120_DbgPortSel_NibbleSel6_RMASK 0xF
-#define QIB_6120_DbgPortSel_NibbleSel5_LSB 0x14
-#define QIB_6120_DbgPortSel_NibbleSel5_RMASK 0xF
-#define QIB_6120_DbgPortSel_NibbleSel4_LSB 0x10
-#define QIB_6120_DbgPortSel_NibbleSel4_RMASK 0xF
-#define QIB_6120_DbgPortSel_NibbleSel3_LSB 0xC
-#define QIB_6120_DbgPortSel_NibbleSel3_RMASK 0xF
-#define QIB_6120_DbgPortSel_NibbleSel2_LSB 0x8
-#define QIB_6120_DbgPortSel_NibbleSel2_RMASK 0xF
-#define QIB_6120_DbgPortSel_NibbleSel1_LSB 0x4
-#define QIB_6120_DbgPortSel_NibbleSel1_RMASK 0xF
-#define QIB_6120_DbgPortSel_NibbleSel0_LSB 0x0
-#define QIB_6120_DbgPortSel_NibbleSel0_RMASK 0xF
-
-#define QIB_6120_DebugSigsIntSel_OFFS 0x28
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcie_l23_rx_tx_LSB 0x9
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcie_l23_rx_tx_RMASK 0x1
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcie_rx_tx_LSB 0x8
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcie_rx_tx_RMASK 0x1
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_xgxs_LSB 0x7
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_xgxs_RMASK 0x1
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcie_mac_LSB 0x4
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcie_mac_RMASK 0x7
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcs_lane_LSB 0x0
-#define QIB_6120_DebugSigsIntSel_debug_port_sel_pcs_lane_RMASK 0xF
-
 #define QIB_6120_SendRegBase_OFFS 0x30
 
 #define QIB_6120_UserRegBase_OFFS 0x38
@@ -119,8 +75,6 @@
 #define QIB_6120_Scratch_TopHalf_RMASK 0xFFFFFFFF
 #define QIB_6120_Scratch_BottomHalf_LSB 0x0
 #define QIB_6120_Scratch_BottomHalf_RMASK 0xFFFFFFFF
-
-#define QIB_6120_REG_000050_OFFS 0x50
 
 #define QIB_6120_IntBlocked_OFFS 0x60
 #define QIB_6120_IntBlocked_ErrorIntBlocked_LSB 0x1F
@@ -612,24 +566,6 @@
 #define QIB_6120_HwDiagCtrl_forcePCIeMemParity_LSB 0x0
 #define QIB_6120_HwDiagCtrl_forcePCIeMemParity_RMASK 0x3F
 
-#define QIB_6120_MDIO_OFFS 0xB8
-#define QIB_6120_MDIO_MDIO_ClkDiv_LSB 0x20
-#define QIB_6120_MDIO_MDIO_ClkDiv_RMASK 0x7F
-#define QIB_6120_MDIO_MDIO_RdDataValid_LSB 0x1F
-#define QIB_6120_MDIO_MDIO_RdDataValid_RMASK 0x1
-#define QIB_6120_MDIO_MDIO_CmdValid_LSB 0x1E
-#define QIB_6120_MDIO_MDIO_CmdValid_RMASK 0x1
-#define QIB_6120_MDIO_Reserved_LSB 0x1D
-#define QIB_6120_MDIO_Reserved_RMASK 0x1
-#define QIB_6120_MDIO_MDIO_Command_LSB 0x1A
-#define QIB_6120_MDIO_MDIO_Command_RMASK 0x7
-#define QIB_6120_MDIO_MDIO_DevAddr_LSB 0x15
-#define QIB_6120_MDIO_MDIO_DevAddr_RMASK 0x1F
-#define QIB_6120_MDIO_MDIO_RegAddr_LSB 0x10
-#define QIB_6120_MDIO_MDIO_RegAddr_RMASK 0x1F
-#define QIB_6120_MDIO_MDIO_Data_LSB 0x0
-#define QIB_6120_MDIO_MDIO_Data_RMASK 0xFFFF
-
 #define QIB_6120_IBCStatus_OFFS 0xC0
 #define QIB_6120_IBCStatus_TxCreditOk_LSB 0x1F
 #define QIB_6120_IBCStatus_TxCreditOk_RMASK 0x1
@@ -754,15 +690,11 @@
 
 #define QIB_6120_RcvPartitionKey_OFFS 0x168
 
-#define QIB_6120_Reserved_OFFS 0x170
-
 #define QIB_6120_RcvPktLEDCnt_OFFS 0x178
 #define QIB_6120_RcvPktLEDCnt_ONperiod_LSB 0x20
 #define QIB_6120_RcvPktLEDCnt_ONperiod_RMASK 0xFFFFFFFF
 #define QIB_6120_RcvPktLEDCnt_OFFperiod_LSB 0x0
 #define QIB_6120_RcvPktLEDCnt_OFFperiod_RMASK 0xFFFFFFFF
-
-#define QIB_6120_REG_000180_OFFS 0x180
 
 #define QIB_6120_SendCtrl_OFFS 0x1C0
 #define QIB_6120_SendCtrl_Disarm_LSB 0x1F
@@ -818,23 +750,9 @@
 #define QIB_6120_SendPIOAvailAddr_Reserved_LSB 0x0
 #define QIB_6120_SendPIOAvailAddr_Reserved_RMASK 0x3F
 
-#define QIB_6120_TxIntMemBase_OFFS 0x1E8
-
-#define QIB_6120_TxIntMemSize_OFFS 0x1F0
-
-#define QIB_6120_REG_0001F8_OFFS 0x1F8
-
-#define QIB_6120_PcieRbufTestReg0_OFFS 0x200
-
-#define QIB_6120_PcieRBufTestReg1_OFFS 0x208
-
-#define QIB_6120_REG_000210_OFFS 0x210
-
 #define QIB_6120_SendBufErr0_OFFS 0x240
 #define QIB_6120_SendBufErr0_SendBufErrPIO_63_0_LSB 0x0
 #define QIB_6120_SendBufErr0_SendBufErrPIO_63_0_RMASK 0x0
-
-#define QIB_6120_REG_000250_OFFS 0x250
 
 #define QIB_6120_RcvHdrAddr0_OFFS 0x280
 #define QIB_6120_RcvHdrAddr0_RcvHdrAddr0_LSB 0x2
@@ -842,15 +760,11 @@
 #define QIB_6120_RcvHdrAddr0_Reserved_LSB 0x0
 #define QIB_6120_RcvHdrAddr0_Reserved_RMASK 0x3
 
-#define QIB_6120_REG_0002A8_OFFS 0x2A8
-
 #define QIB_6120_RcvHdrTailAddr0_OFFS 0x300
 #define QIB_6120_RcvHdrTailAddr0_RcvHdrTailAddr0_LSB 0x2
 #define QIB_6120_RcvHdrTailAddr0_RcvHdrTailAddr0_RMASK 0x3FFFFFFFFF
 #define QIB_6120_RcvHdrTailAddr0_Reserved_LSB 0x0
 #define QIB_6120_RcvHdrTailAddr0_Reserved_RMASK 0x3
-
-#define QIB_6120_REG_000328_OFFS 0x328
 
 #define QIB_6120_SerdesCfg0_OFFS 0x3C0
 #define QIB_6120_SerdesCfg0_DisableIBTxIdleDetect_LSB 0x3F
@@ -966,243 +880,9 @@
 #define QIB_6120_XGXSCfg_tx_rx_resetn_LSB 0x0
 #define QIB_6120_XGXSCfg_tx_rx_resetn_RMASK 0x1
 
-#define QIB_6120_IBPLLCfg_OFFS 0x3E0
-#define QIB_6120_IBPLLCfg_Reserved_LSB 0x19
-#define QIB_6120_IBPLLCfg_Reserved_RMASK 0x7FFFFFFFFF
-#define QIB_6120_IBPLLCfg_CLKR_LSB 0x13
-#define QIB_6120_IBPLLCfg_CLKR_RMASK 0x3F
-#define QIB_6120_IBPLLCfg_CLKF_LSB 0x7
-#define QIB_6120_IBPLLCfg_CLKF_RMASK 0xFFF
-#define QIB_6120_IBPLLCfg_Reserved1_LSB 0x6
-#define QIB_6120_IBPLLCfg_Reserved1_RMASK 0x1
-#define QIB_6120_IBPLLCfg_Reset_LSB 0x5
-#define QIB_6120_IBPLLCfg_Reset_RMASK 0x1
-#define QIB_6120_IBPLLCfg_Bypass_LSB 0x4
-#define QIB_6120_IBPLLCfg_Bypass_RMASK 0x1
-#define QIB_6120_IBPLLCfg_Pwrdn_LSB 0x3
-#define QIB_6120_IBPLLCfg_Pwrdn_RMASK 0x1
-#define QIB_6120_IBPLLCfg_Test_LSB 0x2
-#define QIB_6120_IBPLLCfg_Test_RMASK 0x1
-#define QIB_6120_IBPLLCfg_Fasten_LSB 0x1
-#define QIB_6120_IBPLLCfg_Fasten_RMASK 0x1
-#define QIB_6120_IBPLLCfg_Ensat_LSB 0x0
-#define QIB_6120_IBPLLCfg_Ensat_RMASK 0x1
-
-#define QIB_6120_REG_0003E8_OFFS 0x3E8
-
-#define QIB_6120_PcieQ0SerdesCfg0_OFFS 0x400
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved_LSB 0x38
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved_RMASK 0xFF
-#define QIB_6120_PcieQ0SerdesCfg0_RxEqCtl_LSB 0x36
-#define QIB_6120_PcieQ0SerdesCfg0_RxEqCtl_RMASK 0x3
-#define QIB_6120_PcieQ0SerdesCfg0_TxTermAdj_LSB 0x34
-#define QIB_6120_PcieQ0SerdesCfg0_TxTermAdj_RMASK 0x3
-#define QIB_6120_PcieQ0SerdesCfg0_RxTermAdj_LSB 0x32
-#define QIB_6120_PcieQ0SerdesCfg0_RxTermAdj_RMASK 0x3
-#define QIB_6120_PcieQ0SerdesCfg0_sRefBuf_TermAdj1_LSB 0x31
-#define QIB_6120_PcieQ0SerdesCfg0_sRefBuf_TermAdj1_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_sRefBuf_TermAdj0_LSB 0x30
-#define QIB_6120_PcieQ0SerdesCfg0_sRefBuf_TermAdj0_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKA_LSB 0x2F
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKA_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKB_LSB 0x2E
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKB_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKC_LSB 0x2D
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKC_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKD_LSB 0x2C
-#define QIB_6120_PcieQ0SerdesCfg0_LPBKD_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_PW_LSB 0x2B
-#define QIB_6120_PcieQ0SerdesCfg0_PW_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_RefSel_LSB 0x29
-#define QIB_6120_PcieQ0SerdesCfg0_RefSel_RMASK 0x3
-#define QIB_6120_PcieQ0SerdesCfg0_ParReset_LSB 0x28
-#define QIB_6120_PcieQ0SerdesCfg0_ParReset_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_ParLPBK_LSB 0x27
-#define QIB_6120_PcieQ0SerdesCfg0_ParLPBK_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_OffsetEn_LSB 0x26
-#define QIB_6120_PcieQ0SerdesCfg0_OffsetEn_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Offset_LSB 0x1E
-#define QIB_6120_PcieQ0SerdesCfg0_Offset_RMASK 0xFF
-#define QIB_6120_PcieQ0SerdesCfg0_Reseved_LSB 0x1D
-#define QIB_6120_PcieQ0SerdesCfg0_Reseved_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved1_LSB 0x1C
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved1_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved2_LSB 0x18
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved2_RMASK 0xF
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved3_LSB 0x14
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved3_RMASK 0xF
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved4_LSB 0x10
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved4_RMASK 0xF
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved5_LSB 0xC
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved5_RMASK 0xF
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved6_LSB 0x8
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved6_RMASK 0xF
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved7_LSB 0x7
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved7_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved8_LSB 0x6
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved8_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved9_LSB 0x5
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved9_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved10_LSB 0x4
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved10_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved11_LSB 0x3
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved11_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved12_LSB 0x2
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved12_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved13_LSB 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved13_RMASK 0x1
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved14_LSB 0x0
-#define QIB_6120_PcieQ0SerdesCfg0_Reserved14_RMASK 0x1
-
-#define QIB_6120_REG_000418_OFFS 0x418
-
-#define QIB_6120_PcieQ1SerdesCfg0_OFFS 0x420
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved_LSB 0x38
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved_RMASK 0xFF
-#define QIB_6120_PcieQ1SerdesCfg0_RxEqCtl_LSB 0x36
-#define QIB_6120_PcieQ1SerdesCfg0_RxEqCtl_RMASK 0x3
-#define QIB_6120_PcieQ1SerdesCfg0_TxTermAdj_LSB 0x34
-#define QIB_6120_PcieQ1SerdesCfg0_TxTermAdj_RMASK 0x3
-#define QIB_6120_PcieQ1SerdesCfg0_RxTermAdj_LSB 0x32
-#define QIB_6120_PcieQ1SerdesCfg0_RxTermAdj_RMASK 0x3
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved1_LSB 0x31
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved1_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved2_LSB 0x30
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved2_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKA_LSB 0x2F
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKA_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKB_LSB 0x2E
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKB_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKC_LSB 0x2D
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKC_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKD_LSB 0x2C
-#define QIB_6120_PcieQ1SerdesCfg0_LPBKD_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_PW_LSB 0x2B
-#define QIB_6120_PcieQ1SerdesCfg0_PW_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_RefSel_LSB 0x29
-#define QIB_6120_PcieQ1SerdesCfg0_RefSel_RMASK 0x3
-#define QIB_6120_PcieQ1SerdesCfg0_ParReset_LSB 0x28
-#define QIB_6120_PcieQ1SerdesCfg0_ParReset_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_ParLPBK_LSB 0x27
-#define QIB_6120_PcieQ1SerdesCfg0_ParLPBK_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_OffsetEn_LSB 0x26
-#define QIB_6120_PcieQ1SerdesCfg0_OffsetEn_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Offset_LSB 0x1E
-#define QIB_6120_PcieQ1SerdesCfg0_Offset_RMASK 0xFF
-#define QIB_6120_PcieQ1SerdesCfg0_Reseved_LSB 0x1D
-#define QIB_6120_PcieQ1SerdesCfg0_Reseved_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved3_LSB 0x1C
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved3_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved4_LSB 0x18
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved4_RMASK 0xF
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved5_LSB 0x14
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved5_RMASK 0xF
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved6_LSB 0x10
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved6_RMASK 0xF
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved7_LSB 0xC
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved7_RMASK 0xF
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved8_LSB 0x8
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved8_RMASK 0xF
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved9_LSB 0x7
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved9_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved10_LSB 0x6
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved10_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved11_LSB 0x5
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved11_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved12_LSB 0x4
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved12_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved13_LSB 0x3
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved13_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved14_LSB 0x2
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved14_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved15_LSB 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved15_RMASK 0x1
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved16_LSB 0x0
-#define QIB_6120_PcieQ1SerdesCfg0_Reserved16_RMASK 0x1
-
-#define QIB_6120_MEM_000438_OFFS 0x438
-
-#define QIB_6120_SendPIOAvail0_OFFS 0x1000
-#define QIB_6120_SendPIOAvail0_PIO_31_0_LSB 0x0
-#define QIB_6120_SendPIOAvail0_PIO_31_0_RMASK 0x0
-
-#define QIB_6120_MEM_001018_OFFS 0x1018
-
-#define QIB_6120_RcvHdrTail0_OFFS 0x2000
-
-#define QIB_6120_RcvHdrHead0_OFFS 0x2008
-#define QIB_6120_RcvHdrHead0_counter_LSB 0x20
-#define QIB_6120_RcvHdrHead0_counter_RMASK 0xFFFFFFFF
-#define QIB_6120_RcvHdrHead0_RcvHeadPointer_LSB 0x0
-#define QIB_6120_RcvHdrHead0_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_6120_RcvEgrIndexTail0_OFFS 0x2010
-
-#define QIB_6120_RcvEgrIndexHead0_OFFS 0x2018
-
-#define QIB_6120_MEM_002020_OFFS 0x2020
-
-#define QIB_6120_RcvHdrTail1_OFFS 0x3000
-
-#define QIB_6120_RcvHdrHead1_OFFS 0x3008
-#define QIB_6120_RcvHdrHead1_counter_LSB 0x20
-#define QIB_6120_RcvHdrHead1_counter_RMASK 0xFFFFFFFF
-#define QIB_6120_RcvHdrHead1_RcvHeadPointer_LSB 0x0
-#define QIB_6120_RcvHdrHead1_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_6120_RcvEgrIndexTail1_OFFS 0x3010
-
-#define QIB_6120_RcvEgrIndexHead1_OFFS 0x3018
-
-#define QIB_6120_MEM_003020_OFFS 0x3020
-
-#define QIB_6120_RcvHdrTail2_OFFS 0x4000
-
-#define QIB_6120_RcvHdrHead2_OFFS 0x4008
-#define QIB_6120_RcvHdrHead2_counter_LSB 0x20
-#define QIB_6120_RcvHdrHead2_counter_RMASK 0xFFFFFFFF
-#define QIB_6120_RcvHdrHead2_RcvHeadPointer_LSB 0x0
-#define QIB_6120_RcvHdrHead2_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_6120_RcvEgrIndexTail2_OFFS 0x4010
-
-#define QIB_6120_RcvEgrIndexHead2_OFFS 0x4018
-
-#define QIB_6120_MEM_004020_OFFS 0x4020
-
-#define QIB_6120_RcvHdrTail3_OFFS 0x5000
-
-#define QIB_6120_RcvHdrHead3_OFFS 0x5008
-#define QIB_6120_RcvHdrHead3_counter_LSB 0x20
-#define QIB_6120_RcvHdrHead3_counter_RMASK 0xFFFFFFFF
-#define QIB_6120_RcvHdrHead3_RcvHeadPointer_LSB 0x0
-#define QIB_6120_RcvHdrHead3_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_6120_RcvEgrIndexTail3_OFFS 0x5010
-
-#define QIB_6120_RcvEgrIndexHead3_OFFS 0x5018
-
-#define QIB_6120_MEM_005020_OFFS 0x5020
-
-#define QIB_6120_RcvHdrTail4_OFFS 0x6000
-
-#define QIB_6120_RcvHdrHead4_OFFS 0x6008
-#define QIB_6120_RcvHdrHead4_counter_LSB 0x20
-#define QIB_6120_RcvHdrHead4_counter_RMASK 0xFFFFFFFF
-#define QIB_6120_RcvHdrHead4_RcvHeadPointer_LSB 0x0
-#define QIB_6120_RcvHdrHead4_RcvHeadPointer_RMASK 0xFFFFFFFF
-
-#define QIB_6120_RcvEgrIndexTail4_OFFS 0x6010
-
-#define QIB_6120_RcvEgrIndexHead4_OFFS 0x6018
-
-#define QIB_6120_MEM_006020_OFFS 0x6020
-
 #define QIB_6120_LBIntCnt_OFFS 0x12000
 
 #define QIB_6120_LBFlowStallCnt_OFFS 0x12008
-
-#define QIB_6120_CNT_012010_OFFS 0x12010
 
 #define QIB_6120_TxUnsupVLErrCnt_OFFS 0x12018
 
@@ -1258,8 +938,6 @@
 
 #define QIB_6120_RxP0HdrEgrOvflCnt_OFFS 0x120E8
 
-#define QIB_6120_CNT_012110_OFFS 0x12110
-
 #define QIB_6120_IBStatusChangeCnt_OFFS 0x12140
 
 #define QIB_6120_IBLinkErrRecoveryCnt_OFFS 0x12148
@@ -1268,53 +946,27 @@
 
 #define QIB_6120_IBSymbolErrCnt_OFFS 0x12158
 
-#define QIB_6120_CNT_012160_OFFS 0x12160
-
 #define QIB_6120_PcieRetryBufDiagQwordCnt_OFFS 0x12170
-
-#define QIB_6120_CNT_012178_OFFS 0x12178
-
-#define QIB_6120_MEM_013000_OFFS 0x13000
 
 #define QIB_6120_RcvEgrArray0_OFFS 0x14000
 
-#define QIB_6120_MEM_028000_OFFS 0x28000
-
 #define QIB_6120_RcvTIDArray0_OFFS 0x54000
-
-#define QIB_6120_MEM_059000_OFFS 0x59000
 
 #define QIB_6120_PIOLaunchFIFO_OFFS 0x64000
 
-#define QIB_6120_MEM_064280_OFFS 0x64280
-
 #define QIB_6120_SendPIOpbcCache_OFFS 0x64800
-
-#define QIB_6120_MEM_064A80_OFFS 0x64A80
 
 #define QIB_6120_RcvBuf1_OFFS 0x72000
 
-#define QIB_6120_MEM_074800_OFFS 0x74800
-
 #define QIB_6120_RcvBuf2_OFFS 0x75000
-
-#define QIB_6120_MEM_076400_OFFS 0x76400
 
 #define QIB_6120_RcvFlags_OFFS 0x77000
 
-#define QIB_6120_MEM_078400_OFFS 0x78400
-
 #define QIB_6120_RcvLookupBuf1_OFFS 0x79000
-
-#define QIB_6120_MEM_07A400_OFFS 0x7A400
 
 #define QIB_6120_RcvDMABuf_OFFS 0x7B000
 
-#define QIB_6120_MEM_07B800_OFFS 0x7B800
-
 #define QIB_6120_MiscRXEIntMem_OFFS 0x7C000
-
-#define QIB_6120_MEM_07D400_OFFS 0x7D400
 
 #define QIB_6120_PCIERcvBuf_OFFS 0x80000
 
@@ -1322,8 +974,4 @@
 
 #define QIB_6120_PCIERcvBufRdToWrAddr_OFFS 0x84000
 
-#define QIB_6120_MEM_088000_OFFS 0x88000
-
 #define QIB_6120_PIOBuf0_MA_OFFS 0x100000
-
-#define QIB_6120_MEM_160000_OFFS 0x160000

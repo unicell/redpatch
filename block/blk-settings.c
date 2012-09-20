@@ -227,8 +227,8 @@ void blk_queue_bounce_limit(struct request_queue *q, u64 dma_mask)
 EXPORT_SYMBOL(blk_queue_bounce_limit);
 
 /**
- * blk_queue_max_hw_sectors - set max sectors for a request for this queue
- * @q:  the request queue for the device
+ * blk_limits_max_hw_sectors - set hard and soft limit of max sectors for request
+ * @limits: the queue limits
  * @max_hw_sectors:  max hardware sectors in the usual 512b unit
  *
  * Description:
@@ -242,7 +242,7 @@ EXPORT_SYMBOL(blk_queue_bounce_limit);
  *    per-device basis in /sys/block/<device>/queue/max_sectors_kb.
  *    The soft limit can not exceed max_hw_sectors.
  **/
-void blk_queue_max_hw_sectors(struct request_queue *q, unsigned int max_hw_sectors)
+void blk_limits_max_hw_sectors(struct queue_limits *limits, unsigned int max_hw_sectors)
 {
 	if ((max_hw_sectors << 9) < PAGE_CACHE_SIZE) {
 		max_hw_sectors = 1 << (PAGE_CACHE_SHIFT - 9);
@@ -250,9 +250,23 @@ void blk_queue_max_hw_sectors(struct request_queue *q, unsigned int max_hw_secto
 		       __func__, max_hw_sectors);
 	}
 
-	q->limits.max_hw_sectors = max_hw_sectors;
-	q->limits.max_sectors = min_t(unsigned int, max_hw_sectors,
-				      BLK_DEF_MAX_SECTORS);
+	limits->max_hw_sectors = max_hw_sectors;
+	limits->max_sectors = min_t(unsigned int, max_hw_sectors,
+				    BLK_DEF_MAX_SECTORS);
+}
+EXPORT_SYMBOL(blk_limits_max_hw_sectors);
+
+/**
+ * blk_queue_max_hw_sectors - set max sectors for a request for this queue
+ * @q:  the request queue for the device
+ * @max_hw_sectors:  max hardware sectors in the usual 512b unit
+ *
+ * Description:
+ *    See description for blk_limits_max_hw_sectors().
+ **/
+void blk_queue_max_hw_sectors(struct request_queue *q, unsigned int max_hw_sectors)
+{
+	blk_limits_max_hw_sectors(&q->limits, max_hw_sectors);
 }
 EXPORT_SYMBOL(blk_queue_max_hw_sectors);
 
@@ -342,7 +356,7 @@ EXPORT_SYMBOL(blk_queue_logical_block_size);
  *   hardware can operate on without reverting to read-modify-write
  *   operations.
  */
-void blk_queue_physical_block_size(struct request_queue *q, unsigned short size)
+void blk_queue_physical_block_size(struct request_queue *q, unsigned int size)
 {
 	q->limits.physical_block_size = size;
 
@@ -792,6 +806,79 @@ void blk_queue_update_dma_alignment(struct request_queue *q, int mask)
 		q->dma_alignment = mask;
 }
 EXPORT_SYMBOL(blk_queue_update_dma_alignment);
+
+/**
+ * blk_queue_flush - configure queue's cache flush capability
+ * @q:		the request queue for the device
+ * @flush:	0, REQ_FLUSH or REQ_FLUSH | REQ_FUA
+ *
+ * Tell block layer cache flush capability of @q.  If it supports
+ * flushing, REQ_FLUSH should be set.  If it supports bypassing
+ * write cache for individual writes, REQ_FUA should be set.
+ */
+void blk_queue_flush(struct request_queue *q, unsigned int flush)
+{
+	WARN_ON_ONCE(flush & ~(REQ_FLUSH | REQ_FUA));
+
+	if (WARN_ON_ONCE(!(flush & REQ_FLUSH) && (flush & REQ_FUA)))
+		flush &= ~REQ_FUA;
+
+	q->flush_flags = flush & (REQ_FLUSH | REQ_FUA);
+}
+EXPORT_SYMBOL_GPL(blk_queue_flush);
+
+/**
+ * blk_queue_ordered - does this queue support ordered writes
+ * @q:        the request queue
+ * @ordered:  one of QUEUE_ORDERED_*
+ * @prepare_flush_fn: rq setup helper for cache flush ordered writes
+ *
+ * Description:
+ *   This is old method and has been retained for kABI compatibility. Any
+ *   new driver should be using and sticking to semantics of blk_queue_flush().
+ **/
+int blk_queue_ordered(struct request_queue *q, unsigned ordered,
+		      prepare_flush_fn *prepare_flush_fn)
+{
+	if (!prepare_flush_fn && (ordered & (QUEUE_ORDERED_DO_PREFLUSH |
+					     QUEUE_ORDERED_DO_POSTFLUSH))) {
+		printk(KERN_ERR "%s: prepare_flush_fn required\n", __func__);
+		return -EINVAL;
+	}
+
+	/*
+	 * Note: QUEUE_ORDERED_TAG* variants are not supported as it never
+	 * worked reliably.
+	 */
+
+	if (ordered != QUEUE_ORDERED_NONE &&
+	    ordered != QUEUE_ORDERED_DRAIN &&
+	    ordered != QUEUE_ORDERED_DRAIN_FLUSH &&
+	    ordered != QUEUE_ORDERED_DRAIN_FUA &&
+	    ordered != QUEUE_ORDERED_TAG &&
+	    ordered != QUEUE_ORDERED_TAG_FLUSH &&
+	    ordered != QUEUE_ORDERED_TAG_FUA) {
+		printk(KERN_ERR "blk_queue_ordered: bad value %d\n", ordered);
+		return -EINVAL;
+	}
+
+	q->ordered = ordered;
+	q->next_ordered = ordered;
+	q->prepare_flush_fn = prepare_flush_fn;
+
+	/* Map old queue values to new flush/fua capabilities */
+
+	if (ordered == QUEUE_ORDERED_DRAIN_FLUSH ||
+	    ordered == QUEUE_ORDERED_TAG_FLUSH)
+		q->flush_flags = REQ_FLUSH;
+
+	if (ordered == QUEUE_ORDERED_DRAIN_FUA ||
+	    ordered == QUEUE_ORDERED_TAG_FUA)
+		q->flush_flags = (REQ_FLUSH | REQ_FUA);
+
+	return 0;
+}
+EXPORT_SYMBOL(blk_queue_ordered);
 
 static int __init blk_settings_init(void)
 {

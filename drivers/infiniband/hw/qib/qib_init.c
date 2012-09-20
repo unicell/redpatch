@@ -38,7 +38,6 @@
 #include <linux/delay.h>
 #include <linux/idr.h>
 
-#include "qib_wc_pat.h"
 #include "qib.h"
 #include "qib_common.h"
 
@@ -82,6 +81,7 @@ module_param_named(wc_pat, qib_wc_pat, uint, S_IRUGO);
 MODULE_PARM_DESC(wc_pat, "enable write-combining via PAT mechanism");
 
 struct workqueue_struct *qib_wq;
+struct workqueue_struct *qib_cq_wq;
 
 static void verify_interrupt(unsigned long);
 
@@ -93,19 +93,13 @@ unsigned long *qib_cpulist;
 void qib_set_ctxtcnt(struct qib_devdata *dd)
 {
 	if (!qib_cfgctxts)
+		dd->cfgctxts = dd->first_user_ctxt + num_online_cpus();
+	else if (qib_cfgctxts < dd->num_pports)
 		dd->cfgctxts = dd->ctxtcnt;
-	else if (qib_cfgctxts < dd->num_pports) {
-		dd->cfgctxts = dd->ctxtcnt;
-		qib_dbg("Configured to use too few ctxts (%u); using %u\n",
-			qib_cfgctxts, dd->cfgctxts);
-	} else if (qib_cfgctxts <= dd->ctxtcnt) {
+	else if (qib_cfgctxts <= dd->ctxtcnt)
 		dd->cfgctxts = qib_cfgctxts;
-		qib_cdbg(INIT, "Configured to use %u ctxts\n", dd->cfgctxts);
-	} else {
+	else
 		dd->cfgctxts = dd->ctxtcnt;
-		qib_dbg("Configured to use too many ctxts (%u); using %u\n",
-			qib_cfgctxts, dd->cfgctxts);
-	}
 }
 
 /*
@@ -207,7 +201,7 @@ void qib_init_pportdata(struct qib_pportdata *ppd, struct qib_devdata *dd,
 	init_waitqueue_head(&ppd->state_wait);
 
 	init_timer(&ppd->symerr_clear_timer);
-	ppd->symerr_clear_timer.function = clear_symerror_on_linkup;
+	ppd->symerr_clear_timer.function = qib_clear_symerror_on_linkup;
 	ppd->symerr_clear_timer.data = (unsigned long)ppd;
 }
 
@@ -309,8 +303,6 @@ static int loadtime_init(struct qib_devdata *dd)
 {
 	int ret = 0;
 
-	qib_cdbg(VERBOSE, "Revision %Lx\n", dd->revision);
-
 	if (((dd->revision >> QLOGIC_IB_R_SOFTWARE_SHIFT) &
 	     QLOGIC_IB_R_SOFTWARE_MASK) != QIB_CHIP_SWVERSION) {
 		qib_dev_err(dd, "Driver only handles version %d, "
@@ -326,8 +318,6 @@ static int loadtime_init(struct qib_devdata *dd)
 
 	if (dd->revision & QLOGIC_IB_R_EMULATOR_MASK)
 		qib_devinfo(dd->pcidev, "%s", dd->boardversion);
-	else
-		qib_cdbg(INIT, "%s", dd->boardversion);
 
 	spin_lock_init(&dd->pioavail_lock);
 	spin_lock_init(&dd->sendctrl_lock);
@@ -429,9 +419,7 @@ static void verify_interrupt(unsigned long opaque)
 				"not usable.\n");
 		else /* re-arm the timer to see if fallback works */
 			mod_timer(&dd->intrchk_timer, jiffies + HZ/2);
-	} else
-		qib_cdbg(INIT, "%u interrupts at timer check\n",
-			 dd->int_counter);
+	}
 }
 
 static void init_piobuf_state(struct qib_devdata *dd)
@@ -458,15 +446,8 @@ static void init_piobuf_state(struct qib_devdata *dd)
 	 * chip-specific adjustments to be made.
 	 */
 	uctxts = dd->cfgctxts - dd->first_user_ctxt;
-	qib_cdbg(INIT, "%d sendbufs for each of %u user ctxts\n",
-		 dd->pbufsctxt, uctxts);
 	dd->ctxts_extrabuf = dd->pbufsctxt ?
 		dd->lastctxt_piobuf - (dd->pbufsctxt * uctxts) : 0;
-	if (dd->ctxts_extrabuf)
-		qib_cdbg(INIT, "%u pbufs/ctxt leaves some unused, add a "
-			 "buffer to ctxts %u - %u\n", dd->pbufsctxt,
-			 dd->first_user_ctxt,
-			 dd->first_user_ctxt + dd->ctxts_extrabuf - 1);
 
 	/*
 	 * Set up the shadow copies of the piobufavail registers,
@@ -636,7 +617,7 @@ done:
 			if (!ppd->link_speed_enabled)
 				continue;
 			if (dd->flags & QIB_HAS_SEND_DMA)
-				ret = setup_sdma(ppd);
+				ret = qib_setup_sdma(ppd);
 			init_timer(&ppd->hol_timer);
 			ppd->hol_timer.function = qib_hol_event;
 			ppd->hol_timer.data = (unsigned long)ppd;
@@ -653,9 +634,7 @@ done:
 		mod_timer(&dd->intrchk_timer, jiffies + HZ/2);
 		/* start stats retrieval timer */
 		mod_timer(&dd->stats_timer, jiffies + HZ * ACTIVITY_TIMER);
-	} else
-		qib_dbg("Failed (%d) to initialize unit %u\n",
-			ret, dd->unit);
+	}
 
 	/* if ret is non-zero, we probably should do some cleanup here... */
 	return ret;
@@ -737,8 +716,6 @@ static void qib_shutdown_device(struct qib_devdata *dd)
 	struct qib_pportdata *ppd;
 	unsigned pidx;
 
-	qib_dbg("Shutting down the device\n");
-
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 		ppd = dd->pport + pidx;
 
@@ -778,7 +755,7 @@ static void qib_shutdown_device(struct qib_devdata *dd)
 		dd->f_setextled(ppd, 0); /* make sure LEDs are off */
 
 		if (dd->flags & QIB_HAS_SEND_DMA)
-			teardown_sdma(ppd);
+			qib_teardown_sdma(ppd);
 
 		dd->f_sendctrl(ppd, QIB_SENDCTRL_AVAIL_DIS |
 				    QIB_SENDCTRL_SEND_DIS);
@@ -789,7 +766,6 @@ static void qib_shutdown_device(struct qib_devdata *dd)
 		dd->f_quiet_serdes(ppd);
 	}
 
-	qib_cdbg(VERBOSE, "Flush time and errors to EEPROM\n");
 	qib_update_eeprom_log(dd);
 }
 
@@ -810,9 +786,6 @@ void qib_free_ctxtdata(struct qib_devdata *dd, struct qib_ctxtdata *rcd)
 		return;
 
 	if (rcd->rcvhdrq) {
-		qib_cdbg(VERBOSE, "free closed ctxt %d rcvhdrq @ %p "
-			 "(size=%lu)\n", rcd->ctxt, rcd->rcvhdrq,
-			 (unsigned long) rcd->rcvhdrq_size);
 		dma_free_coherent(&dd->pcidev->dev, rcd->rcvhdrq_size,
 				  rcd->rcvhdrq, rcd->rcvhdrq_phys);
 		rcd->rcvhdrq = NULL;
@@ -830,10 +803,6 @@ void qib_free_ctxtdata(struct qib_devdata *dd, struct qib_ctxtdata *rcd)
 			void *base = rcd->rcvegrbuf[e];
 			size_t size = rcd->rcvegrbuf_size;
 
-			qib_cdbg(VERBOSE, "egrbuf free(%p, %lu), "
-				 "chunk %u/%u\n", base,
-				 (unsigned long) size,
-				 e, rcd->rcvegrbuf_chunks);
 			dma_free_coherent(&dd->pcidev->dev, size,
 					  base, rcd->rcvegrbuf_phys[e]);
 		}
@@ -927,9 +896,6 @@ static void qib_verify_pioperf(struct qib_devdata *dd)
 			    "Performance problem: bandwidth to PIO buffers is "
 			    "only %u MiB/sec\n",
 			    lcnt / (u32) emsecs);
-	else
-		qib_cdbg(INIT, "PIO buffer bandwidth %u MiB/sec is OK\n",
-			 lcnt / (u32) emsecs);
 
 	preempt_enable();
 
@@ -997,7 +963,7 @@ struct qib_devdata *qib_alloc_devdata(struct pci_dev *pdev, size_t extra)
 	if (!qib_cpulist_count) {
 		u32 count = num_online_cpus();
 		qib_cpulist = kzalloc(BITS_TO_LONGS(count) *
-				  sizeof(long), GFP_KERNEL);
+				      sizeof(long), GFP_KERNEL);
 		if (qib_cpulist)
 			qib_cpulist_count = count;
 		else
@@ -1075,16 +1041,9 @@ static int __init qlogic_ib_init(void)
 {
 	int ret;
 
-	if (qib_debug & __QIB_DBG)
-		printk(KERN_INFO DRIVER_LOAD_MSG "%s", ib_qib_version);
-
 	ret = qib_dev_init();
 	if (ret)
 		goto bail;
-
-	ret = qib_trace_init();
-	if (ret)
-		goto bail_dev;
 
 	/*
 	 * We create our own workqueue mainly because we want to be
@@ -1095,6 +1054,16 @@ static int __init qlogic_ib_init(void)
 	 * removal.
 	 */
 	qib_wq = create_workqueue("qib");
+	if (!qib_wq) {
+		ret = -ENOMEM;
+		goto bail_dev;
+	}
+
+	qib_cq_wq = create_singlethread_workqueue("qib_cq");
+	if (!qib_cq_wq) {
+		ret = -ENOMEM;
+		goto bail_wq;
+	}
 
 	/*
 	 * These must be called before the driver is registered with
@@ -1104,16 +1073,7 @@ static int __init qlogic_ib_init(void)
 	if (!idr_pre_get(&qib_unit_table, GFP_KERNEL)) {
 		printk(KERN_ERR QIB_DRV_NAME ": idr_pre_get() failed\n");
 		ret = -ENOMEM;
-		goto bail_trace;
-	}
-
-	if (qib_wc_pat) {
-		if (qib_enable_wc_pat() || !qib_wc_pat_enabled()) {
-			printk(KERN_ERR QIB_DRV_NAME
-			       ": WC PAT unavailable, fall-back to MTRR\n");
-			qib_wc_pat = 0;
-		} else
-			qib_cdbg(INIT, "WC PAT mechanism is enabled\n");
+		goto bail_cq_wq;
 	}
 
 	ret = pci_register_driver(&qib_driver);
@@ -1129,11 +1089,11 @@ static int __init qlogic_ib_init(void)
 	goto bail; /* all OK */
 
 bail_unit:
-	if (qib_wc_pat)
-		qib_disable_wc_pat();
 	idr_destroy(&qib_unit_table);
-bail_trace:
-	qib_trace_fini();
+bail_cq_wq:
+	destroy_workqueue(qib_cq_wq);
+bail_wq:
+	destroy_workqueue(qib_wq);
 bail_dev:
 	qib_dev_cleanup();
 bail:
@@ -1157,18 +1117,13 @@ static void __exit qlogic_ib_cleanup(void)
 
 	pci_unregister_driver(&qib_driver);
 
-	if (qib_wc_pat) {
-		qib_disable_wc_pat();
-		qib_dbg("WC PAT mechanism is disabled\n");
-	}
-
 	destroy_workqueue(qib_wq);
+	destroy_workqueue(qib_cq_wq);
 
 	qib_cpulist_count = 0;
 	kfree(qib_cpulist);
 
 	idr_destroy(&qib_unit_table);
-	qib_trace_fini();
 	qib_dev_cleanup();
 }
 
@@ -1202,8 +1157,6 @@ static void cleanup_device_data(struct qib_devdata *dd)
 		dma_addr_t *tmpd = dd->physshadow;
 		int i, cnt = 0;
 
-		qib_cdbg(VERBOSE, "Unlocking any expTID pages still "
-			 "locked\n");
 		for (ctxt = 0; ctxt < dd->cfgctxts; ctxt++) {
 			int ctxt_tidbase = ctxt * dd->rcvtidcnt;
 			int maxtid = ctxt_tidbase + dd->rcvtidcnt;
@@ -1218,12 +1171,7 @@ static void cleanup_device_data(struct qib_devdata *dd)
 				cnt++;
 			}
 		}
-		if (cnt)
-			qib_cdbg(VERBOSE, "There were still %u expTID "
-				 "entries locked\n", cnt);
 
-		qib_cdbg(VERBOSE, "Free shadow page tid array at %p\n",
-			 dd->pageshadow);
 		tmpp = dd->pageshadow;
 		dd->pageshadow = NULL;
 		vfree(tmpp);
@@ -1289,7 +1237,14 @@ static int __devinit qib_init_one(struct pci_dev *pdev,
 	 */
 	switch (ent->device) {
 	case PCI_DEVICE_ID_QLOGIC_IB_6120:
+#ifdef CONFIG_PCI_MSI
 		dd = qib_init_iba6120_funcs(pdev, ent);
+#else
+		qib_early_err(&pdev->dev, "QLogic PCIE device 0x%x cannot "
+		      "work if CONFIG_PCI_MSI is not enabled\n",
+		      ent->device);
+		dd = ERR_PTR(-ENODEV);
+#endif
 		break;
 
 	case PCI_DEVICE_ID_QLOGIC_IB_7220:
@@ -1335,8 +1290,18 @@ static int __devinit qib_init_one(struct pci_dev *pdev,
 
 	if (qib_mini_init || initfail || ret) {
 		qib_stop_timers(dd);
+		flush_scheduled_work();
 		for (pidx = 0; pidx < dd->num_pports; ++pidx)
 			dd->f_quiet_serdes(dd->pport + pidx);
+		if (qib_mini_init)
+			goto bail;
+		if (!j) {
+			(void) qibfs_remove(dd);
+			qib_device_remove(dd);
+		}
+		if (!ret)
+			qib_unregister_ib_device(dd);
+		qib_postinit_cleanup(dd);
 		if (initfail)
 			ret = initfail;
 		goto bail;
@@ -1361,8 +1326,6 @@ static void __devexit qib_remove_one(struct pci_dev *pdev)
 {
 	struct qib_devdata *dd = pci_get_drvdata(pdev);
 	int ret;
-
-	qib_cdbg(VERBOSE, "removing, pdev=%p, dd=%p\n", pdev, dd);
 
 	/* unregister from IB core */
 	qib_unregister_ib_device(dd);
@@ -1434,26 +1397,10 @@ int qib_create_rcvhdrq(struct qib_devdata *dd, struct qib_ctxtdata *rcd)
 			if (!rcd->rcvhdrtail_kvaddr)
 				goto bail_free;
 			rcd->rcvhdrqtailaddr_phys = phys_hdrqtail;
-			qib_cdbg(INIT, "ctxt %d hdrtailaddr, %llx "
-				 "physical\n", rcd->ctxt,
-				 (unsigned long long) phys_hdrqtail);
 		}
 
 		rcd->rcvhdrq_size = amt;
-
-		qib_cdbg(PROC, "%d pages at %p (phys %lx) size=%lu "
-			 "for ctxt %u rcvhdr Q\n",
-			 amt >> PAGE_SHIFT, rcd->rcvhdrq,
-			 (unsigned long) rcd->rcvhdrq_phys,
-			 (unsigned long) rcd->rcvhdrq_size,
-			 rcd->ctxt);
-	} else
-		qib_cdbg(PROC, "reuse ctxt %d rcvhdrq @%p %llx phys; "
-			 "hdrtailaddr@%p %llx physical\n",
-			 rcd->ctxt, rcd->rcvhdrq,
-			 (unsigned long long) rcd->rcvhdrq_phys,
-			 rcd->rcvhdrtail_kvaddr, (unsigned long long)
-			 rcd->rcvhdrqtailaddr_phys);
+	}
 
 	/* clear for security and sanity on each use */
 	memset(rcd->rcvhdrq, 0, rcd->rcvhdrq_size);
@@ -1501,9 +1448,6 @@ int qib_setup_eagerbufs(struct qib_ctxtdata *rcd)
 	egrcnt = rcd->rcvegrcnt;
 	egroff = rcd->rcvegr_tid_base;
 	egrsize = dd->rcvegrbufsize;
-	qib_cdbg(PROC, "ctxt%d: %d egr buffers, at egrtid "
-		 "offset %x, egrsize %u\n", rcd->ctxt, egrcnt, egroff,
-		 egrsize);
 
 	chunk = rcd->rcvegrbuf_chunks;
 	egrperchunk = rcd->rcvegrbufs_perchunk;
@@ -1539,6 +1483,9 @@ int qib_setup_eagerbufs(struct qib_ctxtdata *rcd)
 		dma_addr_t pa = rcd->rcvegrbuf_phys[chunk];
 		unsigned i;
 
+		/* clear for security and sanity on each use */
+		memset(rcd->rcvegrbuf[chunk], 0, size);
+
 		for (i = 0; e < egrcnt && i < egrperchunk; e++, i++) {
 			dd->f_put_tid(dd, e + egroff +
 					  (u64 __iomem *)
@@ -1566,6 +1513,12 @@ bail:
 	return -ENOMEM;
 }
 
+/*
+ * Note: Changes to this routine should be mirrored
+ * for the diagnostics routine qib_remap_ioaddr32().
+ * There is also related code for VL15 buffers in qib_init_7322_variables().
+ * The teardown code that unmaps is in qib_pcie_ddcleanup()
+ */
 int init_chip_wc_pat(struct qib_devdata *dd, u32 vl15buflen)
 {
 	u64 __iomem *qib_kregbase = NULL;
@@ -1614,37 +1567,18 @@ int init_chip_wc_pat(struct qib_devdata *dd, u32 vl15buflen)
 
 	/* Sanity checks passed, now create the new mappings */
 	qib_kregbase = ioremap_nocache(qib_physaddr, qib_kreglen);
-	if (!qib_kregbase) {
-		qib_dbg("Unable to remap io addr %llx to kvirt\n",
-			qib_physaddr);
+	if (!qib_kregbase)
 		goto bail;
-	}
-	qib_cdbg(VERBOSE, "WC PAT remapped io addr %llx"
-		 " to kregbase %p for %llx bytes\n",
-		 qib_physaddr, qib_kregbase, qib_kreglen);
 
 	qib_piobase = ioremap_wc(qib_physaddr + qib_kreglen, qib_piolen);
-	if (!qib_piobase) {
-		qib_dbg("Unable to remap io addr %llx to kvirt\n",
-			qib_physaddr + qib_kreglen);
+	if (!qib_piobase)
 		goto bail_kregbase;
-	}
-	qib_cdbg(VERBOSE, "WC PAT remapped io addr %llx"
-		 " to piobase %p for %llx bytes\n",
-		 qib_physaddr + qib_kreglen, qib_piobase, qib_piolen);
 
 	if (qib_userlen) {
 		qib_userbase = ioremap_nocache(qib_physaddr + dd->uregbase,
 					       qib_userlen);
-		if (!qib_userbase) {
-			qib_dbg("Unable to remap io addr %llx to kvirt\n",
-				qib_physaddr + dd->uregbase);
+		if (!qib_userbase)
 			goto bail_piobase;
-		}
-		qib_cdbg(VERBOSE, "WC PAT remapped io addr %llx"
-			 " to userbase %p for %llx bytes\n",
-			 qib_physaddr + dd->uregbase,
-			 qib_userbase, qib_userlen);
 	}
 
 	dd->kregbase = qib_kregbase;
@@ -1661,8 +1595,6 @@ int init_chip_wc_pat(struct qib_devdata *dd, u32 vl15buflen)
 	if (qib_userlen)
 		/* ureg will now be accessed relative to dd->userbase */
 		dd->userbase = qib_userbase;
-	qib_cdbg(VERBOSE, "New addrs: kreg %p pio2k %p pio4k %p user %p\n",
-		 dd->kregbase, dd->pio2kbase, dd->pio4kbase, dd->userbase);
 	return 0;
 
 bail_piobase:

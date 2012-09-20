@@ -36,8 +36,8 @@
 #include "glops.h"
 
 
-static void gfs2_page_add_databufs(struct gfs2_inode *ip, struct page *page,
-				   unsigned int from, unsigned int to)
+void gfs2_page_add_databufs(struct gfs2_inode *ip, struct page *page,
+			    unsigned int from, unsigned int to)
 {
 	struct buffer_head *head = page_buffers(page);
 	unsigned int bsize = head->b_size;
@@ -630,7 +630,7 @@ static int gfs2_write_begin(struct file *file, struct address_space *mapping,
 	unsigned int data_blocks = 0, ind_blocks = 0, rblocks;
 	int alloc_required;
 	int error = 0;
-	struct gfs2_alloc *al;
+	struct gfs2_alloc *al = NULL;
 	pgoff_t index = pos >> PAGE_CACHE_SHIFT;
 	unsigned from = pos & (PAGE_CACHE_SIZE - 1);
 	unsigned to = from + len;
@@ -680,6 +680,8 @@ static int gfs2_write_begin(struct file *file, struct address_space *mapping,
 		rblocks += RES_STATFS + RES_QUOTA;
 	if (&ip->i_inode == sdp->sd_rindex)
 		rblocks += 2 * RES_STATFS;
+	if (al)
+		rblocks += gfs2_rg_blocks(al);
 
 	error = gfs2_trans_begin(sdp, rblocks,
 				 PAGE_CACHE_SIZE/sdp->sd_sb.sb_bsize);
@@ -711,6 +713,7 @@ out:
 	if (error == 0)
 		return 0;
 
+	unlock_page(page);
 	page_cache_release(page);
 	if (pos + len > ip->i_inode.i_size)
 		vmtruncate(&ip->i_inode, ip->i_inode.i_size);
@@ -821,8 +824,10 @@ static int gfs2_stuffed_write_end(struct inode *inode, struct buffer_head *dibh,
 		mark_inode_dirty(inode);
 	}
 
-	if (inode == sdp->sd_rindex)
+	if (inode == sdp->sd_rindex) {
 		adjust_fs_space(inode);
+		ip->i_gh.gh_flags |= GL_NOCACHE;
+	}
 
 	brelse(dibh);
 	gfs2_trans_end(sdp);
@@ -891,8 +896,10 @@ static int gfs2_write_end(struct file *file, struct address_space *mapping,
 		mark_inode_dirty(inode);
 	}
 
-	if (inode == sdp->sd_rindex)
+	if (inode == sdp->sd_rindex) {
 		adjust_fs_space(inode);
+		ip->i_gh.gh_flags |= GL_NOCACHE;
+	}
 
 	brelse(dibh);
 	gfs2_trans_end(sdp);
@@ -1071,8 +1078,8 @@ out:
 
 int gfs2_releasepage(struct page *page, gfp_t gfp_mask)
 {
-	struct inode *aspace = page->mapping->host;
-	struct gfs2_sbd *sdp = aspace->i_sb->s_fs_info;
+	struct address_space *mapping = page->mapping;
+	struct gfs2_sbd *sdp = gfs2_mapping2sbd(mapping);
 	struct buffer_head *bh, *head;
 	struct gfs2_bufdata *bd;
 

@@ -36,6 +36,7 @@
 #include <linux/kthread.h>
 #include <linux/freezer.h>
 #include <linux/smp_lock.h>
+#include <net/ipv6.h>
 #include "cifsfs.h"
 #include "cifspdu.h"
 #define DECLARE_GLOBALS_HERE
@@ -47,6 +48,7 @@
 #include <linux/key-type.h>
 #include "dns_resolve.h"
 #include "cifs_spnego.h"
+#include "fscache.h"
 #define CIFS_MAGIC_NUMBER 0xFF534D42	/* the first four bytes of SMB PDUs */
 
 int cifsFYI = 0;
@@ -82,6 +84,26 @@ extern mempool_t *cifs_sm_req_poolp;
 extern mempool_t *cifs_req_poolp;
 extern mempool_t *cifs_mid_poolp;
 
+struct workqueue_struct *cifsiod_workqueue;
+
+void
+cifs_sb_active(struct super_block *sb)
+{
+	struct cifs_sb_info *server = CIFS_SB(sb);
+
+	if (atomic_inc_return(&server->active) == 1)
+		atomic_inc(&sb->s_active);
+}
+
+void
+cifs_sb_deactive(struct super_block *sb)
+{
+	struct cifs_sb_info *server = CIFS_SB(sb);
+
+	if (atomic_dec_and_test(&server->active))
+		deactivate_super(sb);
+}
+
 static int
 cifs_read_super(struct super_block *sb, void *data,
 		const char *devname, int silent)
@@ -96,6 +118,9 @@ cifs_read_super(struct super_block *sb, void *data,
 	cifs_sb = CIFS_SB(sb);
 	if (cifs_sb == NULL)
 		return -ENOMEM;
+
+	spin_lock_init(&cifs_sb->tlink_tree_lock);
+	cifs_sb->tlink_tree = RB_ROOT;
 
 #ifdef CONFIG_CIFS_DFS_UPCALL
 	/* copy mount params to sb for use in submounts */
@@ -128,9 +153,6 @@ cifs_read_super(struct super_block *sb, void *data,
 
 	sb->s_magic = CIFS_MAGIC_NUMBER;
 	sb->s_op = &cifs_super_ops;
-/*	if (cifs_sb->tcon->ses->server->maxBuf > MAX_CIFS_HDR_SIZE + 512)
-	    sb->s_blocksize =
-		cifs_sb->tcon->ses->server->maxBuf - MAX_CIFS_HDR_SIZE; */
 	sb->s_blocksize = CIFS_MAX_MSGSIZE;
 	sb->s_blocksize_bits = 14;	/* default 2**14 = CIFS_MAX_MSGSIZE */
 	inode = cifs_root_iget(sb, ROOT_I);
@@ -214,7 +236,7 @@ cifs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct super_block *sb = dentry->d_sb;
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
-	struct cifsTconInfo *tcon = cifs_sb->tcon;
+	struct cifsTconInfo *tcon = cifs_sb_master_tcon(cifs_sb);
 	int rc = -EOPNOTSUPP;
 	int xid;
 
@@ -294,12 +316,10 @@ cifs_alloc_inode(struct super_block *sb)
 		return NULL;
 	cifs_inode->cifsAttrs = 0x20;	/* default */
 	cifs_inode->time = 0;
-	cifs_inode->write_behind_rc = 0;
 	/* Until the file is open and we have gotten oplock
 	info back from the server, can not assume caching of
 	file data or metadata */
-	cifs_inode->clientCanCacheRead = false;
-	cifs_inode->clientCanCacheAll = false;
+	cifs_set_oplock_level(cifs_inode, 0);
 	cifs_inode->delete_pending = false;
 	cifs_inode->invalid_mapping = false;
 	cifs_inode->vfs_inode.i_blkbits = 14;  /* 2**14 = CIFS_MAX_MSGSIZE */
@@ -316,6 +336,12 @@ static void
 cifs_destroy_inode(struct inode *inode)
 {
 	kmem_cache_free(cifs_inode_cachep, CIFS_I(inode));
+}
+
+static void
+cifs_clear_inode(struct inode *inode)
+{
+	cifs_fscache_release_inode_cookie(inode);
 }
 
 static void
@@ -348,13 +374,35 @@ static int
 cifs_show_options(struct seq_file *s, struct vfsmount *m)
 {
 	struct cifs_sb_info *cifs_sb = CIFS_SB(m->mnt_sb);
-	struct cifsTconInfo *tcon = cifs_sb->tcon;
+	struct cifsTconInfo *tcon = cifs_sb_master_tcon(cifs_sb);
+	struct sockaddr *srcaddr;
+	srcaddr = (struct sockaddr *)&tcon->ses->server->srcaddr;
 
 	seq_printf(s, ",unc=%s", tcon->treeName);
-	if (tcon->ses->userName)
+
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MULTIUSER)
+		seq_printf(s, ",multiuser");
+	else if (tcon->ses->userName)
 		seq_printf(s, ",username=%s", tcon->ses->userName);
+
 	if (tcon->ses->domainName)
 		seq_printf(s, ",domain=%s", tcon->ses->domainName);
+
+	if (srcaddr->sa_family != AF_UNSPEC) {
+		struct sockaddr_in *saddr4;
+		struct sockaddr_in6 *saddr6;
+		saddr4 = (struct sockaddr_in *)srcaddr;
+		saddr6 = (struct sockaddr_in6 *)srcaddr;
+		if (srcaddr->sa_family == AF_INET6)
+			seq_printf(s, ",srcaddr=%pI6c",
+				   &saddr6->sin6_addr);
+		else if (srcaddr->sa_family == AF_INET)
+			seq_printf(s, ",srcaddr=%pI4",
+				   &saddr4->sin_addr.s_addr);
+		else
+			seq_printf(s, ",srcaddr=BAD-AF:%i",
+				   (int)(srcaddr->sa_family));
+	}
 
 	seq_printf(s, ",uid=%d", cifs_sb->mnt_uid);
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_OVERR_UID)
@@ -404,6 +452,8 @@ cifs_show_options(struct seq_file *s, struct vfsmount *m)
 		seq_printf(s, ",dynperm");
 	if (m->mnt_sb->s_flags & MS_POSIXACL)
 		seq_printf(s, ",acl");
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MF_SYMLINKS)
+		seq_printf(s, ",mfsymlinks");
 
 	seq_printf(s, ",rsize=%d", cifs_sb->rsize);
 	seq_printf(s, ",wsize=%d", cifs_sb->wsize);
@@ -419,9 +469,7 @@ static void cifs_umount_begin(struct super_block *sb)
 	if (cifs_sb == NULL)
 		return;
 
-	tcon = cifs_sb->tcon;
-	if (tcon == NULL)
-		return;
+	tcon = cifs_sb_master_tcon(cifs_sb);
 
 	read_lock(&cifs_tcp_ses_lock);
 	if ((tcon->tc_count > 1) || (tcon->tidStatus == CifsExiting)) {
@@ -479,6 +527,7 @@ static const struct super_operations cifs_super_ops = {
 	.alloc_inode = cifs_alloc_inode,
 	.destroy_inode = cifs_destroy_inode,
 	.drop_inode	= cifs_drop_inode,
+	.clear_inode	= cifs_clear_inode,
 /*	.delete_inode	= cifs_delete_inode,  */  /* Do not need above
 	function unless later we add lazy close of inodes or unless the
 	kernel forgets to call us with the same number of releases (closes)
@@ -551,6 +600,7 @@ static int cifs_setlease(struct file *file, long arg, struct file_lock **lease)
 	/* note that this is called by vfs setlease with the BKL held
 	   although I doubt that BKL is needed here in cifs */
 	struct inode *inode = file->f_path.dentry->d_inode;
+	struct cifsFileInfo *cfile = file->private_data;
 
 	if (!(S_ISREG(inode->i_mode)))
 		return -EINVAL;
@@ -561,8 +611,8 @@ static int cifs_setlease(struct file *file, long arg, struct file_lock **lease)
 	    ((arg == F_WRLCK) &&
 		(CIFS_I(inode)->clientCanCacheAll)))
 		return generic_setlease(file, arg, lease);
-	else if (CIFS_SB(inode->i_sb)->tcon->local_lease &&
-			!CIFS_I(inode)->clientCanCacheRead)
+	else if (tlink_tcon(cfile->tlink)->local_lease &&
+		 !CIFS_I(inode)->clientCanCacheRead)
 		/* If the server claims to support oplock on this
 		   file, then we still need to check oplock even
 		   if the local_lease mount option is set, but there
@@ -891,8 +941,8 @@ init_cifs(void)
 	GlobalTotalActiveXid = 0;
 	GlobalMaxActiveXid = 0;
 	memset(Local_System_Name, 0, 15);
-	rwlock_init(&GlobalSMBSeslock);
 	rwlock_init(&cifs_tcp_ses_lock);
+	spin_lock_init(&cifs_file_list_lock);
 	spin_lock_init(&GlobalMid_Lock);
 
 	if (cifs_max_pending < 2) {
@@ -903,9 +953,13 @@ init_cifs(void)
 		cFYI(1, "cifs_max_pending set to max of 256");
 	}
 
-	rc = cifs_init_inodecache();
+	rc = cifs_fscache_register();
 	if (rc)
 		goto out_clean_proc;
+
+	rc = cifs_init_inodecache();
+	if (rc)
+		goto out_unreg_fscache;
 
 	rc = cifs_init_mids();
 	if (rc)
@@ -932,25 +986,35 @@ init_cifs(void)
 	if (rc)
 		goto out_unregister_resolver_key;
 
+	cifsiod_workqueue = create_singlethread_workqueue("cifsiod");
+	if (cifsiod_workqueue == NULL) {
+		rc = -ENOMEM;
+		goto out_unregister_slow_work;
+	}
+
 	return 0;
 
- out_unregister_resolver_key:
+out_unregister_slow_work:
+	slow_work_unregister_user(THIS_MODULE);
+out_unregister_resolver_key:
 #ifdef CONFIG_CIFS_DFS_UPCALL
 	cifs_exit_dns_resolver();
- out_unregister_key_type:
+out_unregister_key_type:
 #endif
 #ifdef CONFIG_CIFS_UPCALL
 	unregister_key_type(&cifs_spnego_key_type);
- out_unregister_filesystem:
+out_unregister_filesystem:
 #endif
 	unregister_filesystem(&cifs_fs_type);
- out_destroy_request_bufs:
+out_destroy_request_bufs:
 	cifs_destroy_request_bufs();
- out_destroy_mids:
+out_destroy_mids:
 	cifs_destroy_mids();
- out_destroy_inodecache:
+out_destroy_inodecache:
 	cifs_destroy_inodecache();
- out_clean_proc:
+out_unreg_fscache:
+	cifs_fscache_unregister();
+out_clean_proc:
 	cifs_proc_clean();
 	return rc;
 }
@@ -959,7 +1023,10 @@ static void __exit
 exit_cifs(void)
 {
 	cFYI(DBG2, "exit_cifs");
+	destroy_workqueue(cifsiod_workqueue);
+	slow_work_unregister_user(THIS_MODULE);
 	cifs_proc_clean();
+	cifs_fscache_unregister();
 #ifdef CONFIG_CIFS_DFS_UPCALL
 	cifs_dfs_release_automount_timer();
 	cifs_exit_dns_resolver();

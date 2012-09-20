@@ -142,6 +142,7 @@ struct ib_device_attr {
 	int			max_qp_init_rd_atom;
 	int			max_ee_init_rd_atom;
 	enum ib_atomic_cap	atomic_cap;
+	enum ib_atomic_cap	masked_atomic_cap;
 	int			max_ee;
 	int			max_rdd;
 	int			max_mw;
@@ -304,7 +305,6 @@ struct ib_port_attr {
 	u8			active_width;
 	u8			active_speed;
 	u8                      phys_state;
-	enum rdma_link_layer	link_layer;
 };
 
 enum ib_device_modify_flags {
@@ -474,6 +474,8 @@ enum ib_wc_opcode {
 	IB_WC_LSO,
 	IB_WC_LOCAL_INV,
 	IB_WC_FAST_REG_MR,
+	IB_WC_MASKED_COMP_SWAP,
+	IB_WC_MASKED_FETCH_ADD,
 /*
  * Set value of IB_WC_RECV so consumers can test if a completion is a
  * receive by testing (opcode & IB_WC_RECV).
@@ -559,7 +561,7 @@ enum ib_qp_type {
 	IB_QPT_UC,
 	IB_QPT_UD,
 	IB_QPT_RAW_IPV6,
-	IB_QPT_RAW_ETY
+	IB_QPT_RAW_ETHERTYPE
 };
 
 enum ib_qp_create_flags {
@@ -696,6 +698,8 @@ enum ib_wr_opcode {
 	IB_WR_RDMA_READ_WITH_INV,
 	IB_WR_LOCAL_INV,
 	IB_WR_FAST_REG_MR,
+	IB_WR_MASKED_ATOMIC_CMP_AND_SWP,
+	IB_WR_MASKED_ATOMIC_FETCH_AND_ADD,
 };
 
 enum ib_send_flags {
@@ -738,6 +742,8 @@ struct ib_send_wr {
 			u64	remote_addr;
 			u64	compare_add;
 			u64	swap;
+			u64	compare_add_mask;
+			u64	swap_mask;
 			u32	rkey;
 		} atomic;
 		struct {
@@ -1139,11 +1145,6 @@ struct ib_device {
 						  struct ib_grh *in_grh,
 						  struct ib_mad *in_mad,
 						  struct ib_mad *out_mad);
-	int			   (*get_eth_l2_addr)(struct ib_device *device,
-						      u8 port,
-						      union ib_gid *dgid,
-						      int sgid_idx, u8 *mac,
-						      u16 *vlan_id);
 
 	struct ib_dma_mapping_ops   *dma_ops;
 
@@ -1179,7 +1180,9 @@ struct ib_client {
 struct ib_device *ib_alloc_device(size_t size);
 void ib_dealloc_device(struct ib_device *device);
 
-int ib_register_device   (struct ib_device *device);
+int ib_register_device(struct ib_device *device,
+		       int (*port_callback)(struct ib_device *,
+					    u8, struct kobject *));
 void ib_unregister_device(struct ib_device *device);
 
 int ib_register_client   (struct ib_client *client);
@@ -1236,8 +1239,8 @@ int ib_query_device(struct ib_device *device,
 int ib_query_port(struct ib_device *device,
 		  u8 port_num, struct ib_port_attr *port_attr);
 
-enum rdma_link_layer rdma_port_link_layer(struct ib_device *device,
-					  u8 port_num);
+enum rdma_link_layer rdma_port_get_link_layer(struct ib_device *device,
+					       u8 port_num);
 
 int ib_query_gid(struct ib_device *device,
 		 u8 port_num, int index, union ib_gid *gid);
@@ -2061,17 +2064,5 @@ int ib_attach_mcast(struct ib_qp *qp, union ib_gid *gid, u16 lid);
  * @lid: Multicast group LID in host byte order.
  */
 int ib_detach_mcast(struct ib_qp *qp, union ib_gid *gid, u16 lid);
-
-/**
-  * ib_get_eth_l2_addr - get the mac and vlan id for the specified gid
-  * @device: IB device used for traffic
-  * @port: port number used.
-  * @gid: gid to be resolved into mac
-  * @sgid_idx: index to port's gid table for the corresponding address vector
-  * @mac: mac of the port bearing this gid
-  * @vlan_id: vlan to be used to reach this gid
-  */
-int ib_get_eth_l2_addr(struct ib_device *device, u8 port, union ib_gid *gid,
-		       int sgid_idx, u8 *mac, __u16 *vlan_id);
 
 #endif /* IB_VERBS_H */

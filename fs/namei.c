@@ -686,11 +686,17 @@ static __always_inline int __do_follow_link(struct path *path, struct nameidata 
 			error = __vfs_follow_link(nd, s);
 		else if (nd->last_type == LAST_BIND) {
 			error = force_reval_path(&nd->path, nd);
-			if (error)
+			if (error) {
+				if (unlikely(!audit_dummy_context()))
+					audit_inode(NULL, path->dentry);
 				path_put(&nd->path);
+			}
 		}
 		if (dentry->d_inode->i_op->put_link)
 			dentry->d_inode->i_op->put_link(dentry, nd, cookie);
+	} else {
+		if (unlikely(!audit_dummy_context()))
+			audit_inode(NULL, path->dentry);
 	}
 	path_put(path);
 
@@ -1068,6 +1074,8 @@ out_dput:
 		path_put_conditional(&next, nd);
 		break;
 	}
+	if (unlikely(!audit_dummy_context()) && nd->path.dentry->d_inode)
+		audit_inode(name, nd->path.dentry);
 	path_put(&nd->path);
 return_err:
 	return err;
@@ -1197,36 +1205,6 @@ int vfs_path_lookup(struct dentry *dentry, struct vfsmount *mnt,
 	nd->root.mnt = NULL;
 
 	return retval;
-}
-
-/**
- * path_lookup_open - lookup a file path with open intent
- * @dfd: the directory to use as base, or AT_FDCWD
- * @name: pointer to file name
- * @lookup_flags: lookup intent flags
- * @nd: pointer to nameidata
- * @open_flags: open intent flags
- */
-static int path_lookup_open(int dfd, const char *name,
-		unsigned int lookup_flags, struct nameidata *nd, int open_flags)
-{
-	struct file *filp = get_empty_filp();
-	int err;
-
-	if (filp == NULL)
-		return -ENFILE;
-	nd->intent.open.file = filp;
-	nd->intent.open.flags = open_flags;
-	nd->intent.open.create_mode = 0;
-	err = do_path_lookup(dfd, name, lookup_flags|LOOKUP_OPEN, nd);
-	if (IS_ERR(nd->intent.open.file)) {
-		if (err == 0) {
-			err = PTR_ERR(nd->intent.open.file);
-			path_put(&nd->path);
-		}
-	} else if (err != 0)
-		release_open_intent(nd);
-	return err;
 }
 
 static struct dentry *__lookup_hash(struct qstr *name,
@@ -1729,8 +1707,23 @@ struct file *do_filp_open(int dfd, const char *pathname,
 	 * The simplest case - just a plain lookup.
 	 */
 	if (!(flag & O_CREAT)) {
-		error = path_lookup_open(dfd, pathname, lookup_flags(flag),
-					 &nd, flag);
+		filp = get_empty_filp();
+
+		if (filp == NULL)
+			return ERR_PTR(-ENFILE);
+		nd.intent.open.file = filp;
+		filp->f_flags = open_flag;
+		nd.intent.open.flags = flag;
+		nd.intent.open.create_mode = 0;
+		error = do_path_lookup(dfd, pathname,
+					lookup_flags(flag)|LOOKUP_OPEN, &nd);
+		if (IS_ERR(nd.intent.open.file)) {
+			if (error == 0) {
+				error = PTR_ERR(nd.intent.open.file);
+				path_put(&nd.path);
+			}
+		} else if (error)
+			release_open_intent(&nd);
 		if (error)
 			return ERR_PTR(error);
 		goto ok;
@@ -1765,6 +1758,7 @@ struct file *do_filp_open(int dfd, const char *pathname,
 	if (filp == NULL)
 		goto exit_parent;
 	nd.intent.open.file = filp;
+	filp->f_flags = open_flag;
 	nd.intent.open.flags = flag;
 	nd.intent.open.create_mode = mode;
 	dir = nd.path.dentry;
@@ -1805,7 +1799,7 @@ do_last:
 			mnt_drop_write(nd.path.mnt);
 			goto exit;
 		}
-		filp = nameidata_to_filp(&nd, open_flag);
+		filp = nameidata_to_filp(&nd);
 		mnt_drop_write(nd.path.mnt);
 		if (nd.root.mnt)
 			path_put(&nd.root);
@@ -1868,7 +1862,7 @@ ok:
 			mnt_drop_write(nd.path.mnt);
 		goto exit;
 	}
-	filp = nameidata_to_filp(&nd, open_flag);
+	filp = nameidata_to_filp(&nd);
 	if (!IS_ERR(filp)) {
 		error = ima_file_check(filp, acc_mode);
 		if (error) {

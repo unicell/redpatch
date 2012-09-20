@@ -270,8 +270,6 @@ static int alloc_sdma(struct qib_pportdata *ppd)
 		ppd->sdma_descq_cnt = 256;
 
 	/* Allocate memory for SendDMA descriptor FIFO */
-	qib_cdbg(SDMA, "IB%u:%u allocating %u SDMA descq entries\n",
-		 ppd->dd->unit, ppd->port, (unsigned)ppd->sdma_descq_cnt);
 	ppd->sdma_descq = dma_alloc_coherent(&ppd->dd->pcidev->dev,
 		ppd->sdma_descq_cnt * sizeof(u64[2]), &ppd->sdma_descq_phys,
 		GFP_KERNEL);
@@ -427,7 +425,7 @@ void __qib_sdma_intr(struct qib_pportdata *ppd)
 		qib_sdma_make_progress(ppd);
 }
 
-int setup_sdma(struct qib_pportdata *ppd)
+int qib_setup_sdma(struct qib_pportdata *ppd)
 {
 	struct qib_devdata *dd = ppd->dd;
 	unsigned long flags;
@@ -466,12 +464,12 @@ int setup_sdma(struct qib_pportdata *ppd)
 	return 0;
 
 bail_alloc:
-	teardown_sdma(ppd);
+	qib_teardown_sdma(ppd);
 bail:
 	return ret;
 }
 
-void teardown_sdma(struct qib_pportdata *ppd)
+void qib_teardown_sdma(struct qib_pportdata *ppd)
 {
 	qib_sdma_process_event(ppd, qib_sdma_event_e00_go_hw_down);
 
@@ -657,8 +655,8 @@ unmap:
 		unmap_desc(ppd, tail);
 	}
 	qp = tx->qp;
-	qib_dbg("QP%d I/O error\n", qp->ibqp.qp_num);
 	qib_put_txreq(tx);
+	spin_lock(&qp->r_lock);
 	spin_lock(&qp->s_lock);
 	if (qp->ibqp.qp_type == IB_QPT_RC) {
 		/* XXX what about error sending RDMA read responses? */
@@ -667,6 +665,7 @@ unmap:
 	} else if (qp->s_wqe)
 		qib_send_complete(qp, qp->s_wqe, IB_WC_GENERAL_ERR);
 	spin_unlock(&qp->s_lock);
+	spin_unlock(&qp->r_lock);
 	/* return zero to process the next send work request */
 	goto unlock;
 
@@ -707,60 +706,6 @@ unlock:
 	return ret;
 }
 
-/*
- * sdma_lock should be acquired before calling this routine
- */
-void dump_sdma_state(struct qib_pportdata *ppd)
-{
-	struct qib_sdma_desc *descq;
-	struct qib_sdma_txreq *txp, *txpnext;
-	__le64 *descqp;
-	u64 desc[2];
-	dma_addr_t addr;
-	u16 gen, dwlen, dwoffset;
-	u16 head, tail, cnt;
-
-	head = ppd->sdma_descq_head;
-	tail = ppd->sdma_descq_tail;
-	cnt = qib_sdma_descq_freecnt(ppd);
-	descq = ppd->sdma_descq;
-
-	qib_cdbg(SDMA, "IB%u: ppd->sdma_descq_head: %u\n", ppd->port, head);
-	qib_cdbg(SDMA, "IB%u: ppd->sdma_descq_tail: %u\n", ppd->port, tail);
-	qib_cdbg(SDMA, "IB%u: sdma_descq_freecnt: %u\n", ppd->port, cnt);
-
-	/* print info for each entry in the descriptor queue */
-	while (head != tail) {
-		char flags[6] = { 'x', 'x', 'x', 'x', 'x', 0 };
-
-		descqp = &descq[head].qw[0];
-		desc[0] = le64_to_cpu(descqp[0]);
-		desc[1] = le64_to_cpu(descqp[1]);
-		flags[0] = (desc[0] & 1<<15) ? 'I' : '-';
-		flags[1] = (desc[0] & 1<<14) ? 'L' : 'S';
-		flags[2] = (desc[0] & 1<<13) ? 'H' : '-';
-		flags[3] = (desc[0] & 1<<12) ? 'F' : '-';
-		flags[4] = (desc[0] & 1<<11) ? 'L' : '-';
-		addr = (desc[1] << 32) | ((desc[0] >> 32) & 0xfffffffcULL);
-		gen = (desc[0] >> 30) & 3ULL;
-		dwlen = (desc[0] >> 14) & (0x7ffULL << 2);
-		dwoffset = (desc[0] & 0x7ffULL) << 2;
-		qib_cdbg(SDMA, "IB%u: sdmadesc[%u]: flags:%s addr:0x%016llx "
-			 "gen:%u len:%u bytes offset:%u bytes\n", ppd->port,
-			 head, flags, addr, gen, dwlen, dwoffset);
-		if (++head == ppd->sdma_descq_cnt)
-			head = 0;
-	}
-
-	if (qib_debug & __QIB_VERBDBG)
-		/* print dma descriptor indices from the TX requests */
-		list_for_each_entry_safe(txp, txpnext, &ppd->sdma_activelist,
-					 list)
-			qib_cdbg(SDMA, "IB%u: txp->start_idx: %u "
-				"txp->next_descq_idx: %u\n", ppd->port,
-				txp->start_idx, txp->next_descq_idx);
-}
-
 void qib_sdma_process_event(struct qib_pportdata *ppd,
 	enum qib_sdma_events event)
 {
@@ -781,9 +726,6 @@ void __qib_sdma_process_event(struct qib_pportdata *ppd,
 {
 	struct qib_sdma_state *ss = &ppd->sdma_state;
 
-	qib_cdbg(SDMA, "IB%u:%u [%s] %s\n", ppd->dd->unit, ppd->port,
-		 qib_sdma_state_names[ss->current_state],
-		 qib_sdma_event_names[event]);
 	switch (ss->current_state) {
 	case qib_sdma_state_s00_hw_down:
 		switch (event) {
@@ -1030,7 +972,4 @@ void __qib_sdma_process_event(struct qib_pportdata *ppd,
 	}
 
 	ss->last_event = event;
-
-	qib_cdbg(SDMA, "IB%u:%u [%s]\n", ppd->dd->unit, ppd->port,
-		 qib_sdma_state_names[ss->current_state]);
 }

@@ -219,14 +219,8 @@ static const struct ib_field deth_table[] = {
  * @eth_present: specify if Eth header is present
  * @vlan_present: packet is tagged vlan
  * @grh_present:GRH flag (if non-zero, GRH will be included)
- * @immediate_present: specify if immediate data should be used
+ * @immediate_present: specify if immediate data is present
  * @header:Structure to initialize
- *
- * ib_ud_header_init() initializes the lrh.link_version, lrh.link_next_header,
- * lrh.packet_length, grh.ip_version, grh.payload_length,
- * grh.next_header, bth.opcode, bth.pad_count and
- * bth.transport_header_version fields of a &struct ib_ud_header given
- * the payload length and whether a GRH will be included.
  */
 void ib_ud_header_init(int     		    payload_bytes,
 		       int		    lrh_present,
@@ -236,46 +230,38 @@ void ib_ud_header_init(int     		    payload_bytes,
 		       int		    immediate_present,
 		       struct ib_ud_header *header)
 {
-	u16 packet_length;
-
 	memset(header, 0, sizeof *header);
 
 	if (lrh_present) {
+		u16 packet_length;
+
 		header->lrh.link_version     = 0;
 		header->lrh.link_next_header =
 			grh_present ? IB_LNH_IBA_GLOBAL : IB_LNH_IBA_LOCAL;
-		packet_length = IB_LRH_BYTES;
+		packet_length = (IB_LRH_BYTES	+
+				 IB_BTH_BYTES	+
+				 IB_DETH_BYTES	+
+				 (grh_present ? IB_GRH_BYTES : 0) +
+				 payload_bytes	+
+				 4		+ /* ICRC     */
+				 3) / 4;	  /* round up */
+		header->lrh.packet_length = cpu_to_be16(packet_length);
 	}
 
-	if (eth_present) {
-		if (vlan_present) {
-			header->eth.type = cpu_to_be16(ETH_P_8021Q);
-			packet_length += IB_VLAN_BYTES;
+	if (vlan_present)
+		header->eth.type = cpu_to_be16(ETH_P_8021Q);
 
-		}
-		packet_length += IB_ETH_BYTES;
-	}
-
-	packet_length += IB_BTH_BYTES + IB_DETH_BYTES + payload_bytes +
-		4	+ /* ICRC     */
-		3;	  /* round up */
-	packet_length /= 4;
 	if (grh_present) {
-		packet_length += IB_GRH_BYTES / 4;
-		header->grh.ip_version = 6;
-		header->grh.payload_length =
-			cpu_to_be16((IB_BTH_BYTES  +
-				     IB_DETH_BYTES +
-				     payload_bytes +
-				     4             + /* ICRC     */
-				     3) & ~3);       /* round up */
+		header->grh.ip_version      = 6;
+		header->grh.payload_length  =
+			cpu_to_be16((IB_BTH_BYTES     +
+				     IB_DETH_BYTES    +
+				     payload_bytes    +
+				     4                + /* ICRC     */
+				     3) & ~3);          /* round up */
 		header->grh.next_header     = 0x1b;
 	}
 
-	if (lrh_present)
-		header->lrh.packet_length = cpu_to_be16(packet_length);
-
-	header->immediate_present	     = immediate_present;
 	if (immediate_present)
 		header->bth.opcode           = IB_OPCODE_UD_SEND_ONLY_WITH_IMMEDIATE;
 	else
@@ -314,14 +300,11 @@ int ib_ud_header_pack(struct ib_ud_header *header,
 			&header->eth, buf + len);
 		len += IB_ETH_BYTES;
 	}
-
-
 	if (header->vlan_present) {
 		ib_pack(vlan_table, ARRAY_SIZE(vlan_table),
 			&header->vlan, buf + len);
 		len += IB_VLAN_BYTES;
 	}
-
 	if (header->grh_present) {
 		ib_pack(grh_table, ARRAY_SIZE(grh_table),
 			&header->grh, buf + len);

@@ -371,4 +371,3 @@ struct ib_pma_portcounters_ext {
 		    COUNTER_MASK(1, 2) | \
 		    COUNTER_MASK(1, 3) | \
 		    COUNTER_MASK(1, 4))
-

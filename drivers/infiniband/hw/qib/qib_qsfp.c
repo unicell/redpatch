@@ -52,14 +52,11 @@ static int qsfp_read(struct qib_pportdata *ppd, int addr, void *bp, int len)
 	int stuck = 0;
 	u8 *buff = bp;
 
-	qib_cdbg(VERBOSE, "Grabbing Mutex for QSFP in %d:%d\n", dd->unit,
-		 ppd->port);
 	ret = mutex_lock_interruptible(&dd->eep_lock);
 	if (ret)
 		goto no_unlock;
 
 	if (dd->twsi_eeprom_dev == QIB_TWSI_NO_DEV) {
-		qib_dbg("QSFP read on board without QSFP\n");
 		ret = -ENXIO;
 		goto bail;
 	}
@@ -146,8 +143,6 @@ deselect:
 
 bail:
 	mutex_unlock(&dd->eep_lock);
-	qib_cdbg(VERBOSE, "Released Mutex for QSFP %d:%d, ret %d\n", dd->unit,
-		ppd->port, ret);
 
 no_unlock:
 	return ret;
@@ -166,15 +161,11 @@ static int qib_qsfp_write(struct qib_pportdata *ppd, int addr, void *bp,
 	int ret, cnt;
 	u8 *buff = bp;
 
-	qib_cdbg(VERBOSE, "Grabbing Mutex for QSFP %d:%d Wr\n", dd->unit,
-		 ppd->port);
 	ret = mutex_lock_interruptible(&dd->eep_lock);
 	if (ret)
 		goto no_unlock;
 
 	if (dd->twsi_eeprom_dev == QIB_TWSI_NO_DEV) {
-		qib_dbg("QSFP write on board (%d:%d) without QSFP\n", dd->unit,
-			ppd->port);
 		ret = -ENXIO;
 		goto bail;
 	}
@@ -221,8 +212,6 @@ static int qib_qsfp_write(struct qib_pportdata *ppd, int addr, void *bp,
 		ret = qib_twsi_blk_wr(dd, QSFP_DEV, addr, buff + cnt, wlen);
 		if (ret) {
 			/* qib_twsi_blk_wr() 1 for error, else 0 */
-			qib_dbg("qib_twsi_blk_wr(%d:%d, %d, , %d) failed\n",
-				dd->unit, ppd->port, addr, wlen);
 			ret = -EIO;
 			goto deselect;
 		}
@@ -249,8 +238,6 @@ deselect:
 
 bail:
 	mutex_unlock(&dd->eep_lock);
-	qib_cdbg(VERBOSE, "Released Mutex for QSFP %d:%d, ret %d\n", dd->unit,
-		 ppd->port, ret);
 
 no_unlock:
 	return ret;
@@ -298,7 +285,6 @@ int qib_refresh_qsfp_cache(struct qib_pportdata *ppd, struct qib_qsfp_cache *cp)
 
 	ret = ppd->dd->f_gpio_mod(ppd->dd, 0, 0, 0);
 	if (ret & mask) {
-		qib_dbg("No QSFP module in %d:%d\n", ppd->dd->unit, ppd->port);
 		ret = -ENODEV;
 		goto bail;
 	}
@@ -458,21 +444,6 @@ const char * const qib_qsfp_devtech[16] = {
 
 static const char *pwr_codes = "1.5W2.0W2.5W3.5W";
 
-void qib_qsfp_short_msg(struct qib_qsfp_data *qd)
-{
-	char lenstr[6];
-	lenstr[0] = ' ';
-	lenstr[1] = '\0';
-	if (QSFP_IS_CU(qd->cache.tech))
-		sprintf(lenstr, "%dM ", qd->cache.len);
-	qib_cdbg(INIT, "IB%u:%u QSFP %s%.*s %.*s %.3s%s SN: %.*s\n",
-			qd->ppd->dd->unit, qd->ppd->port,
-			qd->cache.id ? "" : "[INVALID] ", QSFP_VEND_LEN,
-			qd->cache.vendor, QSFP_PN_LEN, qd->cache.partnum,
-			lenstr, qib_qsfp_devtech[qd->cache.tech >> 4],
-			QSFP_SN_LEN, qd->cache.serial);
-}
-
 /*
  * Initialize structures that control access to QSFP. Called once per port
  * on cards that support QSFP.
@@ -510,11 +481,8 @@ void qib_qsfp_init(struct qib_qsfp_data *qd,
 
 	/* Do not try to wait here. Better to let event handle it */
 	pins = dd->f_gpio_mod(dd, 0, 0, 0);
-	if (pins & mask) {
-		qib_dbg("IB%u:%u has no QSFP module present\n",
-			qd->ppd->dd->unit, qd->ppd->port);
+	if (pins & mask)
 		goto bail;
-	}
 	/* We see a module, but it may be unwise to look yet. Just schedule */
 	qd->t_insert = get_jiffies_64();
 	schedule_work(&qd->work);
@@ -543,11 +511,8 @@ int qib_qsfp_dump(struct qib_pportdata *ppd, char *buf, int len)
 
 	sofar = 0;
 	ret = qib_refresh_qsfp_cache(ppd, &cd);
-	if (ret < 0) {
-		qib_dbg("IB%u:%u QSFP cache-refresh failed\n", ppd->dd->unit,
-			ppd->port);
+	if (ret < 0)
 		goto bail;
-	}
 
 	lenstr[0] = ' ';
 	lenstr[1] = '\0';

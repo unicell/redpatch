@@ -25,7 +25,7 @@
  * Or, point your browser to http://www.gnu.org/copyleft/gpl.html
  *
  *
- * the project's page is at http://www.linuxtv.org/dvb/
+ * the project's page is at http://www.linuxtv.org/ 
  */
 
 #include <linux/kernel.h>
@@ -34,6 +34,7 @@
 #include <linux/fs.h>
 #include <linux/timer.h>
 #include <linux/poll.h>
+#include <linux/gfp.h>
 
 #include "av7110.h"
 #include "av7110_hw.h"

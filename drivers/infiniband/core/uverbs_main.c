@@ -106,7 +106,6 @@ static ssize_t (*uverbs_cmd_table[])(struct ib_uverbs_file *file,
 	[IB_USER_VERBS_CMD_MODIFY_SRQ]		= ib_uverbs_modify_srq,
 	[IB_USER_VERBS_CMD_QUERY_SRQ]		= ib_uverbs_query_srq,
 	[IB_USER_VERBS_CMD_DESTROY_SRQ]		= ib_uverbs_destroy_srq,
-	[IB_USER_VERBS_CMD_GET_ETH_L2_ADDR]	= ib_uverbs_get_eth_l2_addr,
 };
 
 static void ib_uverbs_add_one(struct ib_device *device);
@@ -369,7 +368,8 @@ static const struct file_operations uverbs_event_fops = {
 	.read	 = ib_uverbs_event_read,
 	.poll    = ib_uverbs_event_poll,
 	.release = ib_uverbs_event_close,
-	.fasync  = ib_uverbs_event_fasync
+	.fasync  = ib_uverbs_event_fasync,
+	.llseek	 = no_llseek,
 };
 
 void ib_uverbs_comp_handler(struct ib_cq *cq, void *cq_context)
@@ -639,7 +639,7 @@ static int ib_uverbs_open(struct inode *inode, struct file *filp)
 
 	filp->private_data = file;
 
-	return 0;
+	return nonseekable_open(inode, filp);
 
 err_module:
 	module_put(dev->ib_dev->owner);
@@ -667,7 +667,8 @@ static const struct file_operations uverbs_fops = {
 	.owner	 = THIS_MODULE,
 	.write	 = ib_uverbs_write,
 	.open	 = ib_uverbs_open,
-	.release = ib_uverbs_close
+	.release = ib_uverbs_close,
+	.llseek	 = no_llseek,
 };
 
 static const struct file_operations uverbs_mmap_fops = {
@@ -675,7 +676,8 @@ static const struct file_operations uverbs_mmap_fops = {
 	.write	 = ib_uverbs_write,
 	.mmap    = ib_uverbs_mmap,
 	.open	 = ib_uverbs_open,
-	.release = ib_uverbs_close
+	.release = ib_uverbs_close,
+	.llseek	 = no_llseek,
 };
 
 static struct ib_client uverbs_client = {

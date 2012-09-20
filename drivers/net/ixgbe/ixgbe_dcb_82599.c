@@ -31,102 +31,61 @@
 #include "ixgbe_dcb_82599.h"
 
 /**
- * ixgbe_dcb_get_tc_stats_82599 - Returns status for each traffic class
- * @hw: pointer to hardware structure
- * @stats: pointer to statistics structure
- * @tc_count:  Number of elements in bwg_array.
- *
- * This function returns the status data for each of the Traffic Classes in use.
- */
-s32 ixgbe_dcb_get_tc_stats_82599(struct ixgbe_hw *hw,
-                                 struct ixgbe_hw_stats *stats,
-                                 u8 tc_count)
-{
-	int tc;
-
-	if (tc_count > MAX_TRAFFIC_CLASS)
-		return DCB_ERR_PARAM;
-	/* Statistics pertaining to each traffic class */
-	for (tc = 0; tc < tc_count; tc++) {
-		/* Transmitted Packets */
-		stats->qptc[tc] += IXGBE_READ_REG(hw, IXGBE_QPTC(tc));
-		/* Transmitted Bytes */
-		stats->qbtc[tc] += IXGBE_READ_REG(hw, IXGBE_QBTC(tc));
-		/* Received Packets */
-		stats->qprc[tc] += IXGBE_READ_REG(hw, IXGBE_QPRC(tc));
-		/* Received Bytes */
-		stats->qbrc[tc] += IXGBE_READ_REG(hw, IXGBE_QBRC(tc));
-	}
-
-	return 0;
-}
-
-/**
- * ixgbe_dcb_get_pfc_stats_82599 - Return CBFC status data
- * @hw: pointer to hardware structure
- * @stats: pointer to statistics structure
- * @tc_count:  Number of elements in bwg_array.
- *
- * This function returns the CBFC status data for each of the Traffic Classes.
- */
-s32 ixgbe_dcb_get_pfc_stats_82599(struct ixgbe_hw *hw,
-                                  struct ixgbe_hw_stats *stats,
-                                  u8 tc_count)
-{
-	int tc;
-
-	if (tc_count > MAX_TRAFFIC_CLASS)
-		return DCB_ERR_PARAM;
-	for (tc = 0; tc < tc_count; tc++) {
-		/* Priority XOFF Transmitted */
-		stats->pxofftxc[tc] += IXGBE_READ_REG(hw, IXGBE_PXOFFTXC(tc));
-		/* Priority XOFF Received */
-		stats->pxoffrxc[tc] += IXGBE_READ_REG(hw, IXGBE_PXOFFRXCNT(tc));
-	}
-
-	return 0;
-}
-
-/**
  * ixgbe_dcb_config_packet_buffers_82599 - Configure DCB packet buffers
  * @hw: pointer to hardware structure
  * @dcb_config: pointer to ixgbe_dcb_config structure
  *
  * Configure packet buffers for DCB mode.
  */
-s32 ixgbe_dcb_config_packet_buffers_82599(struct ixgbe_hw *hw,
+static s32 ixgbe_dcb_config_packet_buffers_82599(struct ixgbe_hw *hw,
                                           struct ixgbe_dcb_config *dcb_config)
 {
-	s32 ret_val = 0;
-	u32 value = IXGBE_RXPBSIZE_64KB;
+	int num_tcs = IXGBE_MAX_PACKET_BUFFERS;
+	u32 rx_pb_size = hw->mac.rx_pb_size << IXGBE_RXPBSIZE_SHIFT;
+	u32 rxpktsize;
+	u32 txpktsize;
+	u32 txpbthresh;
 	u8  i = 0;
 
-	/* Setup Rx packet buffer sizes */
-	switch (dcb_config->rx_pba_cfg) {
-	case pba_80_48:
-		/* Setup the first four at 80KB */
-		value = IXGBE_RXPBSIZE_80KB;
-		for (; i < 4; i++)
-			IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), value);
-		/* Setup the last four at 48KB...don't re-init i */
-		value = IXGBE_RXPBSIZE_48KB;
-		/* Fall Through */
-	case pba_equal:
-	default:
-		for (; i < IXGBE_MAX_PACKET_BUFFERS; i++)
-			IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), value);
-
-		/* Setup Tx packet buffer sizes */
-		for (i = 0; i < IXGBE_MAX_PACKET_BUFFERS; i++) {
-			IXGBE_WRITE_REG(hw, IXGBE_TXPBSIZE(i),
-			                IXGBE_TXPBSIZE_20KB);
-			IXGBE_WRITE_REG(hw, IXGBE_TXPBTHRESH(i),
-			                IXGBE_TXPBTHRESH_DCB);
-		}
-		break;
+	/*
+	 * This really means configure the first half of the TCs
+	 * (Traffic Classes) to use 5/8 of the Rx packet buffer
+	 * space.  To determine the size of the buffer for each TC,
+	 * we are multiplying the average size by 5/4 and applying
+	 * it to half of the traffic classes.
+	 */
+	if (dcb_config->rx_pba_cfg == pba_80_48) {
+		rxpktsize = (rx_pb_size * 5) / (num_tcs * 4);
+		rx_pb_size -= rxpktsize * (num_tcs / 2);
+		for (; i < (num_tcs / 2); i++)
+			IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), rxpktsize);
 	}
 
-	return ret_val;
+	/* Divide the remaining Rx packet buffer evenly among the TCs */
+	rxpktsize = rx_pb_size / (num_tcs - i);
+	for (; i < num_tcs; i++)
+		IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), rxpktsize);
+
+	/*
+	 * Setup Tx packet buffer and threshold equally for all TCs
+	 * TXPBTHRESH register is set in K so divide by 1024 and subtract
+	 * 10 since the largest packet we support is just over 9K.
+	 */
+	txpktsize = IXGBE_TXPBSIZE_MAX / num_tcs;
+	txpbthresh = (txpktsize / 1024) - IXGBE_TXPKT_SIZE_MAX;
+	for (i = 0; i < num_tcs; i++) {
+		IXGBE_WRITE_REG(hw, IXGBE_TXPBSIZE(i), txpktsize);
+		IXGBE_WRITE_REG(hw, IXGBE_TXPBTHRESH(i), txpbthresh);
+	}
+
+	/* Clear unused TCs, if any, to zero buffer size*/
+	for (; i < MAX_TRAFFIC_CLASS; i++) {
+		IXGBE_WRITE_REG(hw, IXGBE_RXPBSIZE(i), 0);
+		IXGBE_WRITE_REG(hw, IXGBE_TXPBSIZE(i), 0);
+		IXGBE_WRITE_REG(hw, IXGBE_TXPBTHRESH(i), 0);
+	}
+
+	return 0;
 }
 
 /**
@@ -136,7 +95,7 @@ s32 ixgbe_dcb_config_packet_buffers_82599(struct ixgbe_hw *hw,
  *
  * Configure Rx Packet Arbiter and credits for each traffic class.
  */
-s32 ixgbe_dcb_config_rx_arbiter_82599(struct ixgbe_hw *hw,
+static s32 ixgbe_dcb_config_rx_arbiter_82599(struct ixgbe_hw *hw,
                                       struct ixgbe_dcb_config *dcb_config)
 {
 	struct tc_bw_alloc    *p;
@@ -191,7 +150,7 @@ s32 ixgbe_dcb_config_rx_arbiter_82599(struct ixgbe_hw *hw,
  *
  * Configure Tx Descriptor Arbiter and credits for each traffic class.
  */
-s32 ixgbe_dcb_config_tx_desc_arbiter_82599(struct ixgbe_hw *hw,
+static s32 ixgbe_dcb_config_tx_desc_arbiter_82599(struct ixgbe_hw *hw,
                                            struct ixgbe_dcb_config *dcb_config)
 {
 	struct tc_bw_alloc *p;
@@ -238,7 +197,7 @@ s32 ixgbe_dcb_config_tx_desc_arbiter_82599(struct ixgbe_hw *hw,
  *
  * Configure Tx Packet Arbiter and credits for each traffic class.
  */
-s32 ixgbe_dcb_config_tx_data_arbiter_82599(struct ixgbe_hw *hw,
+static s32 ixgbe_dcb_config_tx_data_arbiter_82599(struct ixgbe_hw *hw,
                                            struct ixgbe_dcb_config *dcb_config)
 {
 	struct tc_bw_alloc *p;
@@ -298,6 +257,7 @@ s32 ixgbe_dcb_config_pfc_82599(struct ixgbe_hw *hw,
                                struct ixgbe_dcb_config *dcb_config)
 {
 	u32 i, reg, rx_pba_size;
+	u8 pfc_en = 0;
 
 	/* If PFC is disabled globally then fall back to LFC. */
 	if (!dcb_config->pfc_mode_enable) {
@@ -308,19 +268,17 @@ s32 ixgbe_dcb_config_pfc_82599(struct ixgbe_hw *hw,
 
 	/* Configure PFC Tx thresholds per TC */
 	for (i = 0; i < MAX_TRAFFIC_CLASS; i++) {
-		if (dcb_config->rx_pba_cfg == pba_equal)
-			rx_pba_size = IXGBE_RXPBSIZE_64KB;
-		else
-			rx_pba_size = (i < 4) ? IXGBE_RXPBSIZE_80KB
-			                      : IXGBE_RXPBSIZE_48KB;
+		rx_pba_size = IXGBE_READ_REG(hw, IXGBE_RXPBSIZE(i));
+		rx_pba_size >>= IXGBE_RXPBSIZE_SHIFT;
 
-		reg = ((rx_pba_size >> 5) & 0xFFE0);
+		reg = (rx_pba_size - hw->fc.low_water) << 10;
+
 		if (dcb_config->tc_config[i].dcb_pfc == pfc_enabled_full ||
 		    dcb_config->tc_config[i].dcb_pfc == pfc_enabled_tx)
 			reg |= IXGBE_FCRTL_XONE;
 		IXGBE_WRITE_REG(hw, IXGBE_FCRTL_82599(i), reg);
 
-		reg = ((rx_pba_size >> 2) & 0xFFE0);
+		reg = (rx_pba_size - hw->fc.high_water) << 10;
 		if (dcb_config->tc_config[i].dcb_pfc == pfc_enabled_full ||
 		    dcb_config->tc_config[i].dcb_pfc == pfc_enabled_tx)
 			reg |= IXGBE_FCRTH_FCEN;
@@ -341,12 +299,22 @@ s32 ixgbe_dcb_config_pfc_82599(struct ixgbe_hw *hw,
 
 	/*
 	 * Enable Receive PFC
-	 * We will always honor XOFF frames we receive when
-	 * we are in PFC mode.
+	 * 82599 will always honor XOFF frames we receive when
+	 * we are in PFC mode however X540 only honors enabled
+		 * traffic classes.
 	 */
+
+	/* ripped from upstream ixgbe_dcb_unpack_pfc */
+	for (i = 0; i < MAX_TRAFFIC_CLASS; i++)
+		pfc_en |= (dcb_config->tc_config[i].dcb_pfc & 0xF) << i;
+
 	reg = IXGBE_READ_REG(hw, IXGBE_MFLCN);
 	reg &= ~IXGBE_MFLCN_RFCE;
-	reg |= IXGBE_MFLCN_RPFCE;
+	reg |= IXGBE_MFLCN_RPFCE | IXGBE_MFLCN_DPF;
+
+	if (hw->mac.type == ixgbe_mac_X540)
+		reg |= pfc_en << IXGBE_MFLCN_RPFCE_SHIFT;
+
 	IXGBE_WRITE_REG(hw, IXGBE_MFLCN, reg);
 out:
 	return 0;
@@ -359,7 +327,7 @@ out:
  * Configure queue statistics registers, all queues belonging to same traffic
  * class uses a single set of queue statistics counters.
  */
-s32 ixgbe_dcb_config_tc_stats_82599(struct ixgbe_hw *hw)
+static s32 ixgbe_dcb_config_tc_stats_82599(struct ixgbe_hw *hw)
 {
 	u32 reg = 0;
 	u8  i   = 0;
@@ -412,7 +380,7 @@ s32 ixgbe_dcb_config_tc_stats_82599(struct ixgbe_hw *hw)
  *
  * Configure general DCB parameters.
  */
-s32 ixgbe_dcb_config_82599(struct ixgbe_hw *hw)
+static s32 ixgbe_dcb_config_82599(struct ixgbe_hw *hw)
 {
 	u32 reg;
 	u32 q;
@@ -453,6 +421,11 @@ s32 ixgbe_dcb_config_82599(struct ixgbe_hw *hw)
 	reg = IXGBE_READ_REG(hw, IXGBE_RTTDCS);
 	reg &= ~IXGBE_RTTDCS_ARBDIS;
 	IXGBE_WRITE_REG(hw, IXGBE_RTTDCS, reg);
+
+	/* Enable Security TX Buffer IFG for DCB */
+	reg = IXGBE_READ_REG(hw, IXGBE_SECTXMINIFG);
+	reg |= IXGBE_SECTX_DCB;
+	IXGBE_WRITE_REG(hw, IXGBE_SECTXMINIFG, reg);
 
 	return 0;
 }

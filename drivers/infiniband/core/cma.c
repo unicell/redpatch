@@ -58,11 +58,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 #define CMA_CM_RESPONSE_TIMEOUT 20
 #define CMA_MAX_CM_RETRIES 15
 #define CMA_CM_MRA_SETTING (IB_CM_MRA_FLAG_DELAY | 24)
-#define IBOE_PACKET_LIFETIME 18
-
-static int def_prec2sl = 3;
-module_param_named(def_prec2sl, def_prec2sl, int, 0644);
-MODULE_PARM_DESC(def_prec2sl, "Default value for SL priority with RoCE. Valid values 0 - 7");
+#define CMA_IBOE_PACKET_LIFETIME 18
 
 static void cma_add_one(struct ib_device *device);
 static void cma_remove_one(struct ib_device *device);
@@ -83,7 +79,6 @@ static DEFINE_IDR(sdp_ps);
 static DEFINE_IDR(tcp_ps);
 static DEFINE_IDR(udp_ps);
 static DEFINE_IDR(ipoib_ps);
-static int next_port;
 
 struct cma_device {
 	struct list_head	list;
@@ -345,30 +340,57 @@ static int cma_set_qkey(struct rdma_id_private *id_priv)
 	return ret;
 }
 
+static int find_gid_port(struct ib_device *device, union ib_gid *gid, u8 port_num)
+{
+	int i;
+	int err;
+	struct ib_port_attr props;
+	union ib_gid tmp;
+
+	err = ib_query_port(device, port_num, &props);
+	if (err)
+		return 1;
+
+	for (i = 0; i < props.gid_tbl_len; ++i) {
+		err = ib_query_gid(device, port_num, i, &tmp);
+		if (err)
+			return 1;
+		if (!memcmp(&tmp, gid, sizeof tmp))
+			return 0;
+	}
+
+	return -EAGAIN;
+}
+
 static int cma_acquire_dev(struct rdma_id_private *id_priv)
 {
 	struct rdma_dev_addr *dev_addr = &id_priv->id.route.addr.dev_addr;
 	struct cma_device *cma_dev;
-	union ib_gid gid;
+	union ib_gid gid, iboe_gid;
 	int ret = -ENODEV;
+	u8 port;
+	enum rdma_link_layer dev_ll = dev_addr->dev_type == ARPHRD_INFINIBAND ?
+		IB_LINK_LAYER_INFINIBAND : IB_LINK_LAYER_ETHERNET;
 
-	if (dev_addr->dev_type != ARPHRD_INFINIBAND) {
-		iboe_addr_get_sgid(dev_addr, &gid);
-		list_for_each_entry(cma_dev, &dev_list, list) {
-			ret = ib_find_cached_gid(cma_dev->device, &gid,
-						 &id_priv->id.port_num, NULL);
-			if (!ret)
-				goto out;
-		}
-	}
-
+	iboe_addr_get_sgid(dev_addr, &iboe_gid);
 	memcpy(&gid, dev_addr->src_dev_addr +
 	       rdma_addr_gid_offset(dev_addr), sizeof gid);
 	list_for_each_entry(cma_dev, &dev_list, list) {
-		ret = ib_find_cached_gid(cma_dev->device, &gid,
-					 &id_priv->id.port_num, NULL);
-		if (!ret)
-			break;
+		for (port = 1; port <= cma_dev->device->phys_port_cnt; ++port) {
+			if (rdma_port_get_link_layer(cma_dev->device, port) == dev_ll) {
+				if (rdma_node_get_transport(cma_dev->device->node_type) == RDMA_TRANSPORT_IB &&
+				    rdma_port_get_link_layer(cma_dev->device, port) == IB_LINK_LAYER_ETHERNET)
+					ret = find_gid_port(cma_dev->device, &iboe_gid, port);
+				else
+					ret = find_gid_port(cma_dev->device, &gid, port);
+
+				if (!ret) {
+					id_priv->id.port_num = port;
+					goto out;
+				} else if (ret == 1)
+					break;
+			}
+		}
 	}
 
 out:
@@ -594,7 +616,7 @@ static int cma_ib_init_qp_attr(struct rdma_id_private *id_priv,
 	int ret;
 	u16 pkey;
 
-	if (rdma_port_link_layer(id_priv->id.device, id_priv->id.port_num) ==
+	if (rdma_port_get_link_layer(id_priv->id.device, id_priv->id.port_num) ==
 	    IB_LINK_LAYER_INFINIBAND)
 		pkey = ib_addr_get_pkey(dev_addr);
 	else
@@ -779,7 +801,7 @@ static inline int cma_user_data_offset(enum rdma_port_space ps)
 
 static void cma_cancel_route(struct rdma_id_private *id_priv)
 {
-	switch (rdma_port_link_layer(id_priv->id.device, id_priv->id.port_num)) {
+	switch (rdma_port_get_link_layer(id_priv->id.device, id_priv->id.port_num)) {
 	case IB_LINK_LAYER_INFINIBAND:
 		if (id_priv->query)
 			ib_sa_cancel_query(id_priv->query_id, id_priv->query);
@@ -858,7 +880,7 @@ static void cma_leave_mc_groups(struct rdma_id_private *id_priv)
 		mc = container_of(id_priv->mc_list.next,
 				  struct cma_multicast, list);
 		list_del(&mc->list);
-		switch (rdma_port_link_layer(id_priv->cma_dev->device, id_priv->id.port_num)) {
+		switch (rdma_port_get_link_layer(id_priv->cma_dev->device, id_priv->id.port_num)) {
 		case IB_LINK_LAYER_INFINIBAND:
 			ib_sa_free_multicast(mc->multicast.ib);
 			kfree(mc);
@@ -1742,13 +1764,13 @@ int rdma_set_ib_paths(struct rdma_cm_id *id,
 	if (!cma_comp_exch(id_priv, CMA_ADDR_RESOLVED, CMA_ROUTE_RESOLVED))
 		return -EINVAL;
 
-	id->route.path_rec = kmalloc(sizeof *path_rec * num_paths, GFP_KERNEL);
+	id->route.path_rec = kmemdup(path_rec, sizeof *path_rec * num_paths,
+				     GFP_KERNEL);
 	if (!id->route.path_rec) {
 		ret = -ENOMEM;
 		goto err;
 	}
 
-	memcpy(id->route.path_rec, path_rec, sizeof *path_rec * num_paths);
 	id->route.num_paths = num_paths;
 	return 0;
 err:
@@ -1774,11 +1796,6 @@ static int cma_resolve_iw_route(struct rdma_id_private *id_priv, int timeout_ms)
 	return 0;
 }
 
-static u8 tos_to_sl(u8 tos)
-{
-	return def_prec2sl & 7;
-}
-
 static int cma_resolve_iboe_route(struct rdma_id_private *id_priv)
 {
 	struct rdma_route *route = &id_priv->id.route;
@@ -1788,7 +1805,7 @@ static int cma_resolve_iboe_route(struct rdma_id_private *id_priv)
 	struct sockaddr_in *src_addr = (struct sockaddr_in *)&route->addr.src_addr;
 	struct sockaddr_in *dst_addr = (struct sockaddr_in *)&route->addr.dst_addr;
 	struct net_device *ndev = NULL;
-	u16 vid = 0;
+	u16 vid;
 
 	if (src_addr->sin_family != dst_addr->sin_family)
 		return -EINVAL;
@@ -1815,9 +1832,7 @@ static int cma_resolve_iboe_route(struct rdma_id_private *id_priv)
 		goto err2;
 	}
 
-#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
-	vid = vlan_dev_vlan_id(ndev);
-#endif
+	vid = rdma_vlan_dev_vlan_id(ndev);
 
 	iboe_mac_vlan_to_ll(&route->path_rec->sgid, addr->dev_addr.src_dev_addr, vid);
 	iboe_mac_vlan_to_ll(&route->path_rec->dgid, addr->dev_addr.dst_dev_addr, vid);
@@ -1826,14 +1841,14 @@ static int cma_resolve_iboe_route(struct rdma_id_private *id_priv)
 	route->path_rec->reversible = 1;
 	route->path_rec->pkey = cpu_to_be16(0xffff);
 	route->path_rec->mtu_selector = IB_SA_EQ;
-	route->path_rec->sl = tos_to_sl(id_priv->tos);
+	route->path_rec->sl = id_priv->tos >> 5;
 
 	route->path_rec->mtu = iboe_get_mtu(ndev->mtu);
 	route->path_rec->rate_selector = IB_SA_EQ;
 	route->path_rec->rate = iboe_get_rate(ndev);
 	dev_put(ndev);
 	route->path_rec->packet_life_time_selector = IB_SA_EQ;
-	route->path_rec->packet_life_time = IBOE_PACKET_LIFETIME;
+	route->path_rec->packet_life_time = CMA_IBOE_PACKET_LIFETIME;
 	if (!route->path_rec->mtu) {
 		ret = -EINVAL;
 		goto err2;
@@ -1868,7 +1883,7 @@ int rdma_resolve_route(struct rdma_cm_id *id, int timeout_ms)
 	atomic_inc(&id_priv->refcount);
 	switch (rdma_node_get_transport(id->device->node_type)) {
 	case RDMA_TRANSPORT_IB:
-		switch (rdma_port_link_layer(id->device, id->port_num)) {
+		switch (rdma_port_get_link_layer(id->device, id->port_num)) {
 		case IB_LINK_LAYER_INFINIBAND:
 			ret = cma_resolve_ib_route(id_priv, timeout_ms);
 			break;
@@ -1930,7 +1945,7 @@ port_found:
 		goto out;
 
 	id_priv->id.route.addr.dev_addr.dev_type =
-		(rdma_port_link_layer(cma_dev->device, p) == IB_LINK_LAYER_INFINIBAND) ?
+		(rdma_port_get_link_layer(cma_dev->device, p) == IB_LINK_LAYER_INFINIBAND) ?
 		ARPHRD_INFINIBAND : ARPHRD_ETHER;
 
 	rdma_addr_set_sgid(&id_priv->id.route.addr.dev_addr, &gid);
@@ -2126,47 +2141,33 @@ err1:
 
 static int cma_alloc_any_port(struct idr *ps, struct rdma_id_private *id_priv)
 {
-	struct rdma_bind_list *bind_list;
-	int port, ret, low, high;
-
-	bind_list = kzalloc(sizeof *bind_list, GFP_KERNEL);
-	if (!bind_list)
-		return -ENOMEM;
-
-retry:
-	/* FIXME: add proper port randomization per like inet_csk_get_port */
-	do {
-		ret = idr_get_new_above(ps, bind_list, next_port, &port);
-	} while ((ret == -EAGAIN) && idr_pre_get(ps, GFP_KERNEL));
-
-	if (ret)
-		goto err1;
+	static unsigned int last_used_port;
+	int low, high, remaining;
+	unsigned int rover;
 
 	inet_get_local_port_range(&low, &high);
-	if (port > high) {
-		if (next_port != low) {
-			idr_remove(ps, port);
-			next_port = low;
-			goto retry;
-		}
-		ret = -EADDRNOTAVAIL;
-		goto err2;
+	remaining = (high - low) + 1;
+	rover = net_random() % remaining + low;
+retry:
+	if (last_used_port != rover &&
+	    !idr_find(ps, (unsigned short) rover)) {
+		int ret = cma_alloc_port(ps, id_priv, rover);
+		/*
+		 * Remember previously used port number in order to avoid
+		 * re-using same port immediately after it is closed.
+		 */
+		if (!ret)
+			last_used_port = rover;
+		if (ret != -EADDRNOTAVAIL)
+			return ret;
 	}
-
-	if (port == high)
-		next_port = low;
-	else
-		next_port = port + 1;
-
-	bind_list->ps = ps;
-	bind_list->port = (unsigned short) port;
-	cma_bind_port(bind_list, id_priv);
-	return 0;
-err2:
-	idr_remove(ps, port);
-err1:
-	kfree(bind_list);
-	return ret;
+	if (--remaining) {
+		rover++;
+		if ((rover < low) || (rover > high))
+			rover = low;
+		goto retry;
+	}
+	return -EADDRNOTAVAIL;
 }
 
 static int cma_use_port(struct idr *ps, struct rdma_id_private *id_priv)
@@ -2370,7 +2371,6 @@ static int cma_sidr_rep_handler(struct ib_cm_id *cm_id,
 	struct rdma_cm_event event;
 	struct ib_cm_sidr_rep_event_param *rep = &ib_event->param.sidr_rep_rcvd;
 	int ret = 0;
-	int force_grh;
 
 	if (cma_disable_callback(id_priv, CMA_CONNECT))
 		return 0;
@@ -2400,11 +2400,9 @@ static int cma_sidr_rep_handler(struct ib_cm_id *cm_id,
 			event.status = -EINVAL;
 			break;
 		}
-		force_grh = rdma_port_link_layer(cm_id->device, id_priv->id.port_num) ==
-			IB_LINK_LAYER_ETHERNET ? 1 : 0;
 		ib_init_ah_from_path(id_priv->id.device, id_priv->id.port_num,
 				     id_priv->id.route.path_rec,
-				     &event.param.ud.ah_attr, force_grh);
+				     &event.param.ud.ah_attr);
 		event.param.ud.qp_num = rep->qpn;
 		event.param.ud.qkey = rep->qkey;
 		event.event = RDMA_CM_EVENT_ESTABLISHED;
@@ -2932,7 +2930,6 @@ static int cma_join_ib_multicast(struct rdma_id_private *id_priv,
 	return 0;
 }
 
-
 static void iboe_mcast_work_handler(struct work_struct *work)
 {
 	struct iboe_mcast_work *mw = container_of(work, struct iboe_mcast_work, work);
@@ -2952,9 +2949,9 @@ static void cma_iboe_set_mgid(struct sockaddr *addr, union ib_gid *mgid)
 
 	if (cma_any_addr(addr)) {
 		memset(mgid, 0, sizeof *mgid);
-	} else if (addr->sa_family == AF_INET6)
+	} else if (addr->sa_family == AF_INET6) {
 		memcpy(mgid, &sin6->sin6_addr, sizeof *mgid);
-	else {
+	} else {
 		mgid->raw[0] = 0xff;
 		mgid->raw[1] = 0x0e;
 		mgid->raw[2] = 0;
@@ -2972,7 +2969,7 @@ static void cma_iboe_set_mgid(struct sockaddr *addr, union ib_gid *mgid)
 }
 
 static int cma_iboe_join_multicast(struct rdma_id_private *id_priv,
-				     struct cma_multicast *mc)
+				   struct cma_multicast *mc)
 {
 	struct iboe_mcast_work *work;
 	struct rdma_dev_addr *dev_addr = &id_priv->id.route.addr.dev_addr;
@@ -3005,7 +3002,6 @@ static int cma_iboe_join_multicast(struct rdma_id_private *id_priv,
 		err = -ENODEV;
 		goto out2;
 	}
-
 	mc->multicast.ib->rec.rate = iboe_get_rate(ndev);
 	mc->multicast.ib->rec.hop_limit = 1;
 	mc->multicast.ib->rec.mtu = iboe_get_mtu(ndev->mtu);
@@ -3056,7 +3052,7 @@ int rdma_join_multicast(struct rdma_cm_id *id, struct sockaddr *addr,
 
 	switch (rdma_node_get_transport(id->device->node_type)) {
 	case RDMA_TRANSPORT_IB:
-		switch (rdma_port_link_layer(id->device, id->port_num)) {
+		switch (rdma_port_get_link_layer(id->device, id->port_num)) {
 		case IB_LINK_LAYER_INFINIBAND:
 			ret = cma_join_ib_multicast(id_priv, mc);
 			break;
@@ -3079,7 +3075,6 @@ int rdma_join_multicast(struct rdma_cm_id *id, struct sockaddr *addr,
 		spin_unlock_irq(&id_priv->lock);
 		kfree(mc);
 	}
-
 	return ret;
 }
 EXPORT_SYMBOL(rdma_join_multicast);
@@ -3101,7 +3096,7 @@ void rdma_leave_multicast(struct rdma_cm_id *id, struct sockaddr *addr)
 						&mc->multicast.ib->rec.mgid,
 						mc->multicast.ib->rec.mlid);
 			if (rdma_node_get_transport(id_priv->cma_dev->device->node_type) == RDMA_TRANSPORT_IB) {
-				switch (rdma_port_link_layer(id->device, id->port_num)) {
+				switch (rdma_port_get_link_layer(id->device, id->port_num)) {
 				case IB_LINK_LAYER_INFINIBAND:
 					ib_sa_free_multicast(mc->multicast.ib);
 					kfree(mc);
@@ -3274,12 +3269,7 @@ static void cma_remove_one(struct ib_device *device)
 
 static int __init cma_init(void)
 {
-	int ret, low, high, remaining;
-
-	get_random_bytes(&next_port, sizeof next_port);
-	inet_get_local_port_range(&low, &high);
-	remaining = (high - low) + 1;
-	next_port = ((unsigned int) next_port % remaining) + low;
+	int ret;
 
 	cma_wq = create_singlethread_workqueue("rdma_cm");
 	if (!cma_wq)

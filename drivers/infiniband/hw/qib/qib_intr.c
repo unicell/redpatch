@@ -69,7 +69,7 @@ void qib_format_hwerrors(u64 hwerrs, const struct qib_hwerror_msgs *hwerrmsgs,
 			qib_format_hwmsg(msg, msgl, hwerrmsgs[i].msg);
 }
 
-void signal_ib_event(struct qib_pportdata *ppd, enum ib_event_type ev)
+static void signal_ib_event(struct qib_pportdata *ppd, enum ib_event_type ev)
 {
 	struct ib_event event;
 	struct qib_devdata *dd = ppd->dd;
@@ -80,7 +80,7 @@ void signal_ib_event(struct qib_pportdata *ppd, enum ib_event_type ev)
 	ib_dispatch_event(&event);
 }
 
-void handle_e_ibstatuschanged(struct qib_pportdata *ppd, u64 ibcs)
+void qib_handle_e_ibstatuschanged(struct qib_pportdata *ppd, u64 ibcs)
 {
 	struct qib_devdata *dd = ppd->dd;
 	unsigned long flags;
@@ -136,7 +136,7 @@ void handle_e_ibstatuschanged(struct qib_pportdata *ppd, u64 ibcs)
 			qib_hol_up(ppd); /* useful only for 6120 now */
 			*ppd->statusp |=
 				QIB_STATUS_IB_READY | QIB_STATUS_IB_CONF;
-			clear_symerror_on_linkup((unsigned long)ppd);
+			qib_clear_symerror_on_linkup((unsigned long)ppd);
 			spin_lock_irqsave(&ppd->lflags_lock, flags);
 			ppd->lflags |= QIBL_LINKACTIVE | QIBL_LINKV;
 			ppd->lflags &= ~(QIBL_LINKINIT |
@@ -157,7 +157,6 @@ void handle_e_ibstatuschanged(struct qib_pportdata *ppd, u64 ibcs)
 				 QIBL_LINKACTIVE | QIBL_LINKARMED);
 		spin_unlock_irqrestore(&ppd->lflags_lock, flags);
 		*ppd->statusp &= ~QIB_STATUS_IB_READY;
-		ppd->std_mode_flag = 0;
 	}
 
 skip_ibchange:
@@ -167,14 +166,13 @@ skip_ibchange:
 	return;
 }
 
-void clear_symerror_on_linkup(unsigned long opaque)
+void qib_clear_symerror_on_linkup(unsigned long opaque)
 {
 	struct qib_pportdata *ppd = (struct qib_pportdata *)opaque;
 
 	if (ppd->lflags & QIBL_LINKACTIVE)
 		return;
 
-	qib_cdbg(VERB, "Resetting IBSymError count after LinkUP\n");
 	ppd->ibport_data.z_symbol_error_counter =
 		ppd->dd->f_portcntr(ppd, QIBPORTCNTR_IBSYMBOLERR);
 }

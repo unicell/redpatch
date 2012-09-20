@@ -50,10 +50,6 @@ DEFINE_SPINLOCK(qib_devs_lock);
 LIST_HEAD(qib_dev_list);
 DEFINE_MUTEX(qib_mutex);	/* general driver use */
 
-unsigned qib_debug;
-module_param_named(debug, qib_debug, uint, S_IWUSR | S_IRUGO);
-MODULE_PARM_DESC(debug, "mask for debug prints");
-
 unsigned qib_ibmtu;
 module_param_named(ibmtu, qib_ibmtu, uint, S_IRUGO);
 MODULE_PARM_DESC(ibmtu, "Set max IB MTU (0=2KB, 1=256, 2=512, ... 5=4096");
@@ -227,13 +223,10 @@ int qib_set_linkstate(struct qib_pportdata *ppd, u8 newstate)
 
 	case QIB_IB_LINKARM:
 		if (ppd->lflags & QIBL_LINKARMED) {
-			qib_dbg("Asked for ARM, already there, skip\n");
 			ret = 0;
 			goto bail;
 		}
 		if (!(ppd->lflags & (QIBL_LINKINIT | QIBL_LINKACTIVE))) {
-			qib_dbg("Asked for ARM, lflags %x, error\n",
-				ppd->lflags);
 			ret = -EINVAL;
 			goto bail;
 		}
@@ -253,13 +246,10 @@ int qib_set_linkstate(struct qib_pportdata *ppd, u8 newstate)
 
 	case QIB_IB_LINKACTIVE:
 		if (ppd->lflags & QIBL_LINKACTIVE) {
-			qib_dbg("Asked for ACTIVE, already there, skip\n");
 			ret = 0;
 			goto bail;
 		}
 		if (!(ppd->lflags & QIBL_LINKARMED)) {
-			qib_dbg("Asked for ACTIVE, lflags %x, error\n",
-				ppd->lflags);
 			ret = -EINVAL;
 			goto bail;
 		}
@@ -269,7 +259,6 @@ int qib_set_linkstate(struct qib_pportdata *ppd, u8 newstate)
 		break;
 
 	default:
-		qib_dbg("Invalid linkstate 0x%x requested\n", newstate);
 		ret = -EINVAL;
 		goto bail;
 	}
@@ -291,45 +280,6 @@ static inline void *qib_get_egrbuf(const struct qib_ctxtdata *rcd, u32 etail)
 	return rcd->rcvegrbuf[chunk] + idx * rcd->dd->rcvegrbufsize;
 }
 
-/**
- * get_rhf_errstring - decode RHF errors
- * @err: the err number
- * @msg: the output buffer
- * @len: the length of the output buffer
- *
- * only used one place now, may want more later
- */
-static void get_rhf_errstring(u32 err, char *msg, size_t len)
-{
-	/* if no errors, and so don't need to check what's first */
-	*msg = '\0';
-
-	if (err & QLOGIC_IB_RHF_H_ICRCERR)
-		strlcat(msg, "icrcerr ", len);
-	if (err & QLOGIC_IB_RHF_H_VCRCERR)
-		strlcat(msg, "vcrcerr ", len);
-	if (err & QLOGIC_IB_RHF_H_PARITYERR)
-		strlcat(msg, "parityerr ", len);
-	if (err & QLOGIC_IB_RHF_H_LENERR)
-		strlcat(msg, "lenerr ", len);
-	if (err & QLOGIC_IB_RHF_H_MTUERR)
-		strlcat(msg, "mtuerr ", len);
-	if (err & QLOGIC_IB_RHF_H_IHDRERR)
-		/* qlogic_ib hdr checksum error */
-		strlcat(msg, "qibhdrerr ", len);
-	if (err & QLOGIC_IB_RHF_H_TIDERR)
-		strlcat(msg, "tiderr ", len);
-	if (err & QLOGIC_IB_RHF_H_MKERR)
-		/* bad ctxt, offset, etc. */
-		strlcat(msg, "invalid qibhdr ", len);
-	if (err & QLOGIC_IB_RHF_H_IBERR)
-		strlcat(msg, "iberr ", len);
-	if (err & QLOGIC_IB_RHF_L_SWA)
-		strlcat(msg, "swA ", len);
-	if (err & QLOGIC_IB_RHF_L_SWB)
-		strlcat(msg, "swB ", len);
-}
-
 /*
  * Returns 1 if error was a CRC, else 0.
  * Needed for some chip's synthesized error counters.
@@ -338,15 +288,7 @@ static u32 qib_rcv_hdrerr(struct qib_pportdata *ppd, u32 ctxt,
 			  u32 eflags, u32 l, u32 etail, __le32 *rhf_addr,
 			  struct qib_message_header *hdr)
 {
-	char emsg[128];
 	u32 ret = 0;
-
-	get_rhf_errstring(eflags, emsg, sizeof emsg);
-	qib_cdbg(ERRPKT, "IB%u:%u ctxt %u RHF %x qtail=%x typ=%u "
-		 "tlen=%x opcode=%x egridx=%x: %s\n", ppd->dd->unit,
-		 ppd->port, ctxt, eflags, l, qib_hdrget_rcv_type(rhf_addr),
-		 qib_hdrget_length_in_bytes(rhf_addr),
-		 be32_to_cpu(hdr->bth[0]) >> 24, etail, emsg);
 
 	if (eflags & (QLOGIC_IB_RHF_H_ICRCERR | QLOGIC_IB_RHF_H_VCRCERR))
 		ret = 1;
@@ -383,23 +325,17 @@ u32 qib_kreceive(struct qib_ctxtdata *rcd, u32 *llic, u32 *npkts)
 	rhf_addr = (__le32 *) rcd->rcvhdrq + l + dd->rhf_offset;
 	if (dd->flags & QIB_NODMA_RTAIL) {
 		u32 seq = qib_hdrget_seq(rhf_addr);
-		if (seq != rcd->seq_cnt) {
-			qib_cdbg(PKT, "ctxt%u: hdrq seq diff @ hdrqhd %x\n",
-				 rcd->ctxt, rcd->head);
+		if (seq != rcd->seq_cnt)
 			goto bail;
-		}
 		hdrqtail = 0;
 	} else {
 		hdrqtail = qib_get_rcvhdrtail(rcd);
-		if (l == hdrqtail) {
-			qib_cdbg(PKT, "ctxt%u: no pkts tail==hdrqhd %x\n",
-				 rcd->ctxt, rcd->head);
+		if (l == hdrqtail)
 			goto bail;
-		}
 		smp_rmb();  /* prevent speculative reads of dma'ed hdrq */
 	}
 
-	for (last = 0, i = 1; !last; i += !last) {
+	for (last = 0, i = 1; !last && i <= 64; i += !last) {
 		hdr = dd->f_get_msgheader(dd, rhf_addr);
 		eflags = qib_hdrget_err_flags(rhf_addr);
 		etype = qib_hdrget_rcv_type(rhf_addr);
@@ -419,10 +355,6 @@ u32 qib_kreceive(struct qib_ctxtdata *rcd, u32 *llic, u32 *npkts)
 			u16 lrh_len = be16_to_cpu(hdr->lrh[2]) << 2;
 
 			if (lrh_len != tlen) {
-				qib_dbg("IB%u:%u ctxt %u lrh_len %u "
-					"!= tlen %u\n",
-					dd->unit, ppd->port, rcd->ctxt,
-					lrh_len, tlen);
 				qib_stats.sps_lenerrs++;
 				goto move_along;
 			}
@@ -431,10 +363,6 @@ u32 qib_kreceive(struct qib_ctxtdata *rcd, u32 *llic, u32 *npkts)
 		    ebuf == NULL &&
 		    tlen > (dd->rcvhdrentsize - 2 + 1 -
 				qib_hdrget_offset(rhf_addr)) << 2) {
-			qib_dbg("IB%d ctxt %u NULL data rhf %08x%08x tlen %u\n",
-				ppd->port, rcd->ctxt,
-				le32_to_cpu(rhf_addr[1]),
-				le32_to_cpu(rhf_addr[0]), tlen);
 			goto move_along;
 		}
 
@@ -442,14 +370,6 @@ u32 qib_kreceive(struct qib_ctxtdata *rcd, u32 *llic, u32 *npkts)
 		 * Both tiderr and qibhdrerr are set for all plain IB
 		 * packets; only qibhdrerr should be set.
 		 */
-
-		if (etype != RCVHQ_RCV_TYPE_NON_KD &&
-		    etype != RCVHQ_RCV_TYPE_ERROR &&
-		    qib_hdrget_qib_ver(hdr->iph.ver_ctxt_tid_offset) !=
-		    IPS_PROTO_VERSION)
-			qib_cdbg(ERRPKT, "Bad InfiniPath protocol version "
-				 "%x\n", etype);
-
 		if (unlikely(eflags))
 			crcs += qib_rcv_hdrerr(ppd, rcd->ctxt, eflags, l,
 					       etail, rhf_addr, hdr);
@@ -459,40 +379,6 @@ u32 qib_kreceive(struct qib_ctxtdata *rcd, u32 *llic, u32 *npkts)
 				crcs--;
 			else if (llic && *llic)
 				--*llic;
-		} else if (etype == RCVHQ_RCV_TYPE_EXPECTED)
-			qib_cdbg(ERRPKT, "type=Expected pkt, no err bits\n");
-		else if (etype == RCVHQ_RCV_TYPE_EAGER) {
-			u8 opcode = be32_to_cpu(hdr->bth[0]) >> 24;
-			u32 qpn = be32_to_cpu(hdr->bth[1]) & 0xffffff;
-
-			qib_cdbg(RVPKT, "typ %x, opcode %x (eager, "
-				 "qp=%x), len %x; ignored\n", etype,
-				 opcode, qpn, tlen);
-		} else {
-			/*
-			 * Error packet, type of error unknown.
-			 * Probably type 3, but we don't know, so don't
-			 * even try to print the opcode, etc.
-			 * Usually caused by a "bad packet", that has no
-			 * BTH, when the LRH says it should, or it's
-			 * a KD packet with an invalid KDETH.
-			 */
-			qib_cdbg(ERRPKT, "Error Pkt, but no eflags! egrbuf"
-				 " %x, len %x hdrq+%x rhf: %Lx\n", etail,
-				 tlen, l, le64_to_cpu(*(__le64 *) rhf_addr));
-			if (qib_debug & __QIB_ERRPKTDBG) {
-				u32 j, *d, dw = rsize - 2;
-
-				if (rsize > (tlen >> 2))
-					dw = tlen >> 2;
-				d = (u32 *)hdr;
-				printk(KERN_DEBUG "EPkt rcvhdr(%x dw):\n",
-				       dw);
-				for (j = 0; j < dw; j++)
-					printk(KERN_DEBUG "%8x%s", d[j],
-						(j%8) == 7 ? "\n" : " ");
-				printk(KERN_DEBUG ".\n");
-			}
 		}
 move_along:
 		l += rsize;
@@ -548,8 +434,6 @@ move_along:
 			wake_up(&qp->wait);
 	}
 
-	qib_cdbg(PKT, "IB%d ctxt %d handled %u packets\n",
-		 ppd->port, rcd->ctxt, i);
 bail:
 	/* Report number of packets consumed */
 	if (npkts)
@@ -583,14 +467,11 @@ int qib_set_mtu(struct qib_pportdata *ppd, u16 arg)
 
 	if (arg != 256 && arg != 512 && arg != 1024 && arg != 2048 &&
 	    arg != 4096) {
-		qib_dbg("Trying to set invalid mtu %u, failing\n", arg);
 		ret = -EINVAL;
 		goto bail;
 	}
 	chk = ib_mtu_enum_to_int(qib_ibmtu);
 	if (chk > 0 && arg > chk) {
-		qib_dbg("Trying to set mtu %u > ibmtu cap %u, failing\n",
-			arg, chk);
 		ret = -EINVAL;
 		goto bail;
 	}
@@ -608,9 +489,6 @@ int qib_set_mtu(struct qib_pportdata *ppd, u16 arg)
 	} else if ((arg + QIB_PIO_MAXIBHDR) != ppd->ibmaxlen) {
 		piosize = arg + QIB_PIO_MAXIBHDR - 2 * sizeof(u32);
 		ppd->ibmaxlen = piosize;
-		qib_cdbg(VERBOSE, "ibmaxlen was 0x%x, setting to 0x%x "
-			   "(mtu 0x%x)\n", ppd->ibmaxlen, piosize,
-			   arg);
 	}
 
 	ppd->dd->f_set_ib_cfg(ppd, QIB_IB_CFG_MTU, 0);
@@ -750,10 +628,6 @@ int qib_reset_device(int unit)
 			if (!dd->rcd[i] || !dd->rcd[i]->cnt)
 				continue;
 			spin_unlock_irqrestore(&dd->uctxt_lock, flags);
-			qib_dbg("unit %u ctxt %d is in use (PID %u cmd %s),"
-				" can't reset\n", unit, i,
-				dd->rcd[i]->pid,
-				dd->rcd[i]->comm);
 			ret = -EBUSY;
 			goto bail;
 		}
@@ -771,15 +645,13 @@ int qib_reset_device(int unit)
 		ppd->led_override = LED_OVER_BOTH_OFF;
 		dd->f_setextled(ppd, 0);
 		if (dd->flags & QIB_HAS_SEND_DMA)
-			teardown_sdma(ppd);
+			qib_teardown_sdma(ppd);
 	}
 
 	ret = dd->f_reset(dd);
-	if (ret == 1) {
-		qib_dbg("Reinitializing unit %u after reset attempt\n",
-			unit);
+	if (ret == 1)
 		ret = qib_init(dd, 1);
-	} else
+	else
 		ret = -EAGAIN;
 	if (ret)
 		qib_dev_err(dd, "Reinitialize unit %u after "

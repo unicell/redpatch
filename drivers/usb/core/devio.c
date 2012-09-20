@@ -43,6 +43,7 @@
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/usbdevice_fs.h>
+#include <linux/usb/hcd.h>	/* for usbcore internals */
 #include <linux/cdev.h>
 #include <linux/notifier.h>
 #include <linux/security.h>
@@ -50,9 +51,7 @@
 #include <asm/byteorder.h>
 #include <linux/moduleparam.h>
 
-#include "hcd.h"	/* for usbcore internals */
 #include "usb.h"
-#include "hub.h"
 
 #define USB_MAXBUS			64
 #define USB_DEVICE_MAX			USB_MAXBUS * 128
@@ -1104,8 +1103,20 @@ static int proc_do_submiturb(struct dev_state *ps, struct usbdevfs_urb *uurb,
 		case USB_ENDPOINT_XFER_CONTROL:
 		case USB_ENDPOINT_XFER_ISOC:
 			return -EINVAL;
-		/* allow single-shot interrupt transfers, at bogus rates */
+		case USB_ENDPOINT_XFER_INT:
+			/* allow single-shot interrupt transfers */
+			uurb->type = USBDEVFS_URB_TYPE_INTERRUPT;
+			goto interrupt_urb;
 		}
+		uurb->number_of_packets = 0;
+		if (uurb->buffer_length > MAX_USBFS_BUFFER_SIZE)
+			return -EINVAL;
+		break;
+
+	case USBDEVFS_URB_TYPE_INTERRUPT:
+		if (!usb_endpoint_xfer_int(&ep->desc))
+			return -EINVAL;
+ interrupt_urb:
 		uurb->number_of_packets = 0;
 		if (uurb->buffer_length > MAX_USBFS_BUFFER_SIZE)
 			return -EINVAL;
@@ -1141,14 +1152,6 @@ static int proc_do_submiturb(struct dev_state *ps, struct usbdevfs_urb *uurb,
 			return -EINVAL;
 		}
 		uurb->buffer_length = totlen;
-		break;
-
-	case USBDEVFS_URB_TYPE_INTERRUPT:
-		uurb->number_of_packets = 0;
-		if (!usb_endpoint_xfer_int(&ep->desc))
-			return -EINVAL;
-		if (uurb->buffer_length > MAX_USBFS_BUFFER_SIZE)
-			return -EINVAL;
 		break;
 
 	default:

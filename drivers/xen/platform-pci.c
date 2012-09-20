@@ -199,34 +199,18 @@ static struct pci_driver platform_driver = {
 #endif
 };
 
-int xen_pv_hvm_enable = 0;
-EXPORT_SYMBOL_GPL(xen_pv_hvm_enable);
-
 static int __init platform_pci_module_init(void)
 {
 	int rc;
 
-	if (xen_pv_hvm_enable) {
-		rc = pci_register_driver(&platform_driver);
-		if (rc) {
-			printk(KERN_INFO DRV_NAME
-				": No platform pci device model found\n");
-			return rc;
-		}
+	rc = pci_register_driver(&platform_driver);
+	if (rc) {
+		printk(KERN_INFO DRV_NAME
+			": No platform pci device model found\n");
+		return rc;
 	}
 
 	return 0;
 }
 
 module_init(platform_pci_module_init);
-
-static int __init xen_pv_hvm_setup(char *p)
-{
-	if (!strncmp(p, "enable", 6)) {
-		xen_pv_hvm_enable = 1;
-                printk("Enabling Xen PV-on-HVM \n");
-	}
-
-       return 1;
-}
-__setup("xen_pv_hvm=", xen_pv_hvm_setup);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, 2007, 2008 QLogic Corporation. All rights reserved.
+ * Copyright (c) 2006, 2007, 2008, 2010 QLogic Corporation. All rights reserved.
  * Copyright (c) 2005, 2006 PathScale, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -32,6 +32,7 @@
  */
 
 #include <linux/err.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include "qib_verbs.h"
@@ -106,7 +107,7 @@ void qib_cq_enter(struct qib_cq *cq, struct ib_wc *entry, int solicited)
 		 * This will cause send_complete() to be called in
 		 * another thread.
 		 */
-		queue_work(qib_wq, &cq->comptask);
+		queue_work(qib_cq_wq, &cq->comptask);
 	}
 
 	spin_unlock_irqrestore(&cq->lock, flags);

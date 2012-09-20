@@ -723,8 +723,7 @@ static int gfs2_write_inode(struct inode *inode, struct writeback_control *wbc)
 	int ret = 0;
 
 	/* Check this is a "normal" inode, etc */
-	if (!test_bit(GIF_USER, &ip->i_flags) ||
-	    (current->flags & PF_MEMALLOC))
+	if (current->flags & PF_MEMALLOC)
 		return 0;
 	ret = gfs2_glock_nq_init(ip->i_gl, LM_ST_EXCLUSIVE, 0, &gh);
 	if (ret)
@@ -861,6 +860,7 @@ restart:
 	gfs2_clear_rgrpd(sdp);
 	gfs2_jindex_free(sdp);
 	/*  Take apart glock structures and buffer lists  */
+	invalidate_inodes(sdp->sd_vfs, true);
 	gfs2_gl_hash_clear(sdp);
 	/*  Unmount the locking protocol  */
 	gfs2_lm_unmount(sdp);
@@ -1195,7 +1195,7 @@ static void gfs2_drop_inode(struct inode *inode)
 {
 	struct gfs2_inode *ip = GFS2_I(inode);
 
-	if (test_bit(GIF_USER, &ip->i_flags) && inode->i_nlink) {
+	if (inode->i_nlink) {
 		struct gfs2_glock *gl = ip->i_iopen_gh.gh_gl;
 		if (gl && test_bit(GLF_DEMOTE, &gl->gl_flags))
 			clear_nlink(inode);
@@ -1213,18 +1213,12 @@ static void gfs2_clear_inode(struct inode *inode)
 {
 	struct gfs2_inode *ip = GFS2_I(inode);
 
-	/* This tells us its a "real" inode and not one which only
-	 * serves to contain an address space (see rgrp.c, meta_io.c)
-	 * which therefore doesn't have its own glocks.
-	 */
-	if (test_bit(GIF_USER, &ip->i_flags)) {
-		ip->i_gl->gl_object = NULL;
-		gfs2_glock_put(ip->i_gl);
-		ip->i_gl = NULL;
-		if (ip->i_iopen_gh.gh_gl) {
-			ip->i_iopen_gh.gh_gl->gl_object = NULL;
-			gfs2_glock_dq_uninit(&ip->i_iopen_gh);
-		}
+	ip->i_gl->gl_object = NULL;
+	gfs2_glock_put(ip->i_gl);
+	ip->i_gl = NULL;
+	if (ip->i_iopen_gh.gh_gl) {
+		ip->i_iopen_gh.gh_gl->gl_object = NULL;
+		gfs2_glock_dq_uninit(&ip->i_iopen_gh);
 	}
 }
 
@@ -1355,15 +1349,17 @@ static int gfs2_show_options(struct seq_file *s, struct vfsmount *mnt)
 
 static void gfs2_delete_inode(struct inode *inode)
 {
-	struct gfs2_sbd *sdp = inode->i_sb->s_fs_info;
 	struct gfs2_inode *ip = GFS2_I(inode);
+	struct super_block *sb = inode->i_sb;
+	struct gfs2_sbd *sdp = sb->s_fs_info;
 	struct gfs2_holder gh;
 	int error;
 
-	if (!test_bit(GIF_USER, &ip->i_flags))
+	if (sb->s_flags & MS_RDONLY)
 		goto out;
 
-	error = gfs2_glock_nq_init(ip->i_gl, LM_ST_EXCLUSIVE, 0, &gh);
+	/* Must not read inode block until block type has been verified */
+	error = gfs2_glock_nq_init(ip->i_gl, LM_ST_EXCLUSIVE, GL_SKIP, &gh);
 	if (unlikely(error)) {
 		gfs2_glock_dq_uninit(&ip->i_iopen_gh);
 		goto out;
@@ -1373,6 +1369,7 @@ static void gfs2_delete_inode(struct inode *inode)
 	if (error)
 		goto out_truncate;
 
+	ip->i_iopen_gh.gh_flags |= GL_NOCACHE;
 	gfs2_glock_dq_wait(&ip->i_iopen_gh);
 	gfs2_holder_reinit(LM_ST_EXCLUSIVE, LM_FLAG_TRY_1CB | GL_NOCACHE, &ip->i_iopen_gh);
 	error = gfs2_glock_nq(&ip->i_iopen_gh);

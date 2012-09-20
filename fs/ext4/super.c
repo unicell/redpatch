@@ -69,6 +69,7 @@ static int ext4_unfreeze(struct super_block *sb);
 static void ext4_write_super(struct super_block *sb);
 static int ext4_freeze(struct super_block *sb);
 
+wait_queue_head_t aio_wq[WQ_HASH_SZ];
 
 ext4_fsblk_t ext4_block_bitmap(struct super_block *sb,
 			       struct ext4_group_desc *bg)
@@ -749,6 +750,7 @@ static struct inode *ext4_alloc_inode(struct super_block *sb)
 	ei->cur_aio_dio = NULL;
 	ei->i_sync_tid = 0;
 	ei->i_datasync_tid = 0;
+	atomic_set(&ei->i_aiodio_unwritten, 0);
 
 	return &ei->vfs_inode;
 }
@@ -776,6 +778,7 @@ static void init_once(void *foo)
 	init_rwsem(&ei->xattr_sem);
 #endif
 	init_rwsem(&ei->i_data_sem);
+	mutex_init(&ei->i_aio_mutex);
 	inode_init_once(&ei->vfs_inode);
 }
 
@@ -3980,8 +3983,6 @@ static ssize_t ext4_quota_write(struct super_block *sb, int type,
 	ext4_lblk_t blk = off >> EXT4_BLOCK_SIZE_BITS(sb);
 	int err = 0;
 	int offset = off & (sb->s_blocksize - 1);
-	int tocopy;
-	size_t towrite = len;
 	struct buffer_head *bh;
 	handle_t *handle = journal_current_handle();
 
@@ -3991,44 +3992,48 @@ static ssize_t ext4_quota_write(struct super_block *sb, int type,
 			(unsigned long long)off, (unsigned long long)len);
 		return -EIO;
 	}
-	mutex_lock_nested(&inode->i_mutex, I_MUTEX_QUOTA);
-	while (towrite > 0) {
-		tocopy = sb->s_blocksize - offset < towrite ?
-				sb->s_blocksize - offset : towrite;
-		bh = ext4_bread(handle, inode, blk, 1, &err);
-		if (!bh)
-			goto out;
-		err = ext4_journal_get_write_access(handle, bh);
-		if (err) {
-			brelse(bh);
-			goto out;
-		}
-		lock_buffer(bh);
-		memcpy(bh->b_data+offset, data, tocopy);
-		flush_dcache_page(bh->b_page);
-		unlock_buffer(bh);
-		err = ext4_handle_dirty_metadata(handle, NULL, bh);
-		brelse(bh);
-		if (err)
-			goto out;
-		offset = 0;
-		towrite -= tocopy;
-		data += tocopy;
-		blk++;
+
+	/*
+	 * Since we account only one data block in transaction credits,
+	 * then it is impossible to cross a block boundary.
+	 */
+	if (sb->s_blocksize - offset < len) {
+		ext4_msg(sb, KERN_WARNING, "Quota write (off=%llu, len=%llu)"
+			" cancelled because not block aligned",
+			(unsigned long long)off, (unsigned long long)len);
+		return -EIO;
 	}
+
+	mutex_lock_nested(&inode->i_mutex, I_MUTEX_QUOTA);
+
+	bh = ext4_bread(handle, inode, blk, 1, &err);
+	if (!bh)
+		goto out;
+	err = ext4_journal_get_write_access(handle, bh);
+	if (err) {
+		brelse(bh);
+		goto out;
+	}
+	lock_buffer(bh);
+	memcpy(bh->b_data+offset, data, len);
+	flush_dcache_page(bh->b_page);
+	unlock_buffer(bh);
+	err = ext4_handle_dirty_metadata(handle, NULL, bh);
+	brelse(bh);
 out:
-	if (len == towrite) {
+	if (err) {
 		mutex_unlock(&inode->i_mutex);
 		return err;
 	}
-	if (inode->i_size < off+len-towrite) {
-		i_size_write(inode, off+len-towrite);
+
+	if (inode->i_size < off + len) {
+		i_size_write(inode, off + len);
 		EXT4_I(inode)->i_disksize = inode->i_size;
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	ext4_mark_inode_dirty(handle, inode);
 	mutex_unlock(&inode->i_mutex);
-	return len - towrite;
+	return len;
 }
 
 #endif
@@ -4050,6 +4055,11 @@ static struct file_system_type ext4_fs_type = {
 static int __init init_ext4_fs(void)
 {
 	int err;
+	int i;
+
+	ext4_check_flag_values();
+	for (i = 0; i < WQ_HASH_SZ; i++)
+		init_waitqueue_head(&aio_wq[i]);
 
 	err = init_ext4_system_zone();
 	if (err)

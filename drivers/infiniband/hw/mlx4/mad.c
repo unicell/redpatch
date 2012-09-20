@@ -313,7 +313,7 @@ int mlx4_ib_mad_init(struct mlx4_ib_dev *dev)
 	enum rdma_link_layer ll;
 
 	for (p = 0; p < dev->num_ports; ++p) {
-		ll = rdma_port_link_layer(&dev->ib_dev, p + 1);
+		ll = rdma_port_get_link_layer(&dev->ib_dev, p + 1);
 		for (q = 0; q <= 1; ++q) {
 			if (ll == IB_LINK_LAYER_INFINIBAND) {
 				agent = ib_register_mad_agent(&dev->ib_dev, p + 1,

@@ -222,7 +222,7 @@ static inline void scsi_eh_prt_fail_stats(struct Scsi_Host *shost,
  * @scmd:	Cmd to have sense checked.
  *
  * Return value:
- * 	SUCCESS or FAILED or NEEDS_RETRY
+ *	SUCCESS or FAILED or NEEDS_RETRY or TARGET_ERROR
  *
  * Notes:
  *	When a deferred error is detected the current command has
@@ -319,31 +319,25 @@ static int scsi_check_sense(struct scsi_cmnd *scmd)
 				    "changed. The Linux SCSI layer does not "
 				    "automatically adjust these parameters.\n");
 
-		if (blk_barrier_rq(scmd->request))
-			/*
-			 * barrier requests should always retry on UA
-			 * otherwise block will get a spurious error
-			 */
-			return NEEDS_RETRY;
-		else
-			/*
-			 * for normal (non barrier) commands, pass the
-			 * UA upwards for a determination in the
-			 * completion functions
-			 */
-			return SUCCESS;
+		/*
+		 * Pass the UA upwards for a determination in the completion
+		 * functions.
+		 */
+		return SUCCESS;
 
-		/* these three are not supported */
+		/* these are not supported */
 	case COPY_ABORTED:
 	case VOLUME_OVERFLOW:
 	case MISCOMPARE:
-		return SUCCESS;
+	case BLANK_CHECK:
+	case DATA_PROTECT:
+		return TARGET_ERROR;
 
 	case MEDIUM_ERROR:
 		if (sshdr.asc == 0x11 || /* UNRECOVERED READ ERR */
 		    sshdr.asc == 0x13 || /* AMNF DATA FIELD */
 		    sshdr.asc == 0x14) { /* RECORD NOT FOUND */
-			return SUCCESS;
+			return TARGET_ERROR;
 		}
 		return NEEDS_RETRY;
 
@@ -351,11 +345,9 @@ static int scsi_check_sense(struct scsi_cmnd *scmd)
 		if (scmd->device->retry_hwerror)
 			return ADD_TO_MLQUEUE;
 		else
-			return SUCCESS;
+			return TARGET_ERROR;
 
 	case ILLEGAL_REQUEST:
-	case BLANK_CHECK:
-	case DATA_PROTECT:
 	default:
 		return SUCCESS;
 	}
@@ -472,14 +464,17 @@ static int scsi_eh_completed_normally(struct scsi_cmnd *scmd)
 		 */
 		return SUCCESS;
 	case RESERVATION_CONFLICT:
-		/*
-		 * let issuer deal with this, it could be just fine
-		 */
-		return SUCCESS;
+		if (scmd->cmnd[0] == TEST_UNIT_READY)
+			/* it is a success, we probed the device and
+			 * found it */
+			return SUCCESS;
+		/* otherwise, we failed to send the command */
+		return FAILED;
 	case QUEUE_FULL:
 		scsi_handle_queue_full(scmd->device);
 		/* fall through */
 	case BUSY:
+		return NEEDS_RETRY;
 	default:
 		return FAILED;
 	}
@@ -815,6 +810,7 @@ static int scsi_send_eh_cmnd(struct scsi_cmnd *scmd, unsigned char *cmnd,
 		case SUCCESS:
 		case NEEDS_RETRY:
 		case FAILED:
+		case TARGET_ERROR:
 			break;
 		case ADD_TO_MLQUEUE:
 			rtn = NEEDS_RETRY;
@@ -1152,51 +1148,40 @@ static int scsi_eh_target_reset(struct Scsi_Host *shost,
 				struct list_head *work_q,
 				struct list_head *done_q)
 {
-	struct scsi_cmnd *scmd, *tgtr_scmd, *next;
-	unsigned int id = 0;
-	int rtn;
+	LIST_HEAD(tmp_list);
 
-	do {
-		tgtr_scmd = NULL;
-		list_for_each_entry(scmd, work_q, eh_entry) {
-			if (id == scmd_id(scmd)) {
-				tgtr_scmd = scmd;
-				break;
-			}
-		}
-		if (!tgtr_scmd) {
-			/* not one exactly equal; find the next highest */
-			list_for_each_entry(scmd, work_q, eh_entry) {
-				if (scmd_id(scmd) > id &&
-				    (!tgtr_scmd ||
-				     scmd_id(tgtr_scmd) > scmd_id(scmd)))
-						tgtr_scmd = scmd;
-			}
-		}
-		if (!tgtr_scmd)
-			/* no more commands, that's it */
-			break;
+	list_splice_init(work_q, &tmp_list);
+
+	while (!list_empty(&tmp_list)) {
+		struct scsi_cmnd *next, *scmd;
+		int rtn;
+		unsigned int id;
+
+		scmd = list_entry(tmp_list.next, struct scsi_cmnd, eh_entry);
+		id = scmd_id(scmd);
 
 		SCSI_LOG_ERROR_RECOVERY(3, printk("%s: Sending target reset "
 						  "to target %d\n",
 						  current->comm, id));
-		rtn = scsi_try_target_reset(tgtr_scmd);
-		if (rtn == SUCCESS || rtn == FAST_IO_FAIL) {
-			list_for_each_entry_safe(scmd, next, work_q, eh_entry) {
-				if (id == scmd_id(scmd))
-					if (!scsi_device_online(scmd->device) ||
-					    rtn == FAST_IO_FAIL ||
-					    !scsi_eh_tur(tgtr_scmd))
-						scsi_eh_finish_cmd(scmd,
-								   done_q);
-			}
-		} else
+		rtn = scsi_try_target_reset(scmd);
+		if (rtn != SUCCESS && rtn != FAST_IO_FAIL)
 			SCSI_LOG_ERROR_RECOVERY(3, printk("%s: Target reset"
 							  " failed target: "
 							  "%d\n",
 							  current->comm, id));
-		id++;
-	} while(id != 0);
+		list_for_each_entry_safe(scmd, next, &tmp_list, eh_entry) {
+			if (scmd_id(scmd) != id)
+				continue;
+
+			if ((rtn == SUCCESS || rtn == FAST_IO_FAIL)
+			    && (!scsi_device_online(scmd->device) ||
+				 rtn == FAST_IO_FAIL || !scsi_eh_tur(scmd)))
+				scsi_eh_finish_cmd(scmd, done_q);
+			else
+				/* push back on work queue for further processing */
+				list_move(&scmd->eh_entry, work_q);
+		}
+	}
 
 	return list_empty(work_q);
 }
@@ -1330,16 +1315,16 @@ int scsi_noretry_cmd(struct scsi_cmnd *scmd)
 	case DID_OK:
 		break;
 	case DID_BUS_BUSY:
-		return blk_failfast_transport(scmd->request);
+		return (scmd->request->cmd_flags & REQ_FAILFAST_TRANSPORT);
 	case DID_PARITY:
-		return blk_failfast_dev(scmd->request);
+		return (scmd->request->cmd_flags & REQ_FAILFAST_DEV);
 	case DID_ERROR:
 		if (msg_byte(scmd->result) == COMMAND_COMPLETE &&
 		    status_byte(scmd->result) == RESERVATION_CONFLICT)
 			return 0;
 		/* fall through */
 	case DID_SOFT_ERROR:
-		return blk_failfast_driver(scmd->request);
+		return (scmd->request->cmd_flags & REQ_FAILFAST_DRIVER);
 	}
 
 	switch (status_byte(scmd->result)) {
@@ -1348,7 +1333,9 @@ int scsi_noretry_cmd(struct scsi_cmnd *scmd)
 		 * assume caller has checked sense and determinted
 		 * the check condition was retryable.
 		 */
-		return blk_failfast_dev(scmd->request);
+		if (scmd->request->cmd_flags & REQ_FAILFAST_DEV ||
+		    scmd->request->cmd_type == REQ_TYPE_BLOCK_PC)
+			return 1;
 	}
 
 	return 0;
@@ -1506,6 +1493,14 @@ int scsi_decide_disposition(struct scsi_cmnd *scmd)
 		rtn = scsi_check_sense(scmd);
 		if (rtn == NEEDS_RETRY)
 			goto maybe_retry;
+		else if (rtn == TARGET_ERROR) {
+			/*
+			 * Need to modify host byte to signal a
+			 * permanent target failure
+			 */
+			scmd->result |= (DID_TARGET_FAILURE << 16);
+			rtn = SUCCESS;
+		}
 		/* if rtn == FAILED, we have no sense information;
 		 * returning FAILED will wake the error handler thread
 		 * to collect the sense and redo the decide
@@ -1523,6 +1518,7 @@ int scsi_decide_disposition(struct scsi_cmnd *scmd)
 	case RESERVATION_CONFLICT:
 		sdev_printk(KERN_INFO, scmd->device,
 			    "reservation conflict\n");
+		scmd->result |= (DID_NEXUS_FAILURE << 16);
 		return SUCCESS; /* causes immediate i/o error */
 	default:
 		return FAILED;

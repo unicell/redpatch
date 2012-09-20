@@ -15,13 +15,15 @@
 #include <linux/vhost.h>
 #include <linux/virtio_net.h>
 #include <linux/mm.h>
+#include <linux/mmu_context.h>
 #include <linux/miscdevice.h>
 #include <linux/mutex.h>
-#include <linux/workqueue.h>
 #include <linux/rcupdate.h>
 #include <linux/poll.h>
 #include <linux/file.h>
 #include <linux/highmem.h>
+#include <linux/slab.h>
+#include <linux/kthread.h>
 #include <linux/cgroup.h>
 
 #include <linux/net.h>
@@ -50,24 +52,34 @@ static void vhost_poll_func(struct file *file, wait_queue_head_t *wqh,
 static int vhost_poll_wakeup(wait_queue_t *wait, unsigned mode, int sync,
 			     void *key)
 {
-	struct vhost_poll *poll;
-	poll = container_of(wait, struct vhost_poll, wait);
+	struct vhost_poll *poll = container_of(wait, struct vhost_poll, wait);
+
 	if (!((unsigned long)key & poll->mask))
 		return 0;
 
-	queue_work(poll->dev->wq, &poll->work);
+	vhost_poll_queue(poll);
 	return 0;
 }
 
+static void vhost_work_init(struct vhost_work *work, vhost_work_fn_t fn)
+{
+	INIT_LIST_HEAD(&work->node);
+	work->fn = fn;
+	init_waitqueue_head(&work->done);
+	work->flushing = 0;
+	work->queue_seq = work->done_seq = 0;
+}
+
 /* Init poll structure */
-void vhost_poll_init(struct vhost_poll *poll, work_func_t func,
+void vhost_poll_init(struct vhost_poll *poll, vhost_work_fn_t fn,
 		     unsigned long mask, struct vhost_dev *dev)
 {
-	INIT_WORK(&poll->work, func);
 	init_waitqueue_func_entry(&poll->wait, vhost_poll_wakeup);
 	init_poll_funcptr(&poll->table, vhost_poll_func);
 	poll->mask = mask;
 	poll->dev = dev;
+
+	vhost_work_init(&poll->work, fn);
 }
 
 /* Start polling a file. We add ourselves to file's wait queue. The caller must
@@ -87,16 +99,56 @@ void vhost_poll_stop(struct vhost_poll *poll)
 	remove_wait_queue(poll->wqh, &poll->wait);
 }
 
+static bool vhost_work_seq_done(struct vhost_dev *dev, struct vhost_work *work,
+				unsigned seq)
+{
+	int left;
+	spin_lock_irq(&dev->work_lock);
+	left = seq - work->done_seq;
+	spin_unlock_irq(&dev->work_lock);
+	return left <= 0;
+}
+
+static void vhost_work_flush(struct vhost_dev *dev, struct vhost_work *work)
+{
+	unsigned seq;
+	int flushing;
+
+	spin_lock_irq(&dev->work_lock);
+	seq = work->queue_seq;
+	work->flushing++;
+	spin_unlock_irq(&dev->work_lock);
+	wait_event(work->done, vhost_work_seq_done(dev, work, seq));
+	spin_lock_irq(&dev->work_lock);
+	flushing = --work->flushing;
+	spin_unlock_irq(&dev->work_lock);
+	BUG_ON(flushing < 0);
+}
+
 /* Flush any work that has been scheduled. When calling this, don't hold any
  * locks that are also used by the callback. */
 void vhost_poll_flush(struct vhost_poll *poll)
 {
-	flush_work(&poll->work);
+	vhost_work_flush(poll->dev, &poll->work);
+}
+
+static inline void vhost_work_queue(struct vhost_dev *dev,
+				    struct vhost_work *work)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->work_lock, flags);
+	if (list_empty(&work->node)) {
+		list_add_tail(&work->node, &dev->work_list);
+		work->queue_seq++;
+		wake_up_process(dev->worker);
+	}
+	spin_unlock_irqrestore(&dev->work_lock, flags);
 }
 
 void vhost_poll_queue(struct vhost_poll *poll)
 {
-	queue_work(poll->dev->wq, &poll->work);
+	vhost_work_queue(poll->dev, &poll->work);
 }
 
 static void vhost_vq_reset(struct vhost_dev *dev,
@@ -110,10 +162,10 @@ static void vhost_vq_reset(struct vhost_dev *dev,
 	vq->avail_idx = 0;
 	vq->last_used_idx = 0;
 	vq->used_flags = 0;
-	vq->used_flags = 0;
 	vq->log_used = false;
 	vq->log_addr = -1ull;
-	vq->hdr_size = 0;
+	vq->vhost_hlen = 0;
+	vq->sock_hlen = 0;
 	vq->private_data = NULL;
 	vq->log_base = NULL;
 	vq->error_ctx = NULL;
@@ -129,11 +181,15 @@ static long vhost_dev_alloc_iovecs(struct vhost_dev *dev)
 {
 	int i;
 	for (i = 0; i < dev->nvqs; ++i) {
-		dev->vqs[i].indirect = kmalloc(GFP_KERNEL, UIO_MAXIOV *
-					       sizeof *dev->vqs[i].indirect);
-		dev->vqs[i].log = kmalloc(GFP_KERNEL, UIO_MAXIOV *
-					  sizeof *dev->vqs[i].log);
-		if (!dev->vqs[i].indirect || !dev->vqs[i].log)
+		dev->vqs[i].indirect = kmalloc(sizeof *dev->vqs[i].indirect *
+					       UIO_MAXIOV, GFP_KERNEL);
+		dev->vqs[i].log = kmalloc(sizeof *dev->vqs[i].log * UIO_MAXIOV,
+					  GFP_KERNEL);
+		dev->vqs[i].heads = kmalloc(sizeof *dev->vqs[i].heads *
+					    UIO_MAXIOV, GFP_KERNEL);
+
+		if (!dev->vqs[i].indirect || !dev->vqs[i].log ||
+			!dev->vqs[i].heads)
 			goto err_nomem;
 	}
 	return 0;
@@ -141,14 +197,73 @@ err_nomem:
 	for (; i >= 0; --i) {
 		kfree(dev->vqs[i].indirect);
 		kfree(dev->vqs[i].log);
+		kfree(dev->vqs[i].heads);
 	}
 	return -ENOMEM;
+}
+
+static void vhost_dev_free_iovecs(struct vhost_dev *dev)
+{
+	int i;
+	for (i = 0; i < dev->nvqs; ++i) {
+		kfree(dev->vqs[i].indirect);
+		dev->vqs[i].indirect = NULL;
+		kfree(dev->vqs[i].log);
+		dev->vqs[i].log = NULL;
+		kfree(dev->vqs[i].heads);
+		dev->vqs[i].heads = NULL;
+	}
+}
+
+static int vhost_worker(void *data)
+{
+	struct vhost_dev *dev = data;
+	struct vhost_work *work = NULL;
+	unsigned uninitialized_var(seq);
+
+	use_mm(dev->mm);
+
+	for (;;) {
+		/* mb paired w/ kthread_stop */
+		set_current_state(TASK_INTERRUPTIBLE);
+
+		spin_lock_irq(&dev->work_lock);
+		if (work) {
+			work->done_seq = seq;
+			if (work->flushing)
+				wake_up_all(&work->done);
+		}
+
+		if (kthread_should_stop()) {
+			spin_unlock_irq(&dev->work_lock);
+			__set_current_state(TASK_RUNNING);
+			break;
+		}
+		if (!list_empty(&dev->work_list)) {
+			work = list_first_entry(&dev->work_list,
+						struct vhost_work, node);
+			list_del_init(&work->node);
+			seq = work->queue_seq;
+		} else
+			work = NULL;
+		spin_unlock_irq(&dev->work_lock);
+
+		if (work) {
+			__set_current_state(TASK_RUNNING);
+			work->fn(work);
+		} else
+			schedule();
+
+	}
+	unuse_mm(dev->mm);
+	return 0;
 }
 
 long vhost_dev_init(struct vhost_dev *dev,
 		    struct vhost_virtqueue *vqs, int nvqs)
 {
-	int i, ret;
+	int i;
+
 	dev->vqs = vqs;
 	dev->nvqs = nvqs;
 	mutex_init(&dev->mutex);
@@ -156,21 +271,22 @@ long vhost_dev_init(struct vhost_dev *dev,
 	dev->log_file = NULL;
 	dev->memory = NULL;
 	dev->mm = NULL;
-	dev->wq = NULL;
-
-	ret = vhost_dev_alloc_iovecs(dev);
-	if (ret)
-		return ret;
+	spin_lock_init(&dev->work_lock);
+	INIT_LIST_HEAD(&dev->work_list);
+	dev->worker = NULL;
 
 	for (i = 0; i < dev->nvqs; ++i) {
+		dev->vqs[i].log = NULL;
+		dev->vqs[i].indirect = NULL;
+		dev->vqs[i].heads = NULL;
 		dev->vqs[i].dev = dev;
 		mutex_init(&dev->vqs[i].mutex);
 		vhost_vq_reset(dev, dev->vqs + i);
 		if (dev->vqs[i].handle_kick)
 			vhost_poll_init(&dev->vqs[i].poll,
-					dev->vqs[i].handle_kick,
-					POLLIN, dev);
+					dev->vqs[i].handle_kick, POLLIN, dev);
 	}
+
 	return 0;
 }
 
@@ -182,64 +298,66 @@ long vhost_dev_check_owner(struct vhost_dev *dev)
 }
 
 struct vhost_attach_cgroups_struct {
-	struct work_struct work;
+	struct vhost_work work;
 	struct task_struct *owner;
 	int ret;
 };
 
-static void vhost_attach_cgroups_work(struct work_struct *work)
+static void vhost_attach_cgroups_work(struct vhost_work *work)
 {
 	struct vhost_attach_cgroups_struct *s;
 	s = container_of(work, struct vhost_attach_cgroups_struct, work);
 	s->ret = cgroup_attach_task_all(s->owner, current);
 }
 
-static int vhost_attach_cgroups(struct workqueue_struct *wq)
+static int vhost_attach_cgroups(struct vhost_dev *dev)
 {
 	struct vhost_attach_cgroups_struct attach;
 	attach.owner = current;
-	INIT_WORK(&attach.work, vhost_attach_cgroups_work);
-	queue_work(wq, &attach.work);
-	flush_work(&attach.work);
+	vhost_work_init(&attach.work, vhost_attach_cgroups_work);
+	vhost_work_queue(dev, &attach.work);
+	vhost_work_flush(dev, &attach.work);
 	return attach.ret;
 }
 
 /* Caller should have device mutex */
 static long vhost_dev_set_owner(struct vhost_dev *dev)
 {
-	char vhost_name[20];
+	struct task_struct *worker;
 	int err;
 	/* Is there an owner already? */
 	if (dev->mm) {
 		err = -EBUSY;
-		goto err;
+		goto err_mm;
 	}
 	/* No owner, become one */
 	dev->mm = get_task_mm(current);
-
-	/* Initialize the workqueue. */
-	snprintf(vhost_name, sizeof vhost_name, "vhost-%d", current->pid);
-	dev->wq = create_singlethread_workqueue(vhost_name);
-	if (!dev->wq) {
-		err = -ENOMEM;
-		goto err_wq;
+	worker = kthread_create(vhost_worker, dev, "vhost-%d", current->pid);
+	if (IS_ERR(worker)) {
+		err = PTR_ERR(worker);
+		goto err_worker;
 	}
 
-	err = vhost_attach_cgroups(dev->wq);
+	dev->worker = worker;
+	wake_up_process(worker);	/* avoid contributing to loadavg */
+
+	err = vhost_attach_cgroups(dev);
 	if (err)
-		goto err_cgroups;
+		goto err_cgroup;
+
+	err = vhost_dev_alloc_iovecs(dev);
+	if (err)
+		goto err_cgroup;
 
 	return 0;
-
-err_cgroups:
-	destroy_workqueue(dev->wq);
-	dev->wq = NULL;
-
-err_wq:
+err_cgroup:
+	kthread_stop(worker);
+	dev->worker = NULL;
+err_worker:
 	if (dev->mm)
 		mmput(dev->mm);
 	dev->mm = NULL;
-err:
+err_mm:
 	return err;
 }
 
@@ -280,10 +398,8 @@ void vhost_dev_cleanup(struct vhost_dev *dev)
 		if (dev->vqs[i].call)
 			fput(dev->vqs[i].call);
 		vhost_vq_reset(dev, dev->vqs + i);
-
-		kfree(dev->vqs[i].indirect);
-		kfree(dev->vqs[i].log);
 	}
+	vhost_dev_free_iovecs(dev);
 	if (dev->log_ctx)
 		eventfd_ctx_put(dev->log_ctx);
 	dev->log_ctx = NULL;
@@ -293,13 +409,14 @@ void vhost_dev_cleanup(struct vhost_dev *dev)
 	/* No one will access memory at this point */
 	kfree(dev->memory);
 	dev->memory = NULL;
+	WARN_ON(!list_empty(&dev->work_list));
+	if (dev->worker) {
+		kthread_stop(dev->worker);
+		dev->worker = NULL;
+	}
 	if (dev->mm)
 		mmput(dev->mm);
 	dev->mm = NULL;
-
-	if (dev->wq)
-		destroy_workqueue(dev->wq);
-	dev->wq = NULL;
 }
 
 static int log_access_ok(void __user *log_base, u64 addr, unsigned long sz)
@@ -308,7 +425,7 @@ static int log_access_ok(void __user *log_base, u64 addr, unsigned long sz)
 	/* Make sure 64 bit math will not overflow. */
 	if (a > ULONG_MAX - (unsigned long)log_base ||
 	    a + (unsigned long)log_base > ULONG_MAX)
-		return -EFAULT;
+		return 0;
 
 	return access_ok(VERIFY_WRITE, log_base + a,
 			 (sz + VHOST_PAGE_SIZE * 8 - 1) / VHOST_PAGE_SIZE / 8);
@@ -764,6 +881,7 @@ static int log_write(void __user *log_base,
 	int r;
 	if (!write_length)
 		return 0;
+	write_length += write_address % VHOST_PAGE_SIZE;
 	write_address /= VHOST_PAGE_SIZE;
 	for (;;) {
 		u64 base = (u64)(unsigned long)log_base;
@@ -777,7 +895,7 @@ static int log_write(void __user *log_base,
 		if (write_length <= VHOST_PAGE_SIZE)
 			break;
 		write_length -= VHOST_PAGE_SIZE;
-		write_address += VHOST_PAGE_SIZE;
+		write_address += 1;
 	}
 	return r;
 }
@@ -795,18 +913,19 @@ int vhost_log_write(struct vhost_virtqueue *vq, struct vhost_log *log,
 		if (r < 0)
 			return r;
 		len -= l;
-		if (!len)
+		if (!len) {
+			if (vq->log_ctx)
+				eventfd_signal(vq->log_ctx, 1);
 			return 0;
+		}
 	}
-	if (vq->log_ctx)
-		eventfd_signal(vq->log_ctx, 1);
 	/* Length written exceeds what we have stored. This is a bug. */
 	BUG();
 	return 0;
 }
 
-int translate_desc(struct vhost_dev *dev, u64 addr, u32 len,
-		   struct iovec iov[], int iov_size)
+static int translate_desc(struct vhost_dev *dev, u64 addr, u32 len,
+			  struct iovec iov[], int iov_size)
 {
 	const struct vhost_memory_region *reg;
 	struct vhost_memory *mem;
@@ -831,7 +950,7 @@ int translate_desc(struct vhost_dev *dev, u64 addr, u32 len,
 		_iov = iov + ret;
 		size = reg->memory_size - addr + reg->guest_phys_addr;
 		_iov->iov_len = min((u64)len, size);
-		_iov->iov_base = (void *)(unsigned long)
+		_iov->iov_base = (void __user *)(unsigned long)
 			(reg->userspace_addr + addr - reg->guest_phys_addr);
 		s += size;
 		addr += size;
@@ -971,7 +1090,7 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 
 	/* Check it isn't doing very strange things with descriptor numbers. */
 	last_avail_idx = vq->last_avail_idx;
-	if (unlikely(get_user(vq->avail_idx, &vq->avail->idx))) {
+	if (unlikely(__get_user(vq->avail_idx, &vq->avail->idx))) {
 		vq_err(vq, "Failed to access avail idx at %p\n",
 		       &vq->avail->idx);
 		return -EFAULT;
@@ -992,8 +1111,8 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 
 	/* Grab the next descriptor number they're advertising, and increment
 	 * the index we've seen. */
-	if (unlikely(get_user(head,
-			      &vq->avail->ring[last_avail_idx % vq->num]))) {
+	if (unlikely(__get_user(head,
+				&vq->avail->ring[last_avail_idx % vq->num]))) {
 		vq_err(vq, "Failed to read head: idx %d address %p\n",
 		       last_avail_idx,
 		       &vq->avail->ring[last_avail_idx % vq->num]);
@@ -1078,31 +1197,31 @@ int vhost_get_vq_desc(struct vhost_dev *dev, struct vhost_virtqueue *vq,
 }
 
 /* Reverse the effect of vhost_get_vq_desc. Useful for error handling. */
-void vhost_discard_vq_desc(struct vhost_virtqueue *vq)
+void vhost_discard_vq_desc(struct vhost_virtqueue *vq, int n)
 {
-	vq->last_avail_idx--;
+	vq->last_avail_idx -= n;
 }
 
 /* After we've used one of their buffers, we tell them about it.  We'll then
  * want to notify the guest, using eventfd. */
 int vhost_add_used(struct vhost_virtqueue *vq, unsigned int head, int len)
 {
-	struct vring_used_elem *used;
+	struct vring_used_elem __user *used;
 
 	/* The virtqueue contains a ring of used buffers.  Get a pointer to the
 	 * next entry in that used ring. */
 	used = &vq->used->ring[vq->last_used_idx % vq->num];
-	if (put_user(head, &used->id)) {
+	if (__put_user(head, &used->id)) {
 		vq_err(vq, "Failed to write used id");
 		return -EFAULT;
 	}
-	if (put_user(len, &used->len)) {
+	if (__put_user(len, &used->len)) {
 		vq_err(vq, "Failed to write used len");
 		return -EFAULT;
 	}
 	/* Make sure buffer is written before we update index. */
 	smp_wmb();
-	if (put_user(vq->last_used_idx + 1, &vq->used->idx)) {
+	if (__put_user(vq->last_used_idx + 1, &vq->used->idx)) {
 		vq_err(vq, "Failed to increment used idx");
 		return -EFAULT;
 	}
@@ -1111,7 +1230,8 @@ int vhost_add_used(struct vhost_virtqueue *vq, unsigned int head, int len)
 		smp_wmb();
 		/* Log used ring entry write. */
 		log_write(vq->log_base,
-			  vq->log_addr + ((void *)used - (void *)vq->used),
+			  vq->log_addr +
+			   ((void __user *)used - (void __user *)vq->used),
 			  sizeof *used);
 		/* Log used index update. */
 		log_write(vq->log_base,
@@ -1124,6 +1244,67 @@ int vhost_add_used(struct vhost_virtqueue *vq, unsigned int head, int len)
 	return 0;
 }
 
+static int __vhost_add_used_n(struct vhost_virtqueue *vq,
+			    struct vring_used_elem *heads,
+			    unsigned count)
+{
+	struct vring_used_elem __user *used;
+	int start;
+
+	start = vq->last_used_idx % vq->num;
+	used = vq->used->ring + start;
+	if (__copy_to_user(used, heads, count * sizeof *used)) {
+		vq_err(vq, "Failed to write used");
+		return -EFAULT;
+	}
+	if (unlikely(vq->log_used)) {
+		/* Make sure data is seen before log. */
+		smp_wmb();
+		/* Log used ring entry write. */
+		log_write(vq->log_base,
+			  vq->log_addr +
+			   ((void __user *)used - (void __user *)vq->used),
+			  count * sizeof *used);
+	}
+	vq->last_used_idx += count;
+	return 0;
+}
+
+/* After we've used one of their buffers, we tell them about it.  We'll then
+ * want to notify the guest, using eventfd. */
+int vhost_add_used_n(struct vhost_virtqueue *vq, struct vring_used_elem *heads,
+		     unsigned count)
+{
+	int start, n, r;
+
+	start = vq->last_used_idx % vq->num;
+	n = vq->num - start;
+	if (n < count) {
+		r = __vhost_add_used_n(vq, heads, n);
+		if (r < 0)
+			return r;
+		heads += n;
+		count -= n;
+	}
+	r = __vhost_add_used_n(vq, heads, count);
+
+	/* Make sure buffer is written before we update index. */
+	smp_wmb();
+	if (put_user(vq->last_used_idx, &vq->used->idx)) {
+		vq_err(vq, "Failed to increment used idx");
+		return -EFAULT;
+	}
+	if (unlikely(vq->log_used)) {
+		/* Log used index update. */
+		log_write(vq->log_base,
+			  vq->log_addr + offsetof(struct vring_used, idx),
+			  sizeof vq->used->idx);
+		if (vq->log_ctx)
+			eventfd_signal(vq->log_ctx, 1);
+	}
+	return r;
+}
+
 /* This actually signals the guest, using eventfd. */
 void vhost_signal(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 {
@@ -1133,7 +1314,7 @@ void vhost_signal(struct vhost_dev *dev, struct vhost_virtqueue *vq)
 	 * interrupts. */
 	smp_mb();
 
-	if (get_user(flags, &vq->avail->flags)) {
+	if (__get_user(flags, &vq->avail->flags)) {
 		vq_err(vq, "Failed to get flags");
 		return;
 	}
@@ -1158,6 +1339,15 @@ void vhost_add_used_and_signal(struct vhost_dev *dev,
 	vhost_signal(dev, vq);
 }
 
+/* multi-buffer version of vhost_add_used_and_signal */
+void vhost_add_used_and_signal_n(struct vhost_dev *dev,
+				 struct vhost_virtqueue *vq,
+				 struct vring_used_elem *heads, unsigned count)
+{
+	vhost_add_used_n(vq, heads, count);
+	vhost_signal(dev, vq);
+}
+
 /* OK, now we need to know about added descriptors. */
 bool vhost_enable_notify(struct vhost_virtqueue *vq)
 {
@@ -1175,14 +1365,14 @@ bool vhost_enable_notify(struct vhost_virtqueue *vq)
 	/* They could have slipped one in as we were doing that: make
 	 * sure it's written, then check again. */
 	smp_mb();
-	r = get_user(avail_idx, &vq->avail->idx);
+	r = __get_user(avail_idx, &vq->avail->idx);
 	if (r) {
 		vq_err(vq, "Failed to check avail idx at %p: %d\n",
 		       &vq->avail->idx, r);
 		return false;
 	}
 
-	return avail_idx != vq->last_avail_idx;
+	return avail_idx != vq->avail_idx;
 }
 
 /* We don't need to be notified again. */
@@ -1196,13 +1386,4 @@ void vhost_disable_notify(struct vhost_virtqueue *vq)
 	if (r)
 		vq_err(vq, "Failed to enable notification at %p: %d\n",
 		       &vq->used->flags, r);
-}
-
-int vhost_init(void)
-{
-	return 0;
-}
-
-void vhost_cleanup(void)
-{
 }

@@ -16,9 +16,13 @@
  *   the GNU Lesser General Public License for more details.
  *
  */
+#ifndef _CIFS_GLOB_H
+#define _CIFS_GLOB_H
+
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/slow-work.h>
+#include <linux/workqueue.h>
 #include "cifs_fs_sb.h"
 #include "cifsacl.h"
 /*
@@ -70,7 +74,7 @@
  * CIFS vfs client Status information (based on what we know.)
  */
 
- /* associated with each tcp and smb session */
+/* associated with each tcp and smb session */
 enum statusEnum {
 	CifsNew = 0,
 	CifsGood,
@@ -135,6 +139,7 @@ struct TCP_Server_Info {
 		struct sockaddr_in sockAddr;
 		struct sockaddr_in6 sockAddr6;
 	} addr;
+	struct sockaddr_storage srcaddr; /* locally bind to this IP */
 	wait_queue_head_t response_q;
 	wait_queue_head_t request_q; /* if more than maxmpx to srvr must block*/
 	struct list_head pending_mid_q;
@@ -187,6 +192,9 @@ struct TCP_Server_Info {
 	bool	sec_mskerberos;		/* supports legacy MS Kerberos */
 	bool	sec_kerberosu2u;	/* supports U2U Kerberos */
 	bool	sec_ntlmssp;		/* supports NTLMSSP */
+#ifdef CONFIG_CIFS_FSCACHE
+	struct fscache_cookie   *fscache; /* client index cache cookie */
+#endif
 };
 
 /*
@@ -293,8 +301,51 @@ struct cifsTconInfo {
 	bool local_lease:1; /* check leases (only) on local system not remote */
 	bool broken_posix_open; /* e.g. Samba server versions < 3.3.2, 3.2.9 */
 	bool need_reconnect:1; /* connection reset, tid now invalid */
+#ifdef CONFIG_CIFS_FSCACHE
+	u64 resource_id;		/* server resource id */
+	struct fscache_cookie *fscache;	/* cookie for share */
+#endif
 	/* BB add field for back pointer to sb struct(s)? */
 };
+
+/*
+ * This is a refcounted and timestamped container for a tcon pointer. The
+ * container holds a tcon reference. It is considered safe to free one of
+ * these when the tl_count goes to 0. The tl_time is the time of the last
+ * "get" on the container.
+ */
+struct tcon_link {
+	struct rb_node		tl_rbnode;
+	uid_t			tl_uid;
+	unsigned long		tl_flags;
+#define TCON_LINK_MASTER	0
+#define TCON_LINK_PENDING	1
+#define TCON_LINK_IN_TREE	2
+	unsigned long		tl_time;
+	atomic_t		tl_count;
+	struct cifsTconInfo	*tl_tcon;
+};
+
+extern struct tcon_link *cifs_sb_tlink(struct cifs_sb_info *cifs_sb);
+
+static inline struct cifsTconInfo *
+tlink_tcon(struct tcon_link *tlink)
+{
+	return tlink->tl_tcon;
+}
+
+extern void cifs_put_tlink(struct tcon_link *tlink);
+
+static inline struct tcon_link *
+cifs_get_tlink(struct tcon_link *tlink)
+{
+	if (tlink && !IS_ERR(tlink))
+		atomic_inc(&tlink->tl_count);
+	return tlink;
+}
+
+/* This function is always expected to succeed */
+extern struct cifsTconInfo *cifs_sb_master_tcon(struct cifs_sb_info *cifs_sb);
 
 /*
  * This info hangs off the cifsFileInfo structure, pointed to by llist.
@@ -334,34 +385,29 @@ struct cifsFileInfo {
 	__u16 netfid;		/* file id from remote */
 	/* BB add lock scope info here if needed */ ;
 	/* lock scope id (0 if none) */
-	struct file *pfile; /* needed for writepage */
-	struct inode *pInode; /* needed for oplock break */
-	struct vfsmount *mnt;
+	struct dentry *dentry;
+	unsigned int f_flags;
+	struct tcon_link *tlink;
 	struct mutex lock_mutex;
 	struct list_head llist; /* list of byte range locks we have. */
-	bool closePend:1;	/* file is marked to close */
 	bool invalidHandle:1;	/* file closed via session abend */
 	bool oplock_break_cancelled:1;
-	atomic_t count;		/* reference count */
+	int count;		/* refcount protected by cifs_file_list_lock */
 	struct mutex fh_mutex; /* prevents reopen race after dead ses*/
 	struct cifs_search_info srch_inf;
 	struct slow_work oplock_break; /* slow_work job for oplock breaks */
 };
 
-/* Take a reference on the file private data */
+/*
+ * Take a reference on the file private data. Must be called with
+ * cifs_file_list_lock held.
+ */
 static inline void cifsFileInfo_get(struct cifsFileInfo *cifs_file)
 {
-	atomic_inc(&cifs_file->count);
+	++cifs_file->count;
 }
 
-/* Release a reference on the file private data */
-static inline void cifsFileInfo_put(struct cifsFileInfo *cifs_file)
-{
-	if (atomic_dec_and_test(&cifs_file->count)) {
-		iput(cifs_file->pInode);
-		kfree(cifs_file);
-	}
-}
+void cifsFileInfo_put(struct cifsFileInfo *cifs_file);
 
 /*
  * One of these for each file inode
@@ -371,7 +417,6 @@ struct cifsInodeInfo {
 	struct list_head lockList;
 	/* BB add in lists for dirty pages i.e. write caching info for oplock */
 	struct list_head openFileList;
-	int write_behind_rc;
 	__u32 cifsAttrs; /* e.g. DOS archive bit, sparse, compressed, system */
 	unsigned long time;	/* jiffies of last update/check of inode */
 	bool clientCanCacheRead:1;	/* read oplock */
@@ -380,6 +425,9 @@ struct cifsInodeInfo {
 	bool invalid_mapping:1;		/* pagecache is invalid */
 	u64  server_eof;		/* current file size on server */
 	u64  uniqueid;			/* server inode number */
+#ifdef CONFIG_CIFS_FSCACHE
+	struct fscache_cookie *fscache;
+#endif
 	struct inode vfs_inode;
 };
 
@@ -619,7 +667,7 @@ require use of the stronger protocol */
  *  GlobalMid_Lock protects:
  *	list operations on pending_mid_q and oplockQ
  *      updates to XID counters, multiplex id  and SMB sequence numbers
- *  GlobalSMBSesLock protects:
+ *  cifs_file_list_lock protects:
  *	list operations on tcp and SMB session lists and tCon lists
  *  f_owner.lock protects certain per file struct operations
  *  mapping->page_lock protects certain per page operations
@@ -662,7 +710,7 @@ GLOBAL_EXTERN rwlock_t		cifs_tcp_ses_lock;
  * If cifs_tcp_ses_lock and the lock below are both needed to be held, then
  * the cifs_tcp_ses_lock must be grabbed first and released last.
  */
-GLOBAL_EXTERN rwlock_t GlobalSMBSeslock;
+GLOBAL_EXTERN spinlock_t	cifs_file_list_lock;
 
 /* Outstanding dir notify requests */
 GLOBAL_EXTERN struct list_head GlobalDnotifyReqList;
@@ -715,3 +763,6 @@ GLOBAL_EXTERN unsigned int cifs_min_small;  /* min size of small buf pool */
 GLOBAL_EXTERN unsigned int cifs_max_pending; /* MAX requests at once to server*/
 
 extern const struct slow_work_ops cifs_oplock_break_ops;
+extern struct workqueue_struct *cifsiod_workqueue;
+
+#endif	/* _CIFS_GLOB_H */

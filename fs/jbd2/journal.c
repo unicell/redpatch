@@ -299,7 +299,6 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 	struct page *new_page;
 	unsigned int new_offset;
 	struct buffer_head *bh_in = jh2bh(jh_in);
-	struct jbd2_buffer_trigger_type *triggers;
 	journal_t *journal = transaction->t_journal;
 
 	/*
@@ -330,21 +329,21 @@ repeat:
 		done_copy_out = 1;
 		new_page = virt_to_page(jh_in->b_frozen_data);
 		new_offset = offset_in_page(jh_in->b_frozen_data);
-		triggers = jh_in->b_frozen_triggers;
 	} else {
 		new_page = jh2bh(jh_in)->b_page;
 		new_offset = offset_in_page(jh2bh(jh_in)->b_data);
-		triggers = jh_in->b_triggers;
 	}
 
 	mapped_data = kmap_atomic(new_page, KM_USER0);
 	/*
-	 * Fire any commit trigger.  Do this before checking for escaping,
-	 * as the trigger may modify the magic offset.  If a copy-out
-	 * happens afterwards, it will have the correct data in the buffer.
+	 * Fire data frozen trigger if data already wasn't frozen.  Do this
+	 * before checking for escaping, as the trigger may modify the magic
+	 * offset.  If a copy-out happens afterwards, it will have the correct
+	 * data in the buffer.
 	 */
-	jbd2_buffer_commit_trigger(jh_in, mapped_data + new_offset,
-				   triggers);
+	if (!done_copy_out)
+		jbd2_buffer_frozen_trigger(jh_in, mapped_data + new_offset,
+					   jh_in->b_triggers);
 
 	/*
 	 * Check for escaping
@@ -893,6 +892,14 @@ journal_t * jbd2_journal_init_dev(struct block_device *bdev,
 
 	/* journal descriptor can store up to n blocks -bzzz */
 	journal->j_blocksize = blocksize;
+	journal->j_dev = bdev;
+	journal->j_fs_dev = fs_dev;
+	journal->j_blk_offset = start;
+	journal->j_maxlen = len;
+	bdevname(journal->j_dev, journal->j_devname);
+	p = journal->j_devname;
+	while ((p = strchr(p, '/')))
+		*p = '!';
 	jbd2_stats_proc_init(journal);
 	n = journal->j_blocksize / sizeof(journal_block_tag_t);
 	journal->j_wbufsize = n;
@@ -902,14 +909,6 @@ journal_t * jbd2_journal_init_dev(struct block_device *bdev,
 			__func__);
 		goto out_err;
 	}
-	journal->j_dev = bdev;
-	journal->j_fs_dev = fs_dev;
-	journal->j_blk_offset = start;
-	journal->j_maxlen = len;
-	bdevname(journal->j_dev, journal->j_devname);
-	p = journal->j_devname;
-	while ((p = strchr(p, '/')))
-		*p = '!';
 
 	bh = __getblk(journal->j_dev, start, journal->j_blocksize);
 	if (!bh) {
@@ -1120,7 +1119,7 @@ void jbd2_journal_update_superblock(journal_t *journal, int wait)
 			set_buffer_uptodate(bh);
 		}
 	} else
-		ll_rw_block(SWRITE, 1, &bh);
+		write_dirty_buffer(bh, WRITE);
 
 out:
 	/* If we have just flushed the log (by marking s_start==0), then

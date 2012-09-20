@@ -432,7 +432,6 @@ static int qib_user_sdma_queue_pkts(const struct qib_devdata *dd,
 
 		if (len < QIB_USER_SDMA_MIN_HEADER_LENGTH ||
 		    len > PAGE_SIZE || len & 3 || addr & 3) {
-			qib_dbg("iov_len %lx invalid\n", (long)len);
 			ret = -EINVAL;
 			goto free_pkt;
 		}
@@ -476,8 +475,6 @@ static int qib_user_sdma_queue_pkts(const struct qib_devdata *dd,
 		 */
 		pktnw = le32_to_cpu(*pbc) & QIB_PBC_LENGTH_MASK;
 		if (pktnw < pktnwc || pktnw > pktnwc + (PAGE_SIZE >> 2)) {
-			qib_dbg("pbc nwords %x invalid (pbc32 %x)\n", pktnw,
-				le32_to_cpu(*pbc));
 			ret = -EINVAL;
 			goto free_pbc;
 		}
@@ -490,8 +487,6 @@ static int qib_user_sdma_queue_pkts(const struct qib_devdata *dd,
 
 			if (slen & 3 || faddr & 3 || !slen ||
 			    slen > PAGE_SIZE) {
-				qib_dbg("iov_len %lx or addr %lx idx=%lu bad\n",
-					(long)slen, faddr, idx);
 				ret = -EINVAL;
 				goto free_pbc;
 			}
@@ -507,8 +502,6 @@ static int qib_user_sdma_queue_pkts(const struct qib_devdata *dd,
 		}
 
 		if (pktnwc != pktnw) {
-			qib_dbg("pktnwc %x != pktnw %x, pbc32 %x\n",
-				pktnwc, pktnw, le32_to_cpu(*pbc));
 			ret = -EINVAL;
 			goto free_pbc;
 		}
@@ -633,7 +626,6 @@ void qib_user_sdma_queue_drain(struct qib_pportdata *ppd,
 			       struct qib_user_sdma_queue *pq)
 {
 	struct qib_devdata *dd = ppd->dd;
-	unsigned long flags;
 	int i;
 
 	if (!pq)
@@ -653,10 +645,6 @@ void qib_user_sdma_queue_drain(struct qib_pportdata *ppd,
 
 	if (!list_empty(&pq->sent)) {
 		struct list_head free_list;
-
-		spin_lock_irqsave(&ppd->sdma_lock, flags);
-		ppd->dd->f_dump_sdma_state(ppd);
-		spin_unlock_irqrestore(&ppd->sdma_lock, flags);
 
 		qib_dev_err(dd, "user sdma lists not empty: forcing!\n");
 		INIT_LIST_HEAD(&free_list);
@@ -775,8 +763,6 @@ static int qib_user_sdma_push_pkts(struct qib_pportdata *ppd,
 		}
 
 		if ((ofs << 2) > ppd->ibmaxlen) {
-			qib_dbg("packet size %X > ibmax %X, fail\n",
-				ofs << 2, ppd->ibmaxlen);
 			ret = -EMSGSIZE;
 			goto unlock;
 		}

@@ -179,9 +179,6 @@ struct qib_qsfp_data {
 
 extern int qib_refresh_qsfp_cache(struct qib_pportdata *ppd,
 				  struct qib_qsfp_cache *cp);
-extern void qib_qsfp_short_msg(struct qib_qsfp_data *qd);
-
 extern void qib_qsfp_init(struct qib_qsfp_data *qd,
 			  void (*fevent)(struct work_struct *));
 extern void qib_qsfp_deinit(struct qib_qsfp_data *qd);
-

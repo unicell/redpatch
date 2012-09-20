@@ -94,7 +94,7 @@ rdma_node_get_transport(enum rdma_node_type node_type)
 }
 EXPORT_SYMBOL(rdma_node_get_transport);
 
-enum rdma_link_layer rdma_port_link_layer(struct ib_device *device, u8 port_num)
+enum rdma_link_layer rdma_port_get_link_layer(struct ib_device *device, u8 port_num)
 {
 	if (device->get_link_layer)
 		return device->get_link_layer(device, port_num);
@@ -108,7 +108,7 @@ enum rdma_link_layer rdma_port_link_layer(struct ib_device *device, u8 port_num)
 		return IB_LINK_LAYER_UNSPECIFIED;
 	}
 }
-EXPORT_SYMBOL(rdma_port_link_layer);
+EXPORT_SYMBOL(rdma_port_get_link_layer);
 
 /* Protection domains */
 
@@ -326,8 +326,8 @@ EXPORT_SYMBOL(ib_create_qp);
 
 static const struct {
 	int			valid;
-	enum ib_qp_attr_mask	req_param[IB_QPT_RAW_ETY + 1];
-	enum ib_qp_attr_mask	opt_param[IB_QPT_RAW_ETY + 1];
+	enum ib_qp_attr_mask	req_param[IB_QPT_RAW_ETHERTYPE + 1];
+	enum ib_qp_attr_mask	opt_param[IB_QPT_RAW_ETHERTYPE + 1];
 } qp_state_table[IB_QPS_ERR + 1][IB_QPS_ERR + 1] = {
 	[IB_QPS_RESET] = {
 		[IB_QPS_RESET] = { .valid = 1 },
@@ -920,13 +920,3 @@ int ib_detach_mcast(struct ib_qp *qp, union ib_gid *gid, u16 lid)
 	return qp->device->detach_mcast(qp, gid, lid);
 }
 EXPORT_SYMBOL(ib_detach_mcast);
-
-int ib_get_eth_l2_addr(struct ib_device *device, u8 port, union ib_gid *gid,
-		       int sgid_idx, u8 *mac, __u16 *vlan_id)
-{
-	if (!device->get_eth_l2_addr)
-		return -ENOSYS;
-
-	return device->get_eth_l2_addr(device, port, gid, sgid_idx, mac, vlan_id);
-}
-EXPORT_SYMBOL(ib_get_eth_l2_addr);

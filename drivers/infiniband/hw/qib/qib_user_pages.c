@@ -42,8 +42,6 @@ static void __qib_release_user_pages(struct page **p, size_t num_pages,
 	size_t i;
 
 	for (i = 0; i < num_pages; i++) {
-		qib_cdbg(MM, "%lu/%lu put_page %p\n", (unsigned long) i,
-			 (unsigned long) num_pages, p[i]);
 		if (dirty)
 			set_page_dirty_lock(p[i]);
 		put_page(p[i]);
@@ -60,16 +58,12 @@ static int __get_user_pages(unsigned long start_page, size_t num_pages,
 	size_t got;
 	int ret;
 
-	lock_limit = current->signal->rlim[RLIMIT_MEMLOCK].rlim_cur >>
-		PAGE_SHIFT;
+	lock_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 
-	if (num_pages > lock_limit) {
+	if (num_pages > lock_limit && !capable(CAP_IPC_LOCK)) {
 		ret = -ENOMEM;
 		goto bail;
 	}
-
-	qib_cdbg(VERBOSE, "pin %lx pages from vaddr %lx\n",
-		 (unsigned long) num_pages, start_page);
 
 	for (got = 0; got < num_pages; got += ret) {
 		ret = get_user_pages(current, current->mm,

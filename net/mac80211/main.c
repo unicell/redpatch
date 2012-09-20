@@ -385,13 +385,13 @@ static void ieee80211_handle_filtered_frame(struct ieee80211_local *local,
 	 *      can be unknown, for example with different interrupt status
 	 *	bits.
 	 */
-	if (test_sta_flags(sta, WLAN_STA_PS) &&
+	if (test_sta_flags(sta, WLAN_STA_PS_STA) &&
 	    skb_queue_len(&sta->tx_filtered) < STA_MAX_TX_BUFFER) {
 		skb_queue_tail(&sta->tx_filtered, skb);
 		return;
 	}
 
-	if (!test_sta_flags(sta, WLAN_STA_PS) &&
+	if (!test_sta_flags(sta, WLAN_STA_PS_STA) &&
 	    !(info->flags & IEEE80211_TX_INTFL_RETRIED)) {
 		/* Software retry the packet once */
 		info->flags |= IEEE80211_TX_INTFL_RETRIED;
@@ -406,7 +406,7 @@ static void ieee80211_handle_filtered_frame(struct ieee80211_local *local,
 		       "queue_len=%d PS=%d @%lu\n",
 		       wiphy_name(local->hw.wiphy),
 		       skb_queue_len(&sta->tx_filtered),
-		       !!test_sta_flags(sta, WLAN_STA_PS), jiffies);
+		       !!test_sta_flags(sta, WLAN_STA_PS_STA), jiffies);
 #endif
 	dev_kfree_skb(skb);
 }
@@ -447,7 +447,7 @@ void ieee80211_tx_status(struct ieee80211_hw *hw, struct sk_buff *skb)
 
 	if (sta) {
 		if (!(info->flags & IEEE80211_TX_STAT_ACK) &&
-		    test_sta_flags(sta, WLAN_STA_PS)) {
+		    test_sta_flags(sta, WLAN_STA_PS_STA)) {
 			/*
 			 * The STA is in power save mode, so assume
 			 * that this TX packet failed because of that.
@@ -628,6 +628,9 @@ static void ieee80211_restart_work(struct work_struct *work)
 	struct ieee80211_local *local =
 		container_of(work, struct ieee80211_local, restart_work);
 
+	/* wait for scan work complete */
+	flush_workqueue(local->workqueue);
+
 	rtnl_lock();
 	ieee80211_reconfig(local);
 	rtnl_unlock();
@@ -744,12 +747,30 @@ struct ieee80211_hw *ieee80211_alloc_hw(size_t priv_data_len,
 }
 EXPORT_SYMBOL(ieee80211_alloc_hw);
 
+struct ieee80211_hw *ieee80211_alloc_hw2(size_t priv_data_len,
+					 const struct ieee80211_ops *ops,
+					 const struct ieee80211_ops2 *ops2)
+{
+	struct ieee80211_hw *hw;
+	struct ieee80211_local *local;
+
+	hw = ieee80211_alloc_hw(priv_data_len, ops);
+
+	if (hw) {
+		local = hw_to_local(hw);
+		local->ops2 = ops2;
+	}
+
+	return hw;
+}
+EXPORT_SYMBOL(ieee80211_alloc_hw2);
+
 int ieee80211_register_hw(struct ieee80211_hw *hw)
 {
 	struct ieee80211_local *local = hw_to_local(hw);
 	int result;
 	enum ieee80211_band band;
-	int channels, i, j, max_bitrates;
+	int channels, max_bitrates;
 	bool supp_ht;
 	static const u32 cipher_suites[] = {
 		WLAN_CIPHER_SUITE_WEP40,
@@ -900,20 +921,6 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	rtnl_unlock();
 
 	ieee80211_led_init(local);
-
-	/* alloc internal scan request */
-	i = 0;
-	local->int_scan_req->ssids = &local->scan_ssid;
-	local->int_scan_req->n_ssids = 1;
-	for (band = 0; band < IEEE80211_NUM_BANDS; band++) {
-		if (!hw->wiphy->bands[band])
-			continue;
-		for (j = 0; j < hw->wiphy->bands[band]->n_channels; j++) {
-			local->int_scan_req->channels[i] =
-				&hw->wiphy->bands[band]->channels[j];
-			i++;
-		}
-	}
 
 	local->network_latency_notifier.notifier_call =
 		ieee80211_max_network_latency;

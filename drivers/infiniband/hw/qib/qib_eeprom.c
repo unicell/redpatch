@@ -172,10 +172,6 @@ void qib_get_eeprom_info(struct qib_devdata *dd)
 			bguid[6]++;
 		}
 		dd->nguid = 1;
-
-		qib_dbg("nguid %u, so adding %u to device 0 guid, "
-			"for %llx\n", dd0->nguid, t,
-			(unsigned long long) be64_to_cpu(dd->base_guid));
 		goto bail;
 	}
 
@@ -235,8 +231,6 @@ void qib_get_eeprom_info(struct qib_devdata *dd)
 		bguid[3] = 0;
 		bguid[4] = 0;
 		guid = *(__be64 *) ifp->if_guid;
-		qib_cdbg(VERBOSE, "Old GUID format in flash, top 3 zero, "
-			 "shifting 2 octets\n");
 	} else
 		guid = *(__be64 *) ifp->if_guid;
 	dd->base_guid = guid;
@@ -268,9 +262,6 @@ void qib_get_eeprom_info(struct qib_devdata *dd)
 	if (!strstr(ifp->if_comment, "Tested successfully"))
 		qib_dev_err(dd, "Board SN %s did not pass functional "
 			    "test: %s\n", dd->serial, ifp->if_comment);
-
-	qib_cdbg(VERBOSE, "Initted GUID to %llx from eeprom\n",
-		 (unsigned long long) be64_to_cpu(dd->base_guid));
 
 	memcpy(&dd->eep_st_errs, &ifp->if_errcntp, QIB_EEP_LOG_CNT);
 	/*

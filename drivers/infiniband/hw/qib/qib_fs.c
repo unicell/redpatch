@@ -135,8 +135,8 @@ static ssize_t driver_names_read(struct file *file, char __user *buf,
 }
 
 static const struct file_operations driver_ops[] = {
-	{ .read = driver_stats_read, },
-	{ .read = driver_names_read, },
+	{ .read = driver_stats_read, .llseek = generic_file_llseek, },
+	{ .read = driver_names_read, .llseek = generic_file_llseek, },
 };
 
 /* read the per-device counters */
@@ -144,10 +144,11 @@ static ssize_t dev_counters_read(struct file *file, char __user *buf,
 				 size_t count, loff_t *ppos)
 {
 	u64 *counters;
+	size_t avail;
 	struct qib_devdata *dd = private2dd(file);
 
-	return simple_read_from_buffer(buf, count, ppos, counters,
-		dd->f_read_cntrs(dd, *ppos, NULL, &counters));
+	avail = dd->f_read_cntrs(dd, *ppos, NULL, &counters);
+	return simple_read_from_buffer(buf, count, ppos, counters, avail);
 }
 
 /* read the per-device counters */
@@ -155,15 +156,16 @@ static ssize_t dev_names_read(struct file *file, char __user *buf,
 			      size_t count, loff_t *ppos)
 {
 	char *names;
+	size_t avail;
 	struct qib_devdata *dd = private2dd(file);
 
-	return simple_read_from_buffer(buf, count, ppos, names,
-		dd->f_read_cntrs(dd, *ppos, &names, NULL));
+	avail = dd->f_read_cntrs(dd, *ppos, &names, NULL);
+	return simple_read_from_buffer(buf, count, ppos, names, avail);
 }
 
 static const struct file_operations cntr_ops[] = {
-	{ .read = dev_counters_read, },
-	{ .read = dev_names_read, },
+	{ .read = dev_counters_read, .llseek = generic_file_llseek, },
+	{ .read = dev_names_read, .llseek = generic_file_llseek, },
 };
 
 /*
@@ -176,10 +178,11 @@ static ssize_t portnames_read(struct file *file, char __user *buf,
 			      size_t count, loff_t *ppos)
 {
 	char *names;
+	size_t avail;
 	struct qib_devdata *dd = private2dd(file);
 
-	return simple_read_from_buffer(buf, count, ppos, names,
-		dd->f_read_portcntrs(dd, *ppos, 0, &names, NULL));
+	avail = dd->f_read_portcntrs(dd, *ppos, 0, &names, NULL);
+	return simple_read_from_buffer(buf, count, ppos, names, avail);
 }
 
 /* read the per-port counters for port 1 (pidx 0) */
@@ -187,10 +190,11 @@ static ssize_t portcntrs_1_read(struct file *file, char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	u64 *counters;
+	size_t avail;
 	struct qib_devdata *dd = private2dd(file);
 
-	return simple_read_from_buffer(buf, count, ppos, counters,
-		dd->f_read_portcntrs(dd, *ppos, 0, NULL, &counters));
+	avail = dd->f_read_portcntrs(dd, *ppos, 0, NULL, &counters);
+	return simple_read_from_buffer(buf, count, ppos, counters, avail);
 }
 
 /* read the per-port counters for port 2 (pidx 1) */
@@ -198,16 +202,67 @@ static ssize_t portcntrs_2_read(struct file *file, char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	u64 *counters;
+	size_t avail;
 	struct qib_devdata *dd = private2dd(file);
 
-	return simple_read_from_buffer(buf, count, ppos, counters,
-		dd->f_read_portcntrs(dd, *ppos, 1, NULL, &counters));
+	avail = dd->f_read_portcntrs(dd, *ppos, 1, NULL, &counters);
+	return simple_read_from_buffer(buf, count, ppos, counters, avail);
 }
 
 static const struct file_operations portcntr_ops[] = {
-	{ .read = portnames_read, },
-	{ .read = portcntrs_1_read, },
-	{ .read = portcntrs_2_read, },
+	{ .read = portnames_read, .llseek = generic_file_llseek, },
+	{ .read = portcntrs_1_read, .llseek = generic_file_llseek, },
+	{ .read = portcntrs_2_read, .llseek = generic_file_llseek, },
+};
+
+/*
+ * read the per-port QSFP data for port 1 (pidx 0)
+ */
+static ssize_t qsfp_1_read(struct file *file, char __user *buf,
+			   size_t count, loff_t *ppos)
+{
+	struct qib_devdata *dd = private2dd(file);
+	char *tmp;
+	int ret;
+
+	tmp = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
+
+	ret = qib_qsfp_dump(dd->pport, tmp, PAGE_SIZE);
+	if (ret > 0)
+		ret = simple_read_from_buffer(buf, count, ppos, tmp, ret);
+	kfree(tmp);
+	return ret;
+}
+
+/*
+ * read the per-port QSFP data for port 2 (pidx 1)
+ */
+static ssize_t qsfp_2_read(struct file *file, char __user *buf,
+			   size_t count, loff_t *ppos)
+{
+	struct qib_devdata *dd = private2dd(file);
+	char *tmp;
+	int ret;
+
+	if (dd->num_pports < 2)
+		return -ENODEV;
+
+	tmp = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!tmp)
+		return -ENOMEM;
+
+	ret = qib_qsfp_dump(dd->pport + 1, tmp, PAGE_SIZE);
+	if (ret > 0)
+		ret = simple_read_from_buffer(buf, count, ppos, tmp, ret);
+	kfree(tmp);
+	return ret;
+}
+
+static const struct file_operations qsfp_ops[] = {
+	{ .read = qsfp_1_read, .llseek = generic_file_llseek, },
+	{ .read = qsfp_2_read, .llseek = generic_file_llseek, },
 };
 
 static ssize_t flash_read(struct file *file, char __user *buf,
@@ -352,15 +407,25 @@ static int add_cntr_files(struct super_block *sb, struct qib_devdata *dd)
 		goto bail;
 	}
 	for (i = 1; i <= dd->num_pports; i++) {
-		char portcntr[24];
+		char fname[24];
 
-		sprintf(portcntr, "port%dcounters", i);
+		sprintf(fname, "port%dcounters", i);
 		/* create the files in the new directory */
-		ret = create_file(portcntr, S_IFREG|S_IRUGO, dir, &tmp,
+		ret = create_file(fname, S_IFREG|S_IRUGO, dir, &tmp,
 				  &portcntr_ops[i], dd);
 		if (ret) {
 			printk(KERN_ERR "create_file(%s/%s) failed: %d\n",
-				unit, portcntr, ret);
+				unit, fname, ret);
+			goto bail;
+		}
+		if (!(dd->flags & QIB_HAS_QSFP))
+			continue;
+		sprintf(fname, "qsfp%d", i);
+		ret = create_file(fname, S_IFREG|S_IRUGO, dir, &tmp,
+				  &qsfp_ops[i - 1], dd);
+		if (ret) {
+			printk(KERN_ERR "create_file(%s/%s) failed: %d\n",
+				unit, fname, ret);
 			goto bail;
 		}
 	}
@@ -430,10 +495,14 @@ static int remove_device_files(struct super_block *sb,
 	remove_file(dir, "counter_names");
 	remove_file(dir, "portcounter_names");
 	for (i = 0; i < dd->num_pports; i++) {
-		char portcntr[24];
+		char fname[24];
 
-		sprintf(portcntr, "port%dcounters", i + 1);
-		remove_file(dir, portcntr);
+		sprintf(fname, "port%dcounters", i + 1);
+		remove_file(dir, fname);
+		if (dd->flags & QIB_HAS_QSFP) {
+			sprintf(fname, "qsfp%d", i + 1);
+			remove_file(dir, fname);
+		}
 	}
 	remove_file(dir, "flash");
 	d_delete(dir);
@@ -473,10 +542,8 @@ static int qibfs_fill_super(struct super_block *sb, void *data, int silent)
 	list_for_each_entry_safe(dd, tmp, &qib_dev_list, list) {
 		spin_unlock_irqrestore(&qib_devs_lock, flags);
 		ret = add_cntr_files(sb, dd);
-		if (ret) {
-			deactivate_super(sb);
+		if (ret)
 			goto bail;
-		}
 		spin_lock_irqsave(&qib_devs_lock, flags);
 	}
 

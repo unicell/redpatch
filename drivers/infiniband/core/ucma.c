@@ -39,6 +39,8 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <linux/miscdevice.h>
+#include <linux/slab.h>
+#include <linux/sysctl.h>
 
 #include <rdma/rdma_user_cm.h>
 #include <rdma/ib_marshall.h>
@@ -49,8 +51,24 @@ MODULE_AUTHOR("Sean Hefty");
 MODULE_DESCRIPTION("RDMA Userspace Connection Manager Access");
 MODULE_LICENSE("Dual BSD/GPL");
 
-enum {
-	UCMA_MAX_BACKLOG	= 128
+static unsigned int max_backlog = 1024;
+
+static struct ctl_table_header *ucma_ctl_table_hdr;
+static ctl_table ucma_ctl_table[] = {
+	{
+		.procname	= "max_backlog",
+		.data		= &max_backlog,
+		.maxlen		= sizeof max_backlog,
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{ }
+};
+
+static struct ctl_path ucma_ctl_path[] = {
+	{ .procname = "net" },
+	{ .procname = "rdma_ucm" },
+	{ }
 };
 
 struct ucma_file {
@@ -583,7 +601,7 @@ static void ucma_copy_ib_route(struct rdma_ucm_query_route_resp *resp,
 }
 
 static void ucma_copy_iboe_route(struct rdma_ucm_query_route_resp *resp,
-				   struct rdma_route *route)
+				 struct rdma_route *route)
 {
 	struct rdma_dev_addr *dev_addr;
 	struct net_device *dev;
@@ -594,17 +612,15 @@ static void ucma_copy_iboe_route(struct rdma_ucm_query_route_resp *resp,
 	case 0:
 		dev_addr = &route->addr.dev_addr;
 		dev = dev_get_by_index(&init_net, dev_addr->bound_dev_if);
-		if (dev) {
-#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
-			vid = vlan_dev_vlan_id(dev);
-#endif
-			dev_put(dev);
-		}
+			if (dev) {
+				vid = rdma_vlan_dev_vlan_id(dev);
+				dev_put(dev);
+			}
 
 		iboe_mac_vlan_to_ll((union ib_gid *) &resp->ib_route[0].dgid,
 				    dev_addr->dst_dev_addr, vid);
 		iboe_addr_get_sgid(dev_addr,
-				 (union ib_gid *) &resp->ib_route[0].sgid);
+				   (union ib_gid *) &resp->ib_route[0].sgid);
 		resp->ib_route[0].pkey = cpu_to_be16(0xffff);
 		break;
 	case 2:
@@ -655,7 +671,7 @@ static ssize_t ucma_query_route(struct ucma_file *file,
 	resp.node_guid = (__force __u64) ctx->cm_id->device->node_guid;
 	resp.port_num = ctx->cm_id->port_num;
 	if (rdma_node_get_transport(ctx->cm_id->device->node_type) == RDMA_TRANSPORT_IB) {
-		switch (rdma_port_link_layer(ctx->cm_id->device, ctx->cm_id->port_num)) {
+		switch (rdma_port_get_link_layer(ctx->cm_id->device, ctx->cm_id->port_num)) {
 		case IB_LINK_LAYER_INFINIBAND:
 			ucma_copy_ib_route(&resp, &ctx->cm_id->route);
 			break;
@@ -728,8 +744,8 @@ static ssize_t ucma_listen(struct ucma_file *file, const char __user *inbuf,
 	if (IS_ERR(ctx))
 		return PTR_ERR(ctx);
 
-	ctx->backlog = cmd.backlog > 0 && cmd.backlog < UCMA_MAX_BACKLOG ?
-		       cmd.backlog : UCMA_MAX_BACKLOG;
+	ctx->backlog = cmd.backlog > 0 && cmd.backlog < max_backlog ?
+		       cmd.backlog : max_backlog;
 	ret = rdma_listen(ctx->cm_id, ctx->backlog);
 	ucma_put_ctx(ctx);
 	return ret;
@@ -1262,7 +1278,8 @@ static int ucma_open(struct inode *inode, struct file *filp)
 
 	filp->private_data = file;
 	file->filp = filp;
-	return 0;
+
+	return nonseekable_open(inode, filp);
 }
 
 static int ucma_close(struct inode *inode, struct file *filp)
@@ -1292,6 +1309,7 @@ static const struct file_operations ucma_fops = {
 	.release = ucma_close,
 	.write	 = ucma_write,
 	.poll    = ucma_poll,
+	.llseek	 = no_llseek,
 };
 
 static struct miscdevice ucma_misc = {
@@ -1319,16 +1337,26 @@ static int __init ucma_init(void)
 	ret = device_create_file(ucma_misc.this_device, &dev_attr_abi_version);
 	if (ret) {
 		printk(KERN_ERR "rdma_ucm: couldn't create abi_version attr\n");
-		goto err;
+		goto err1;
+	}
+
+	ucma_ctl_table_hdr = register_sysctl_paths(ucma_ctl_path, ucma_ctl_table);
+	if (!ucma_ctl_table_hdr) {
+		printk(KERN_ERR "rdma_ucm: couldn't register sysctl paths\n");
+		ret = -ENOMEM;
+		goto err2;
 	}
 	return 0;
-err:
+err2:
+	device_remove_file(ucma_misc.this_device, &dev_attr_abi_version);
+err1:
 	misc_deregister(&ucma_misc);
 	return ret;
 }
 
 static void __exit ucma_cleanup(void)
 {
+	unregister_sysctl_table(ucma_ctl_table_hdr);
 	device_remove_file(ucma_misc.this_device, &dev_attr_abi_version);
 	misc_deregister(&ucma_misc);
 	idr_destroy(&ctx_idr);

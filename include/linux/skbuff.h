@@ -392,7 +392,9 @@ struct sk_buff {
 	};
 
 	__u16			vlan_tci;
-
+#ifndef __GENKSYMS__
+	__u16			rxhash;
+#endif
 	sk_buff_data_t		transport_header;
 	sk_buff_data_t		network_header;
 	sk_buff_data_t		mac_header;
@@ -2041,6 +2043,9 @@ static inline bool skb_rx_queue_recorded(const struct sk_buff *skb)
 
 extern u16 skb_tx_hash(const struct net_device *dev,
 		       const struct sk_buff *skb);
+extern u16 __skb_tx_hash(const struct net_device *dev,
+			 const struct sk_buff *skb,
+			 unsigned int num_tx_queues);
 
 #ifdef CONFIG_XFRM
 static inline struct sec_path *skb_sec_path(struct sk_buff *skb)
@@ -2083,6 +2088,21 @@ static inline void skb_forward_csum(struct sk_buff *skb)
 	/* Unfortunately we don't support this one.  Any brave souls? */
 	if (skb->ip_summed == CHECKSUM_COMPLETE)
 		skb->ip_summed = CHECKSUM_NONE;
+}
+
+/**
+ * skb_checksum_none_assert - make sure skb ip_summed is CHECKSUM_NONE
+ * @skb: skb to check
+ *
+ * fresh skbs have their ip_summed set to CHECKSUM_NONE.
+ * Instead of forcing ip_summed to CHECKSUM_NONE, we can
+ * use this helper, to document places where we make this assertion.
+ */
+static inline void skb_checksum_none_assert(struct sk_buff *skb)
+{
+#ifdef DEBUG
+	BUG_ON(skb->ip_summed != CHECKSUM_NONE);
+#endif
 }
 
 bool skb_partial_csum_set(struct sk_buff *skb, u16 start, u16 off);

@@ -112,7 +112,7 @@ enum mlx4_ib_qp_flags {
 	MLX4_IB_QP_BLOCK_MULTICAST_LOOPBACK	= 1 << 1,
 };
 
-struct gid_entry {
+struct mlx4_ib_gid_entry {
 	struct list_head	list;
 	union ib_gid		gid;
 	int			added;
@@ -334,14 +334,11 @@ int mlx4_ib_fmr_dealloc(struct ib_fmr *fmr);
 int mlx4_ib_resolve_grh(struct mlx4_ib_dev *dev, const struct ib_ah_attr *ah_attr,
 			u8 *mac, int *is_mcast, u8 port);
 
-int mlx4_ib_get_eth_l2_addr(struct ib_device *device, u8 port, union ib_gid *dgid,
-			    int sgid_idx, u8 *mac, u16 *vlan_id);
-
 static inline int mlx4_ib_ah_grh_present(struct mlx4_ib_ah *ah)
 {
 	u8 port = be32_to_cpu(ah->av.ib.port_pd) >> 24 & 3;
 
-	if (rdma_port_link_layer(ah->ibah.device, port) == IB_LINK_LAYER_ETHERNET)
+	if (rdma_port_get_link_layer(ah->ibah.device, port) == IB_LINK_LAYER_ETHERNET)
 		return 1;
 
 	return !!(ah->av.ib.g_slid & 0x80);

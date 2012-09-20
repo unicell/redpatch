@@ -30,6 +30,7 @@ struct compact_control {
 	unsigned long nr_migratepages;	/* Number of pages to migrate */
 	unsigned long free_pfn;		/* isolate_freepages search base */
 	unsigned long migrate_pfn;	/* isolate_migratepages search base */
+	bool sync;			/* Synchronous migration */
 
 	/* Account for isolated anon and file pages */
 	unsigned long nr_anon;
@@ -38,6 +39,8 @@ struct compact_control {
 	unsigned int order;		/* order a direct compactor needs */
 	int migratetype;		/* MOVABLE, RECLAIMABLE etc */
 	struct zone *zone;
+
+	int compact_mode;
 };
 
 static unsigned long release_freepages(struct list_head *freelist)
@@ -147,7 +150,6 @@ static void isolate_freepages(struct zone *zone,
 	 * pages on cc->migratepages. We stop searching if the migrate
 	 * and free page scanners meet or enough free pages are isolated.
 	 */
-	spin_lock_irqsave(&zone->lock, flags);
 	for (; pfn > low_pfn && cc->nr_migratepages > nr_freepages;
 					pfn -= pageblock_nr_pages) {
 		unsigned long isolated;
@@ -170,9 +172,19 @@ static void isolate_freepages(struct zone *zone,
 		if (!suitable_migration_target(page))
 			continue;
 
-		/* Found a block suitable for isolating free pages from */
-		isolated = isolate_freepages_block(zone, pfn, freelist);
-		nr_freepages += isolated;
+		/*
+		 * Found a block suitable for isolating free pages from. Now
+		 * we disabled interrupts, double check things are ok and
+		 * isolate the pages. This is to minimise the time IRQs
+		 * are disabled
+		 */
+		isolated = 0;
+		spin_lock_irqsave(&zone->lock, flags);
+		if (suitable_migration_target(page)) {
+			isolated = isolate_freepages_block(zone, pfn, freelist);
+			nr_freepages += isolated;
+		}
+		spin_unlock_irqrestore(&zone->lock, flags);
 
 		/*
 		 * Record the highest PFN we isolated pages from. When next
@@ -182,7 +194,6 @@ static void isolate_freepages(struct zone *zone,
 		if (isolated)
 			high_pfn = max(high_pfn, pfn);
 	}
-	spin_unlock_irqrestore(&zone->lock, flags);
 
 	/* split_free_page does not map the pages */
 	list_for_each_entry(page, freelist, lru) {
@@ -234,6 +245,7 @@ static unsigned long isolate_migratepages(struct zone *zone,
 					struct compact_control *cc)
 {
 	unsigned long low_pfn, end_pfn;
+	unsigned long last_pageblock_nr = 0, pageblock_nr;
 	struct list_head *migratelist = &cc->migratepages;
 
 	/* Do not scan outside zone boundaries */
@@ -261,9 +273,27 @@ static unsigned long isolate_migratepages(struct zone *zone,
 	}
 
 	/* Time to isolate some pages for migration */
+	cond_resched();
 	spin_lock_irq(&zone->lru_lock);
 	for (; low_pfn < end_pfn; low_pfn++) {
 		struct page *page;
+		int unlocked = 0;
+
+		/* give a chance to irqs before checking need_resched() */
+		if (!((low_pfn+1) % SWAP_CLUSTER_MAX)) {
+			spin_unlock_irq(&zone->lru_lock);
+			unlocked = 1;
+		}
+		if (need_resched() || spin_is_contended(&zone->lru_lock)) {
+			if (!unlocked)
+				spin_unlock_irq(&zone->lru_lock);
+			cond_resched();
+			spin_lock_irq(&zone->lru_lock);
+			if (fatal_signal_pending(current))
+				break;
+		} else if (unlocked)
+			spin_lock_irq(&zone->lru_lock);
+
 		if (!pfn_valid_within(low_pfn))
 			continue;
 
@@ -271,6 +301,20 @@ static unsigned long isolate_migratepages(struct zone *zone,
 		page = pfn_to_page(low_pfn);
 		if (PageBuddy(page))
 			continue;
+
+		/*
+		 * For async migration, also only scan in MOVABLE blocks. Async
+		 * migration is optimistic to see if the minimum amount of work
+		 * satisfies the allocation
+		 */
+		pageblock_nr = low_pfn >> pageblock_order;
+		if (!cc->sync && last_pageblock_nr != pageblock_nr &&
+				get_pageblock_migratetype(page) != MIGRATE_MOVABLE) {
+			low_pfn += pageblock_nr_pages;
+			low_pfn = ALIGN(low_pfn, pageblock_nr_pages) - 1;
+			last_pageblock_nr = pageblock_nr;
+			continue;
+		}
 
 		if (!PageLRU(page))
 			continue;
@@ -357,10 +401,10 @@ static void update_nr_listpages(struct compact_control *cc)
 }
 
 static int compact_finished(struct zone *zone,
-						struct compact_control *cc)
+			    struct compact_control *cc)
 {
 	unsigned int order;
-	unsigned long watermark = low_wmark_pages(zone) + (1 << cc->order);
+	unsigned long watermark;
 
 	if (fatal_signal_pending(current))
 		return COMPACT_PARTIAL;
@@ -370,6 +414,9 @@ static int compact_finished(struct zone *zone,
 		return COMPACT_COMPLETE;
 
 	/* Compaction run is not finished if the watermark is not met */
+	watermark = low_wmark_pages(zone);
+	watermark += (1 << cc->order);
+
 	if (!zone_watermark_ok(zone, cc->order, watermark, 0, 0))
 		return COMPACT_CONTINUE;
 
@@ -409,7 +456,8 @@ static int compact_zone(struct zone *zone, struct compact_control *cc)
 
 		nr_migrate = cc->nr_migratepages;
 		migrate_pages(&cc->migratepages, compaction_alloc,
-						(unsigned long)cc, 0);
+				(unsigned long)cc, false,
+				cc->sync);
 		update_nr_listpages(cc);
 		nr_remaining = cc->nr_migratepages;
 
@@ -433,8 +481,9 @@ static int compact_zone(struct zone *zone, struct compact_control *cc)
 	return ret;
 }
 
-static unsigned long compact_zone_order(struct zone *zone,
-						int order, gfp_t gfp_mask)
+unsigned long compact_zone_order(struct zone *zone,
+				 int order, gfp_t gfp_mask,
+				 bool sync)
 {
 	struct compact_control cc = {
 		.nr_freepages = 0,
@@ -442,6 +491,7 @@ static unsigned long compact_zone_order(struct zone *zone,
 		.order = order,
 		.migratetype = allocflags_to_migratetype(gfp_mask),
 		.zone = zone,
+		.sync = sync,
 	};
 	INIT_LIST_HEAD(&cc.freepages);
 	INIT_LIST_HEAD(&cc.migratepages);
@@ -457,11 +507,13 @@ int sysctl_extfrag_threshold = 500;
  * @order: The order of the current allocation
  * @gfp_mask: The GFP mask of the current allocation
  * @nodemask: The allowed nodes to allocate from
+ * @sync: Whether migration is synchronous or not
  *
  * This is the main entry point for direct page compaction.
  */
 unsigned long try_to_compact_pages(struct zonelist *zonelist,
-			int order, gfp_t gfp_mask, nodemask_t *nodemask)
+			int order, gfp_t gfp_mask, nodemask_t *nodemask,
+			bool sync)
 {
 	enum zone_type high_zoneidx = gfp_zone(gfp_mask);
 	int may_enter_fs = gfp_mask & __GFP_FS;
@@ -476,7 +528,7 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 	 * made because an assumption is made that the page allocator can satisfy
 	 * the "cheaper" orders without taking special steps
 	 */
-	if (order <= PAGE_ALLOC_COSTLY_ORDER || !may_enter_fs || !may_perform_io)
+	if (!order || !may_enter_fs || !may_perform_io)
 		return rc;
 
 	count_vm_event(COMPACTSTALL);
@@ -517,7 +569,7 @@ unsigned long try_to_compact_pages(struct zonelist *zonelist,
 			break;
 		}
 
-		status = compact_zone_order(zone, order, gfp_mask);
+		status = compact_zone_order(zone, order, gfp_mask, sync);
 		rc = max(status, rc);
 
 		if (zone_watermark_ok(zone, order, watermark, 0, 0))

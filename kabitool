@@ -17,7 +17,7 @@
 
 __author__ = "Jon Masters <jcm@redhat.com>"
 __version__ = "$Revisions: 2.0 $"
-__date__ = "$Date: 2010/09/01 04:58:18 $"
+__date__ = "$Date: 2011/05/10 19:14:23 $"
 __copyright__ = "Copyright (C) 2009 Red Hat, Inc"
 __license__ = "GPL"
 

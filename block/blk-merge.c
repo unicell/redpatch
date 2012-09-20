@@ -180,7 +180,7 @@ new_segment:
 	}
 
 	if (q->dma_drain_size && q->dma_drain_needed(rq)) {
-		if (rq->cmd_flags & REQ_RW)
+		if (rq->cmd_flags & REQ_WRITE)
 			memset(q->dma_drain_buffer, 0, q->dma_drain_size);
 
 		sg->page_link &= ~0x02;
@@ -226,7 +226,7 @@ int ll_back_merge_fn(struct request_queue *q, struct request *req,
 {
 	unsigned short max_sectors;
 
-	if (unlikely(blk_pc_request(req)))
+	if (unlikely(req->cmd_type == REQ_TYPE_BLOCK_PC))
 		max_sectors = queue_max_hw_sectors(q);
 	else
 		max_sectors = queue_max_sectors(q);
@@ -250,7 +250,7 @@ int ll_front_merge_fn(struct request_queue *q, struct request *req,
 {
 	unsigned short max_sectors;
 
-	if (unlikely(blk_pc_request(req)))
+	if (unlikely(req->cmd_type == REQ_TYPE_BLOCK_PC))
 		max_sectors = queue_max_hw_sectors(q);
 	else
 		max_sectors = queue_max_sectors(q);

@@ -68,7 +68,7 @@ enum {
 	MLX4_DEV_CAP_FLAG_RAW_MCAST	= 1 << 19,
 	MLX4_DEV_CAP_FLAG_UD_AV_PORT	= 1 << 20,
 	MLX4_DEV_CAP_FLAG_UD_MCAST	= 1 << 21,
-	MLX4_DEV_CAP_FLAG_IBOE		= 1 << 30,
+	MLX4_DEV_CAP_FLAG_IBOE		= 1 << 30
 };
 
 enum {
@@ -124,8 +124,8 @@ enum {
 	MLX4_OPCODE_RDMA_READ		= 0x10,
 	MLX4_OPCODE_ATOMIC_CS		= 0x11,
 	MLX4_OPCODE_ATOMIC_FA		= 0x12,
-	MLX4_OPCODE_ATOMIC_MASK_CS	= 0x14,
-	MLX4_OPCODE_ATOMIC_MASK_FA	= 0x15,
+	MLX4_OPCODE_MASKED_ATOMIC_CS	= 0x14,
+	MLX4_OPCODE_MASKED_ATOMIC_FA	= 0x15,
 	MLX4_OPCODE_BIND_MW		= 0x18,
 	MLX4_OPCODE_FMR			= 0x19,
 	MLX4_OPCODE_LOCAL_INVAL		= 0x1b,
@@ -157,7 +157,6 @@ enum mlx4_qp_region {
 };
 
 enum mlx4_port_type {
-	MLX4_PORT_TYPE_NONE	= 0,
 	MLX4_PORT_TYPE_IB	= 1,
 	MLX4_PORT_TYPE_ETH	= 2,
 	MLX4_PORT_TYPE_AUTO	= 3
@@ -171,6 +170,10 @@ enum mlx4_special_vlan_idx {
 
 enum {
 	MLX4_NUM_FEXCH          = 64 * 1024,
+};
+
+enum {
+	MLX4_MAX_FAST_REG_PAGES = 511,
 };
 
 static inline u64 mlx4_fw_ver(u64 major, u64 minor, u64 subminor)
@@ -188,10 +191,6 @@ struct mlx4_caps {
 	int			eth_mtu_cap[MLX4_MAX_PORTS + 1];
 	int			gid_table_len[MLX4_MAX_PORTS + 1];
 	int			pkey_table_len[MLX4_MAX_PORTS + 1];
-	int			trans_type[MLX4_MAX_PORTS + 1];
-	int			vendor_oui[MLX4_MAX_PORTS + 1];
-	int			wavelength[MLX4_MAX_PORTS + 1];
-	u64			trans_code[MLX4_MAX_PORTS + 1];
 	int			local_ca_ack_delay;
 	int			num_uars;
 	int			bf_reg_size;
@@ -235,6 +234,7 @@ struct mlx4_caps {
 	u32			bmme_flags;
 	u32			reserved_lkey;
 	u16			stat_rate_support;
+	int			loopback_support;
 	u8			port_width_cap[MLX4_MAX_PORTS + 1];
 	int			max_gso_sz;
 	int                     reserved_qps_cnt[MLX4_NUM_QP_REGION];
@@ -245,7 +245,7 @@ struct mlx4_caps {
 	int                     log_num_prios;
 	enum mlx4_port_type	port_type[MLX4_MAX_PORTS + 1];
 	u8			supported_type[MLX4_MAX_PORTS + 1];
-	enum mlx4_port_type	port_mask[MLX4_MAX_PORTS + 1];
+	u32			port_mask;
 	enum mlx4_port_type	possible_type[MLX4_MAX_PORTS + 1];
 };
 
@@ -392,8 +392,7 @@ struct mlx4_eth_av {
 	u8		dgid[16];
 	u32		reserved4[2];
 	__be16		vlan;
-	u8		mac_0_1[2];
-	u8		mac_2_5[4];
+	u8		mac[6];
 };
 
 union mlx4_ext_av {
@@ -426,12 +425,14 @@ struct mlx4_init_port_param {
 
 #define mlx4_foreach_port(port, dev, type)				\
 	for ((port) = 1; (port) <= (dev)->caps.num_ports; (port)++)	\
-		if ((type) == (dev)->caps.port_mask[(port)])
+		if (((type) == MLX4_PORT_TYPE_IB ? (dev)->caps.port_mask : \
+		     ~(dev)->caps.port_mask) & 1 << ((port) - 1))
 
-#define mlx4_foreach_ib_transport_port(port, dev)                         \
-	for ((port) = 1; (port) <= (dev)->caps.num_ports; (port)++)       \
-		if (((dev)->caps.port_mask[port] == MLX4_PORT_TYPE_IB) || \
-			((dev)->caps.flags & MLX4_DEV_CAP_FLAG_IBOE))
+#define mlx4_foreach_ib_transport_port(port, dev)			\
+	for ((port) = 1; (port) <= (dev)->caps.num_ports; (port)++)	\
+		if (((dev)->caps.port_mask & 1 << ((port) - 1)) ||	\
+		    ((dev)->caps.flags & MLX4_DEV_CAP_FLAG_IBOE))
+
 
 int mlx4_buf_alloc(struct mlx4_dev *dev, int size, int max_direct,
 		   struct mlx4_buf *buf);
@@ -513,5 +514,6 @@ void mlx4_fmr_unmap(struct mlx4_dev *dev, struct mlx4_fmr *fmr,
 		    u32 *lkey, u32 *rkey);
 int mlx4_fmr_free(struct mlx4_dev *dev, struct mlx4_fmr *fmr);
 int mlx4_SYNC_TPT(struct mlx4_dev *dev);
+int mlx4_test_interrupts(struct mlx4_dev *dev);
 
 #endif /* MLX4_DEVICE_H */

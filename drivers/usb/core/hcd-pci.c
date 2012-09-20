@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/usb.h>
+#include <linux/usb/hcd.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -32,7 +33,6 @@
 #endif
 
 #include "usb.h"
-#include "hcd.h"
 
 
 /* PCI-based HCs are common, but plenty of non-PCI HCs are used too */
@@ -251,7 +251,12 @@ static int hcd_pci_suspend(struct device *dev)
 			return retval;
 	}
 
-	synchronize_irq(pci_dev->irq);
+	/* If MSI-X is enabled, the driver will have synchronized all vectors
+	 * in pci_suspend(). If MSI or legacy PCI is enabled, that will be
+	 * synchronized here.
+	 */
+	if (!hcd->msix_enabled)
+		synchronize_irq(pci_dev->irq);
 
 	/* Downstream ports from this root hub should already be quiesced, so
 	 * there will be no DMA activity.  Now we can shut down the upstream

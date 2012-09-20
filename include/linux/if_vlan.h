@@ -121,8 +121,14 @@ extern int __vlan_hwaccel_rx(struct sk_buff *skb, struct vlan_group *grp,
 extern int vlan_hwaccel_do_receive(struct sk_buff *skb);
 extern int vlan_gro_receive(struct napi_struct *napi, struct vlan_group *grp,
 			    unsigned int vlan_tci, struct sk_buff *skb);
+extern gro_result_t
+vlan_gro_receive_gr(struct napi_struct *napi, struct vlan_group *grp,
+		    unsigned int vlan_tci, struct sk_buff *skb);
 extern int vlan_gro_frags(struct napi_struct *napi, struct vlan_group *grp,
 			  unsigned int vlan_tci);
+extern gro_result_t
+vlan_gro_frags_gr(struct napi_struct *napi, struct vlan_group *grp,
+		  unsigned int vlan_tci);
 
 #else
 static inline struct net_device *vlan_dev_real_dev(const struct net_device *dev)
@@ -156,10 +162,24 @@ static inline int vlan_gro_receive(struct napi_struct *napi,
 	return NET_RX_DROP;
 }
 
+static inline gro_result_t
+vlan_gro_receive_gr(struct napi_struct *napi, struct vlan_group *grp,
+		    unsigned int vlan_tci, struct sk_buff *skb)
+{
+	return GRO_DROP;
+}
+
 static inline int vlan_gro_frags(struct napi_struct *napi,
 				 struct vlan_group *grp, unsigned int vlan_tci)
 {
 	return NET_RX_DROP;
+}
+
+static inline gro_result_t
+vlan_gro_frags_gr(struct napi_struct *napi, struct vlan_group *grp,
+		  unsigned int vlan_tci)
+{
+	return GRO_DROP;
 }
 #endif
 
@@ -314,6 +334,31 @@ static inline int vlan_get_tag(const struct sk_buff *skb, u16 *vlan_tci)
 	}
 }
 
+/**
+ * vlan_get_protocol - get protocol EtherType.
+ * @skb: skbuff to query
+ *
+ * Returns the EtherType of the packet, regardless of whether it is
+ * vlan encapsulated (normal or hardware accelerated) or not.
+ */
+static inline __be16 vlan_get_protocol(const struct sk_buff *skb)
+{
+	__be16 protocol = 0;
+
+	if (vlan_tx_tag_present(skb) ||
+	     skb->protocol != cpu_to_be16(ETH_P_8021Q))
+		protocol = skb->protocol;
+	else {
+		__be16 proto, *protop;
+		protop = skb_header_pointer(skb, offsetof(struct vlan_ethhdr,
+						h_vlan_encapsulated_proto),
+						sizeof(proto), &proto);
+		if (likely(protop))
+			protocol = *protop;
+	}
+
+	return protocol;
+}
 #endif /* __KERNEL__ */
 
 /* VLAN IOCTLs are found in sockios.h */

@@ -86,6 +86,7 @@
 #define BOND_LINK_ARP_INTERV	0
 
 static int max_bonds	= BOND_DEFAULT_MAX_BONDS;
+static int tx_queues	= BOND_DEFAULT_TX_QUEUES;
 static int num_grat_arp = 1;
 static int num_unsol_na = 1;
 static int miimon	= BOND_LINK_MON_INTERV;
@@ -94,6 +95,7 @@ static int downdelay;
 static int use_carrier	= 1;
 static char *mode;
 static char *primary;
+static char *primary_reselect;
 static char *lacp_rate;
 static char *ad_select;
 static char *xmit_hash_policy;
@@ -101,10 +103,14 @@ static int arp_interval = BOND_LINK_ARP_INTERV;
 static char *arp_ip_target[BOND_MAX_ARP_TARGETS];
 static char *arp_validate;
 static char *fail_over_mac;
+static int all_slaves_active = 0;
 static struct bond_params bonding_defaults;
+static int resend_igmp = BOND_DEFAULT_RESEND_IGMP;
 
 module_param(max_bonds, int, 0);
 MODULE_PARM_DESC(max_bonds, "Max number of bonded devices");
+module_param(tx_queues, int, 0);
+MODULE_PARM_DESC(tx_queues, "Max number of transmit queues (default = 16)");
 module_param(num_grat_arp, int, 0644);
 MODULE_PARM_DESC(num_grat_arp, "Number of gratuitous ARP packets to send on failover event");
 module_param(num_unsol_na, int, 0644);
@@ -126,6 +132,14 @@ MODULE_PARM_DESC(mode, "Mode of operation : 0 for balance-rr, "
 		       "6 for balance-alb");
 module_param(primary, charp, 0);
 MODULE_PARM_DESC(primary, "Primary network device to use");
+module_param(primary_reselect, charp, 0);
+MODULE_PARM_DESC(primary_reselect, "Reselect primary slave "
+				   "once it comes up; "
+				   "0 for always (default), "
+				   "1 for only if speed of primary is "
+				   "better, "
+				   "2 for only on active slave "
+				   "failure");
 module_param(lacp_rate, charp, 0);
 MODULE_PARM_DESC(lacp_rate, "LACPDU tx rate to request from 802.3ad partner "
 			    "(slow/fast)");
@@ -142,6 +156,12 @@ module_param(arp_validate, charp, 0);
 MODULE_PARM_DESC(arp_validate, "validate src/dst of ARP probes: none (default), active, backup or all");
 module_param(fail_over_mac, charp, 0);
 MODULE_PARM_DESC(fail_over_mac, "For active-backup, do not set all slaves to the same MAC.  none (default), active or follow");
+module_param(all_slaves_active, int, 0);
+MODULE_PARM_DESC(all_slaves_active, "Keep all frames received on an interface"
+				     "by setting active flag for all slaves.  "
+				     "0 for never (default), 1 for always.");
+module_param(resend_igmp, int, 0);
+MODULE_PARM_DESC(resend_igmp, "Number of IGMP membership reports to send on link failure");
 
 /*----------------------------- Global variables ----------------------------*/
 
@@ -197,6 +217,13 @@ const struct bond_parm_tbl fail_over_mac_tbl[] = {
 {	"none",			BOND_FOM_NONE},
 {	"active",		BOND_FOM_ACTIVE},
 {	"follow",		BOND_FOM_FOLLOW},
+{	NULL,			-1},
+};
+
+const struct bond_parm_tbl pri_reselect_tbl[] = {
+{	"always",		BOND_PRI_RESELECT_ALWAYS},
+{	"better",		BOND_PRI_RESELECT_BETTER},
+{	"failure",		BOND_PRI_RESELECT_FAILURE},
 {	NULL,			-1},
 };
 
@@ -867,18 +894,13 @@ static void bond_mc_delete(struct bonding *bond, void *addr, int alen)
 }
 
 
-/*
- * Retrieve the list of registered multicast addresses for the bonding
- * device and retransmit an IGMP JOIN request to the current active
- * slave.
- */
-static void bond_resend_igmp_join_requests(struct bonding *bond)
+static void __bond_resend_igmp_join_requests(struct net_device *dev)
 {
 	struct in_device *in_dev;
 	struct ip_mc_list *im;
 
 	rcu_read_lock();
-	in_dev = __in_dev_get_rcu(bond->dev);
+	in_dev = __in_dev_get_rcu(dev);
 	if (in_dev) {
 		for (im = in_dev->mc_list; im; im = im->next)
 			ip_mc_rejoin_group(im);
@@ -929,6 +951,44 @@ static int bond_mc_list_copy(struct dev_mc_list *mc_list, struct bonding *bond,
 	}
 
 	return 0;
+}
+
+/*
+ * Retrieve the list of registered multicast addresses for the bonding
+ * device and retransmit an IGMP JOIN request to the current active
+ * slave.
+ */
+static void bond_resend_igmp_join_requests(struct bonding *bond)
+{
+	struct net_device *vlan_dev;
+	struct vlan_entry *vlan;
+
+	read_lock(&bond->lock);
+
+	/* rejoin all groups on bond device */
+	__bond_resend_igmp_join_requests(bond->dev);
+
+	/* rejoin all groups on vlan devices */
+	if (bond->vlgrp) {
+		list_for_each_entry(vlan, &bond->vlan_list, vlan_list) {
+			vlan_dev = vlan_group_get_device(bond->vlgrp,
+							 vlan->vlan_id);
+			if (vlan_dev)
+				__bond_resend_igmp_join_requests(vlan_dev);
+		}
+	}
+
+	if (--bond->igmp_retrans > 0)
+		queue_delayed_work(bond->wq, &bond->mcast_work, HZ/5);
+
+	read_unlock(&bond->lock);
+}
+
+void bond_resend_igmp_join_requests_delayed(struct work_struct *work)
+{
+	struct bonding *bond = container_of(work, struct bonding,
+							mcast_work.work);
+	bond_resend_igmp_join_requests(bond);
 }
 
 /*
@@ -992,7 +1052,6 @@ static void bond_mc_swap(struct bonding *bond, struct slave *new_active,
 		for (dmi = bond->dev->mc_list; dmi; dmi = dmi->next)
 			dev_mc_add(new_active->dev, dmi->dmi_addr,
 				   dmi->dmi_addrlen, 0);
-		bond_resend_igmp_join_requests(bond);
 	}
 }
 
@@ -1075,6 +1134,25 @@ out:
 
 }
 
+static bool bond_should_change_active(struct bonding *bond)
+{
+	struct slave *prim = bond->primary_slave;
+	struct slave *curr = bond->curr_active_slave;
+
+	if (!prim || !curr || curr->link != BOND_LINK_UP)
+		return true;
+	if (bond->force_primary) {
+		bond->force_primary = false;
+		return true;
+	}
+	if (bond->params.primary_reselect == BOND_PRI_RESELECT_BETTER &&
+	    (prim->speed < curr->speed ||
+	     (prim->speed == curr->speed && prim->duplex <= curr->duplex)))
+		return false;
+	if (bond->params.primary_reselect == BOND_PRI_RESELECT_FAILURE)
+		return false;
+	return true;
+}
 
 /**
  * find_best_interface - select the best available slave to be the active one
@@ -1099,7 +1177,8 @@ static struct slave *bond_find_best_slave(struct bonding *bond)
 	}
 
 	if ((bond->primary_slave) &&
-	    bond->primary_slave->link == BOND_LINK_UP) {
+	    bond->primary_slave->link == BOND_LINK_UP &&
+	    bond_should_change_active(bond)) {
 		new_active = bond->primary_slave;
 	}
 
@@ -1199,11 +1278,13 @@ void bond_change_active_slave(struct bonding *bond, struct slave *new_active)
 				bond_do_fail_over_mac(bond, new_active,
 						      old_active);
 
-			bond->send_grat_arp = bond->params.num_grat_arp;
-			bond_send_gratuitous_arp(bond);
+			if (netif_running(bond->dev)) {
+				bond->send_grat_arp = bond->params.num_grat_arp;
+				bond_send_gratuitous_arp(bond);
 
-			bond->send_unsol_na = bond->params.num_unsol_na;
-			bond_send_unsolicited_na(bond);
+				bond->send_unsol_na = bond->params.num_unsol_na;
+				bond_send_unsolicited_na(bond);
+			}
 
 			write_unlock_bh(&bond->curr_slave_lock);
 			read_unlock(&bond->lock);
@@ -1215,9 +1296,13 @@ void bond_change_active_slave(struct bonding *bond, struct slave *new_active)
 		}
 	}
 
-	/* resend IGMP joins since all were sent on curr_active_slave */
-	if (bond->params.mode == BOND_MODE_ROUNDROBIN) {
-		bond_resend_igmp_join_requests(bond);
+	/* resend IGMP joins since active slave has changed or
+	 * all were sent on curr_active_slave */
+	if (((USES_PRIMARY(bond->params.mode) && new_active) ||
+	     bond->params.mode == BOND_MODE_ROUNDROBIN) &&
+	    netif_running(bond->dev)) {
+		bond->igmp_retrans = bond->params.resend_igmp;
+		queue_delayed_work(bond->wq, &bond->mcast_work, 0);
 	}
 }
 
@@ -1523,6 +1608,13 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 	new_slave->original_flags = slave_dev->flags;
 
 	/*
+	 * Set the new_slave's queue_id to be zero.  Queue ID mapping
+	 * is set via sysfs or module option if desired.
+	*/
+	new_slave->queue_id = 0;
+
+
+	/*
 	 * Save slave's original ("permanent") mac address for modes
 	 * that need it, and for restoring it upon release, and then
 	 * set it to the master's address
@@ -1688,8 +1780,10 @@ int bond_enslave(struct net_device *bond_dev, struct net_device *slave_dev)
 
 	if (USES_PRIMARY(bond->params.mode) && bond->params.primary[0]) {
 		/* if there is a primary slave, remember it */
-		if (strcmp(bond->params.primary, new_slave->dev->name) == 0)
+		if (strcmp(bond->params.primary, new_slave->dev->name) == 0) {
 			bond->primary_slave = new_slave;
+			bond->force_primary = true;
+		}
 	}
 
 	write_lock_bh(&bond->curr_slave_lock);
@@ -3261,11 +3355,14 @@ static void bond_info_show_master(struct seq_file *seq)
 	}
 
 	if (USES_PRIMARY(bond->params.mode)) {
-		seq_printf(seq, "Primary Slave: %s\n",
+		seq_printf(seq, "Primary Slave: %s",
 			   (bond->primary_slave) ?
 			   bond->primary_slave->dev->name : "None");
+		if (bond->primary_slave)
+			seq_printf(seq, " (primary_reselect %s)",
+		   pri_reselect_tbl[bond->params.primary_reselect].modename);
 
-		seq_printf(seq, "Currently Active Slave: %s\n",
+		seq_printf(seq, "\nCurrently Active Slave: %s\n",
 			   (curr) ? curr->dev->name : "None");
 	}
 
@@ -3349,6 +3446,7 @@ static void bond_info_show_slave(struct seq_file *seq,
 		else
 			seq_puts(seq, "Aggregator ID: N/A\n");
 	}
+	seq_printf(seq, "Slave queue ID: %d\n", slave->queue_id);
 }
 
 static int bond_info_seq_show(struct seq_file *seq, void *v)
@@ -3779,6 +3877,8 @@ static int bond_open(struct net_device *bond_dev)
 
 	bond->kill_timers = 0;
 
+	INIT_DELAYED_WORK(&bond->mcast_work, bond_resend_igmp_join_requests_delayed);
+
 	if (bond_is_lb(bond)) {
 		/* bond_alb_initialize must be called before the timer
 		 * is started.
@@ -3863,6 +3963,8 @@ static int bond_close(struct net_device *bond_dev)
 		break;
 	}
 
+	if (delayed_work_pending(&bond->mcast_work))
+		cancel_delayed_work(&bond->mcast_work);
 
 	if (bond_is_lb(bond)) {
 		/* Must be called only after all
@@ -4482,9 +4584,66 @@ static void bond_set_xmit_hash_policy(struct bonding *bond)
 	}
 }
 
+/*
+ * Lookup the slave that corresponds to a qid
+ */
+static inline int bond_slave_override(struct bonding *bond,
+				      struct sk_buff *skb)
+{
+	int i, res = 1;
+	struct slave *slave = NULL;
+	struct slave *check_slave;
+
+	read_lock(&bond->lock);
+
+	if (!BOND_IS_OK(bond) || !skb->queue_mapping)
+		goto out;
+
+	/* Find out if any slaves have the same mapping as this skb. */
+	bond_for_each_slave(bond, check_slave, i) {
+		if (check_slave->queue_id == skb->queue_mapping) {
+			slave = check_slave;
+			break;
+		}
+	}
+
+	/* If the slave isn't UP, use default transmit policy. */
+	if (slave && slave->queue_id && IS_UP(slave->dev) &&
+	    (slave->link == BOND_LINK_UP)) {
+		res = bond_dev_queue_xmit(bond, skb, slave->dev);
+	}
+
+out:
+	read_unlock(&bond->lock);
+	return res;
+}
+
+static u16 bond_select_queue(struct net_device *dev, struct sk_buff *skb)
+{
+	/*
+	 * This helper function exists to help dev_pick_tx get the correct
+	 * destination queue.  Using a helper function skips a call to
+	 * skb_tx_hash and will put the skbs in the queue we expect on their
+	 * way down to the bonding driver.
+	 */
+	u16 txq = skb_rx_queue_recorded(skb) ? skb_get_rx_queue(skb) : 0;
+
+	if (unlikely(txq >= dev->real_num_tx_queues)) {
+		do
+			txq -= dev->real_num_tx_queues;
+		while (txq >= dev->real_num_tx_queues);
+	}
+	return txq;
+}
+
 static netdev_tx_t bond_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	const struct bonding *bond = netdev_priv(dev);
+	struct bonding *bond = netdev_priv(dev);
+
+	if (TX_QUEUE_OVERRIDE(bond->params.mode)) {
+		if (!bond_slave_override(bond, skb))
+			return NETDEV_TX_OK;
+	}
 
 	switch (bond->params.mode) {
 	case BOND_MODE_ROUNDROBIN:
@@ -4571,6 +4730,7 @@ static const struct net_device_ops bond_netdev_ops = {
 	.ndo_open		= bond_open,
 	.ndo_stop		= bond_close,
 	.ndo_start_xmit		= bond_start_xmit,
+	.ndo_select_queue	= bond_select_queue,
 	.ndo_get_stats		= bond_get_stats,
 	.ndo_do_ioctl		= bond_do_ioctl,
 	.ndo_set_multicast_list	= bond_set_multicast_list,
@@ -4655,6 +4815,9 @@ static void bond_work_cancel_all(struct bonding *bond)
 	if (bond->params.mode == BOND_MODE_8023AD &&
 	    delayed_work_pending(&bond->ad_work))
 		cancel_delayed_work(&bond->ad_work);
+
+	if (delayed_work_pending(&bond->mcast_work))
+		cancel_delayed_work(&bond->mcast_work);
 }
 
 /* De-initialize device specific data.
@@ -4727,7 +4890,7 @@ int bond_parse_parm(const char *buf, const struct bond_parm_tbl *tbl)
 
 static int bond_check_params(struct bond_params *params)
 {
-	int arp_validate_value, fail_over_mac_value;
+	int arp_validate_value, fail_over_mac_value, primary_reselect_value;
 
 	/*
 	 * Convert string parameters.
@@ -4859,6 +5022,27 @@ static int bond_check_params(struct bond_params *params)
 			pr_warning("Forcing miimon to 100msec\n");
 			miimon = 100;
 		}
+	}
+
+	if (tx_queues < 1 || tx_queues > 255) {
+		pr_warning("Warning: tx_queues (%d) should be between "
+			   "1 and 255, resetting to %d\n",
+			   tx_queues, BOND_DEFAULT_TX_QUEUES);
+		tx_queues = BOND_DEFAULT_TX_QUEUES;
+	}
+
+	if ((all_slaves_active != 0) && (all_slaves_active != 1)) {
+		pr_warning("Warning: all_slaves_active module parameter (%d), "
+			   "not of valid value (0/1), so it was set to "
+			   "0\n", all_slaves_active);
+		all_slaves_active = 0;
+	}
+
+	if (resend_igmp < 0 || resend_igmp > 255) {
+		pr_warning("Warning: resend_igmp (%d) should be between "
+			   "0 and 255, resetting to %d\n",
+			   resend_igmp, BOND_DEFAULT_RESEND_IGMP);
+		resend_igmp = BOND_DEFAULT_RESEND_IGMP;
 	}
 
 	/* reset values for TLB/ALB */
@@ -5026,6 +5210,20 @@ static int bond_check_params(struct bond_params *params)
 		primary = NULL;
 	}
 
+	if (primary && primary_reselect) {
+		primary_reselect_value = bond_parse_parm(primary_reselect,
+							 pri_reselect_tbl);
+		if (primary_reselect_value == -1) {
+			pr_err(DRV_NAME
+			       ": Error: Invalid primary_reselect \"%s\"\n",
+			       primary_reselect ==
+					NULL ? "NULL" : primary_reselect);
+			return -EINVAL;
+		}
+	} else {
+		primary_reselect_value = BOND_PRI_RESELECT_ALWAYS;
+	}
+
 	if (fail_over_mac) {
 		fail_over_mac_value = bond_parse_parm(fail_over_mac,
 						      fail_over_mac_tbl);
@@ -5057,7 +5255,11 @@ static int bond_check_params(struct bond_params *params)
 	params->use_carrier = use_carrier;
 	params->lacp_fast = lacp_fast;
 	params->primary[0] = 0;
+	params->primary_reselect = primary_reselect_value;
 	params->fail_over_mac = fail_over_mac_value;
+	params->tx_queues = tx_queues;
+	params->all_slaves_active = all_slaves_active;
+	params->resend_igmp = resend_igmp;
 
 	if (primary) {
 		strncpy(params->primary, primary, IFNAMSIZ);
@@ -5130,8 +5332,8 @@ int bond_create(const char *name)
 		goto out_rtnl;
 	}
 
-	bond_dev = alloc_netdev(sizeof(struct bonding), name ? name : "",
-				bond_setup);
+	bond_dev = alloc_netdev_mq(sizeof(struct bonding), name ? name : "",
+				bond_setup, tx_queues);
 	if (!bond_dev) {
 		pr_err(DRV_NAME ": %s: eek! can't alloc netdev!\n",
 		       name);

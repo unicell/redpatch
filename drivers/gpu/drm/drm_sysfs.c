@@ -14,6 +14,7 @@
 
 #include <linux/device.h>
 #include <linux/kdev_t.h>
+#include <linux/gfp.h>
 #include <linux/err.h>
 
 #include "drm_sysfs.h"
@@ -159,8 +160,15 @@ static ssize_t status_show(struct device *device,
 {
 	struct drm_connector *connector = to_drm_connector(device);
 	enum drm_connector_status status;
+	int ret;
 
-	status = connector->funcs->detect(connector);
+	ret = mutex_lock_interruptible(&connector->dev->mode_config.mutex);
+	if (ret)
+		return ret;
+
+	status = connector->funcs->detect(connector, true);
+	mutex_unlock(&connector->dev->mode_config.mutex);
+
 	return snprintf(buf, PAGE_SIZE, "%s\n",
 			drm_get_connector_status_name(status));
 }
@@ -490,7 +498,8 @@ int drm_sysfs_device_add(struct drm_minor *minor)
 	int err;
 	char *minor_str;
 
-	minor->kdev.parent = &minor->dev->pdev->dev;
+	minor->kdev.parent = minor->dev->dev;
+
 	minor->kdev.class = drm_class;
 	minor->kdev.release = drm_sysfs_device_release;
 	minor->kdev.devt = minor->device;
