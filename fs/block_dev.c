@@ -83,7 +83,7 @@ int set_blocksize(struct block_device *bdev, int size)
 		return -EINVAL;
 
 	/* Prevent starting I/O or mapping the device */
-	down_write(&bdev->bd_block_size_semaphore);
+	percpu_down_write(&bdev->bd_block_size_semaphore);
 
 	/* Check that the block device is not memory mapped */
 	mapping = bdev->bd_inode->i_mapping;
@@ -91,7 +91,7 @@ int set_blocksize(struct block_device *bdev, int size)
 	if (!prio_tree_empty(&mapping->i_mmap) ||
 	    !list_empty(&mapping->i_mmap_nonlinear)) {
 		mutex_unlock(&mapping->i_mmap_mutex);
-		up_write(&bdev->bd_block_size_semaphore);
+		percpu_up_write(&bdev->bd_block_size_semaphore);
 		return -EBUSY;
 	}
 	mutex_unlock(&mapping->i_mmap_mutex);
@@ -104,7 +104,7 @@ int set_blocksize(struct block_device *bdev, int size)
 		kill_bdev(bdev);
 	}
 
-	up_write(&bdev->bd_block_size_semaphore);
+	percpu_up_write(&bdev->bd_block_size_semaphore);
 
 	return 0;
 }
@@ -460,12 +460,20 @@ static struct inode *bdev_alloc_inode(struct super_block *sb)
 	struct bdev_inode *ei = kmem_cache_alloc(bdev_cachep, GFP_KERNEL);
 	if (!ei)
 		return NULL;
+
+	if (unlikely(percpu_init_rwsem(&ei->bdev.bd_block_size_semaphore))) {
+		kmem_cache_free(bdev_cachep, ei);
+		return NULL;
+	}
+
 	return &ei->vfs_inode;
 }
 
 static void bdev_destroy_inode(struct inode *inode)
 {
 	struct bdev_inode *bdi = BDEV_I(inode);
+
+	percpu_free_rwsem(&bdi->bdev.bd_block_size_semaphore);
 
 	kmem_cache_free(bdev_cachep, bdi);
 }
@@ -485,7 +493,6 @@ static void init_once(void *foo)
 	inode_init_once(&ei->vfs_inode);
 	/* Initialize mutex for freeze. */
 	mutex_init(&bdev->bd_fsfreeze_mutex);
-	init_rwsem(&bdev->bd_block_size_semaphore);
 }
 
 static inline void __bd_forget(struct inode *inode)
@@ -1461,11 +1468,11 @@ ssize_t blkdev_aio_read(struct kiocb *iocb, const struct iovec *iov,
 	ssize_t ret;
 	struct block_device *bdev = I_BDEV(iocb->ki_filp->f_mapping->host);
 
-	down_read(&bdev->bd_block_size_semaphore);
+	percpu_down_read(&bdev->bd_block_size_semaphore);
 
 	ret = generic_file_aio_read(iocb, iov, nr_segs, pos);
 
-	up_read(&bdev->bd_block_size_semaphore);
+	percpu_up_read(&bdev->bd_block_size_semaphore);
 
 	return ret;
 }
@@ -1487,7 +1494,7 @@ ssize_t blkdev_aio_write(struct kiocb *iocb, const struct iovec *iov,
 
 	BUG_ON(iocb->ki_pos != pos);
 
-	down_read(&bdev->bd_block_size_semaphore);
+	percpu_down_read(&bdev->bd_block_size_semaphore);
 
 	ret = __generic_file_aio_write(iocb, iov, nr_segs, &iocb->ki_pos);
 	if (ret > 0 || ret == -EIOCBQUEUED) {
@@ -1498,7 +1505,7 @@ ssize_t blkdev_aio_write(struct kiocb *iocb, const struct iovec *iov,
 			ret = err;
 	}
 
-	up_read(&bdev->bd_block_size_semaphore);
+	percpu_up_read(&bdev->bd_block_size_semaphore);
 
 	return ret;
 }
@@ -1509,11 +1516,11 @@ int blkdev_mmap(struct file *file, struct vm_area_struct *vma)
 	int ret;
 	struct block_device *bdev = I_BDEV(file->f_mapping->host);
 
-	down_read(&bdev->bd_block_size_semaphore);
+	percpu_down_read(&bdev->bd_block_size_semaphore);
 
 	ret = generic_file_mmap(file, vma);
 
-	up_read(&bdev->bd_block_size_semaphore);
+	percpu_up_read(&bdev->bd_block_size_semaphore);
 
 	return ret;
 }
