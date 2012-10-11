@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2004-2009 Emulex.  All rights reserved.           *
+ * Copyright (C) 2004-2010 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -25,12 +25,14 @@
 #include <linux/blkdev.h>
 #include <linux/pci.h>
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <linux/utsname.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_transport_fc.h>
+#include <scsi/fc/fc_fs.h>
 
 #include "lpfc_hw4.h"
 #include "lpfc_hw.h"
@@ -87,7 +89,6 @@ void
 lpfc_ct_unsol_event(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 		    struct lpfc_iocbq *piocbq)
 {
-
 	struct lpfc_dmabuf *mp = NULL;
 	IOCB_t *icmd = &piocbq->iocb;
 	int i;
@@ -97,7 +98,8 @@ lpfc_ct_unsol_event(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 	struct list_head head;
 	struct lpfc_dmabuf *bdeBuf;
 
-	lpfc_bsg_ct_unsol_event(phba, pring, piocbq);
+	if (lpfc_bsg_ct_unsol_event(phba, pring, piocbq) == 0)
+		return;
 
 	if (unlikely(icmd->ulpStatus == IOSTAT_NEED_BUFFER)) {
 		lpfc_sli_hbqbuf_add_hbqs(phba, LPFC_ELS_HBQ);
@@ -158,6 +160,40 @@ lpfc_ct_unsol_event(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 		}
 		list_del(&head);
 	}
+}
+
+/**
+ * lpfc_sli4_ct_abort_unsol_event - Default handle for sli4 unsol abort
+ * @phba: Pointer to HBA context object.
+ * @pring: Pointer to the driver internal I/O ring.
+ * @piocbq: Pointer to the IOCBQ.
+ *
+ * This function serves as the default handler for the sli4 unsolicited
+ * abort event. It shall be invoked when there is no application interface
+ * registered unsolicited abort handler. This handler does nothing but
+ * just simply releases the dma buffer used by the unsol abort event.
+ **/
+void
+lpfc_sli4_ct_abort_unsol_event(struct lpfc_hba *phba,
+			       struct lpfc_sli_ring *pring,
+			       struct lpfc_iocbq *piocbq)
+{
+	IOCB_t *icmd = &piocbq->iocb;
+	struct lpfc_dmabuf *bdeBuf;
+	uint32_t size;
+
+	/* Forward abort event to any process registered to receive ct event */
+	if (lpfc_bsg_ct_unsol_event(phba, pring, piocbq) == 0)
+		return;
+
+	/* If there is no BDE associated with IOCB, there is nothing to do */
+	if (icmd->ulpBdeCount == 0)
+		return;
+	bdeBuf = piocbq->context2;
+	piocbq->context2 = NULL;
+	size  = icmd->un.cont64[0].tus.f.bdeSize;
+	lpfc_ct_unsol_buffer(phba, piocbq, bdeBuf, size);
+	lpfc_in_buf_free(phba, bdeBuf);
 }
 
 static void
@@ -304,8 +340,8 @@ lpfc_gen_req(struct lpfc_vport *vport, struct lpfc_dmabuf *bmp,
 	/* Fill in rest of iocb */
 	icmd->un.genreq64.w5.hcsw.Fctl = (SI | LA);
 	icmd->un.genreq64.w5.hcsw.Dfctl = 0;
-	icmd->un.genreq64.w5.hcsw.Rctl = FC_UNSOL_CTL;
-	icmd->un.genreq64.w5.hcsw.Type = FC_COMMON_TRANSPORT_ULP;
+	icmd->un.genreq64.w5.hcsw.Rctl = FC_RCTL_DD_UNSOL_CTL;
+	icmd->un.genreq64.w5.hcsw.Type = FC_TYPE_CT;
 
 	if (!tmo) {
 		 /* FC spec states we need 3 * ratov for CT requests */
@@ -363,9 +399,14 @@ lpfc_ct_cmd(struct lpfc_vport *vport, struct lpfc_dmabuf *inmp,
 	outmp = lpfc_alloc_ct_rsp(phba, cmdcode, bpl, rsp_size, &cnt);
 	if (!outmp)
 		return -ENOMEM;
-
+	/*
+	 * Form the CT IOCB.  The total number of BDEs in this IOCB
+	 * is the single command plus response count from
+	 * lpfc_alloc_ct_rsp.
+	 */
+	cnt += 1;
 	status = lpfc_gen_req(vport, bmp, inmp, outmp, cmpl, ndlp, 0,
-			      cnt+1, 0, retry);
+			      cnt, 0, retry);
 	if (status) {
 		lpfc_free_ct_rsp(phba, outmp);
 		return -ENOMEM;
@@ -501,6 +542,9 @@ lpfc_ns_rsp(struct lpfc_vport *vport, struct lpfc_dmabuf *mp, uint32_t Size)
 							SLI_CTNS_GFF_ID,
 							0, Did) == 0)
 							vport->num_disc_nodes++;
+						else
+							lpfc_setup_disc_node
+								(vport, Did);
 					}
 					else {
 						lpfc_debugfs_disc_trc(vport,
@@ -546,6 +590,8 @@ lpfc_cmpl_ct_cmd_gid_ft(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	struct lpfc_sli_ct_request *CTrsp;
 	struct lpfc_nodelist *ndlp;
 	int rc;
+
+	phba->ns_cnt--;
 
 	/* First save ndlp, before we overwrite it */
 	ndlp = cmdiocb->context_un.ndlp;
@@ -705,6 +751,8 @@ lpfc_cmpl_ct_cmd_gff_id(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	int did, rc, retry;
 	uint8_t fbits;
 	struct lpfc_nodelist *ndlp;
+
+	phba->ns_cnt--;
 
 	did = ((struct lpfc_sli_ct_request *) inp->virt)->un.gff.PortId;
 	did = be32_to_cpu(did);
@@ -891,6 +939,8 @@ lpfc_cmpl_ct_cmd_rft_id(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	IOCB_t *irsp = &rspiocb->iocb;
 	struct lpfc_vport *vport = cmdiocb->vport;
 
+	phba->ns_cnt--;
+
 	if (irsp->ulpStatus == IOSTAT_SUCCESS) {
 		struct lpfc_dmabuf *outp;
 		struct lpfc_sli_ct_request *CTrsp;
@@ -911,6 +961,8 @@ lpfc_cmpl_ct_cmd_rnn_id(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 {
 	IOCB_t *irsp = &rspiocb->iocb;
 	struct lpfc_vport *vport = cmdiocb->vport;
+
+	phba->ns_cnt--;
 
 	if (irsp->ulpStatus == IOSTAT_SUCCESS) {
 		struct lpfc_dmabuf *outp;
@@ -933,6 +985,8 @@ lpfc_cmpl_ct_cmd_rspn_id(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	IOCB_t *irsp = &rspiocb->iocb;
 	struct lpfc_vport *vport = cmdiocb->vport;
 
+	phba->ns_cnt--;
+
 	if (irsp->ulpStatus == IOSTAT_SUCCESS) {
 		struct lpfc_dmabuf *outp;
 		struct lpfc_sli_ct_request *CTrsp;
@@ -954,6 +1008,8 @@ lpfc_cmpl_ct_cmd_rsnn_nn(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	IOCB_t *irsp = &rspiocb->iocb;
 	struct lpfc_vport *vport = cmdiocb->vport;
 
+	phba->ns_cnt--;
+
 	if (irsp->ulpStatus == IOSTAT_SUCCESS) {
 		struct lpfc_dmabuf *outp;
 		struct lpfc_sli_ct_request *CTrsp;
@@ -974,6 +1030,8 @@ lpfc_cmpl_ct_cmd_da_id(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 {
 	struct lpfc_vport *vport = cmdiocb->vport;
 
+	phba->ns_cnt--;
+
 	/* even if it fails we will act as though it succeeded. */
 	vport->ct_flags = 0;
 	lpfc_cmpl_ct(phba, cmdiocb, rspiocb);
@@ -986,6 +1044,8 @@ lpfc_cmpl_ct_cmd_rff_id(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 {
 	IOCB_t *irsp = &rspiocb->iocb;
 	struct lpfc_vport *vport = cmdiocb->vport;
+
+	phba->ns_cnt--;
 
 	if (irsp->ulpStatus == IOSTAT_SUCCESS) {
 		struct lpfc_dmabuf *outp;
@@ -1209,7 +1269,7 @@ lpfc_ns_cmd(struct lpfc_vport *vport, int cmdcode,
 		    be16_to_cpu(SLI_CTNS_RFF_ID);
 		CtReq->un.rff.PortId = cpu_to_be32(vport->fc_myDID);
 		CtReq->un.rff.fbits = FC4_FEATURE_INIT;
-		CtReq->un.rff.type_code = FC_FCP_DATA;
+		CtReq->un.rff.type_code = FC_TYPE_FCP;
 		cmpl = lpfc_cmpl_ct_cmd_rff_id;
 		break;
 	}
@@ -1221,6 +1281,8 @@ lpfc_ns_cmd(struct lpfc_vport *vport, int cmdcode,
 		lpfc_debugfs_disc_trc(vport, LPFC_DISC_TRC_CT,
 			"Issue CT cmd:    cmd:x%x did:x%x",
 			cmdcode, ndlp->nlp_DID, 0);
+		if (++phba->ns_cnt > phba->ns_max)
+			phba->ns_max = phba->ns_cnt;
 		return 0;
 	}
 	rc=6;
@@ -1802,12 +1864,7 @@ lpfc_decode_firmware_rev(struct lpfc_hba *phba, char *fwrevision, int flag)
 		c  = (rev & 0x0000ff00) >> 8;
 		b4 = (rev & 0x000000ff);
 
-		if (flag)
-			sprintf(fwrevision, "%d.%d%d%c%d ", b1,
-				b2, b3, c, b4);
-		else
-			sprintf(fwrevision, "%d.%d%d%c%d ", b1,
-				b2, b3, c, b4);
+		sprintf(fwrevision, "%d.%d%d%c%d", b1, b2, b3, c, b4);
 	}
 	return;
 }

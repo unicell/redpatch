@@ -283,7 +283,8 @@ static inline int fbcon_is_inactive(struct vc_data *vc, struct fb_info *info)
 	struct fbcon_ops *ops = info->fbcon_par;
 
 	return (info->state != FBINFO_STATE_RUNNING ||
-		vc->vc_mode != KD_TEXT || ops->graphics);
+		vc->vc_mode != KD_TEXT || ops->graphics) &&
+		!vt_force_oops_output(vc);
 }
 
 static inline int get_color(struct vc_data *vc, struct fb_info *info,
@@ -634,13 +635,15 @@ static void fbcon_prepare_logo(struct vc_data *vc, struct fb_info *info,
 		kfree(save);
 	}
 
-	if (logo_lines > vc->vc_bottom) {
-		logo_shown = FBCON_LOGO_CANSHOW;
-		printk(KERN_INFO
-		       "fbcon_init: disable boot-logo (boot-logo bigger than screen).\n");
-	} else if (logo_shown != FBCON_LOGO_DONTSHOW) {
-		logo_shown = FBCON_LOGO_DRAW;
-		vc->vc_top = logo_lines;
+	if (logo_shown != FBCON_LOGO_DONTSHOW) {
+		if (logo_lines > vc->vc_bottom) {
+			logo_shown = FBCON_LOGO_CANSHOW;
+			printk(KERN_INFO
+			       "fbcon_init: disable boot-logo (boot-logo bigger than screen).\n");
+		} else {
+			logo_shown = FBCON_LOGO_DRAW;
+			vc->vc_top = logo_lines;
+		}
 	}
 }
 #endif /* MODULE */
@@ -1073,6 +1076,7 @@ static void fbcon_init(struct vc_data *vc, int init)
 	if (p->userfont)
 		charcnt = FNTCHARCNT(p->fontdata);
 
+	vc->vc_panic_force_write = !!(info->flags & FBINFO_CAN_FORCE_OUTPUT);
 	vc->vc_can_do_color = (fb_get_color_depth(&info->var, &info->fix)!=1);
 	vc->vc_complement_mask = vc->vc_can_do_color ? 0x7700 : 0x0800;
 	if (charcnt == 256) {
@@ -3525,6 +3529,14 @@ static int __init fb_console_init(void)
 	fbcon_start();
 	return 0;
 }
+
+static int __init quiet_logo(char *str)
+{
+	logo_shown = FBCON_LOGO_DONTSHOW;
+	return 0;
+}
+
+early_param("quiet", quiet_logo);
 
 module_init(fb_console_init);
 

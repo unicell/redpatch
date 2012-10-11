@@ -75,6 +75,12 @@ enum rdma_transport_type {
 enum rdma_transport_type
 rdma_node_get_transport(enum rdma_node_type node_type) __attribute_const__;
 
+enum rdma_link_layer {
+	IB_LINK_LAYER_UNSPECIFIED,
+	IB_LINK_LAYER_INFINIBAND,
+	IB_LINK_LAYER_ETHERNET,
+};
+
 enum ib_device_cap_flags {
 	IB_DEVICE_RESIZE_MAX_WR		= 1,
 	IB_DEVICE_BAD_PKEY_CNTR		= (1<<1),
@@ -298,6 +304,7 @@ struct ib_port_attr {
 	u8			active_width;
 	u8			active_speed;
 	u8                      phys_state;
+	enum rdma_link_layer	link_layer;
 };
 
 enum ib_device_modify_flags {
@@ -984,9 +991,9 @@ struct ib_device {
 	struct list_head              event_handler_list;
 	spinlock_t                    event_handler_lock;
 
+	spinlock_t                    client_data_lock;
 	struct list_head              core_list;
 	struct list_head              client_data_list;
-	spinlock_t                    client_data_lock;
 
 	struct ib_cache               cache;
 	int                          *pkey_tbl_len;
@@ -1003,6 +1010,8 @@ struct ib_device {
 	int		           (*query_port)(struct ib_device *device,
 						 u8 port_num,
 						 struct ib_port_attr *port_attr);
+	enum rdma_link_layer	   (*get_link_layer)(struct ib_device *device,
+						     u8 port_num);
 	int		           (*query_gid)(struct ib_device *device,
 						u8 port_num, int index,
 						union ib_gid *gid);
@@ -1130,6 +1139,11 @@ struct ib_device {
 						  struct ib_grh *in_grh,
 						  struct ib_mad *in_mad,
 						  struct ib_mad *out_mad);
+	int			   (*get_eth_l2_addr)(struct ib_device *device,
+						      u8 port,
+						      union ib_gid *dgid,
+						      int sgid_idx, u8 *mac,
+						      u16 *vlan_id);
 
 	struct ib_dma_mapping_ops   *dma_ops;
 
@@ -1144,8 +1158,8 @@ struct ib_device {
 		IB_DEV_UNREGISTERED
 	}                            reg_state;
 
-	u64			     uverbs_cmd_mask;
 	int			     uverbs_abi_ver;
+	u64			     uverbs_cmd_mask;
 
 	char			     node_desc[64];
 	__be64			     node_guid;
@@ -1186,6 +1200,15 @@ static inline int ib_copy_to_udata(struct ib_udata *udata, void *src, size_t len
 }
 
 /**
+ * ib_sysfs_create_port_files - iterate over port sysfs directories
+ * @device: the IB device
+ * @create: a function to create sysfs files in each port directory
+ */
+int ib_sysfs_create_port_files(struct ib_device *device,
+			       int (*create)(struct ib_device *dev, u8 port_num,
+					     struct kobject *kobj));
+
+/**
  * ib_modify_qp_is_ok - Check that the supplied attribute mask
  * contains all required attributes and no attributes not allowed for
  * the given QP state transition.
@@ -1212,6 +1235,9 @@ int ib_query_device(struct ib_device *device,
 
 int ib_query_port(struct ib_device *device,
 		  u8 port_num, struct ib_port_attr *port_attr);
+
+enum rdma_link_layer rdma_port_link_layer(struct ib_device *device,
+					  u8 port_num);
 
 int ib_query_gid(struct ib_device *device,
 		 u8 port_num, int index, union ib_gid *gid);
@@ -1425,6 +1451,11 @@ int ib_destroy_qp(struct ib_qp *qp);
  * @send_wr: A list of work requests to post on the send queue.
  * @bad_send_wr: On an immediate failure, this parameter will reference
  *   the work request that failed to be posted on the QP.
+ *
+ * While IBA Vol. 1 section 11.4.1.1 specifies that if an immediate
+ * error is returned, the QP state shall not be affected,
+ * ib_post_send() will return an immediate error after queueing any
+ * earlier work requests in the list.
  */
 static inline int ib_post_send(struct ib_qp *qp,
 			       struct ib_send_wr *send_wr,
@@ -2030,5 +2061,17 @@ int ib_attach_mcast(struct ib_qp *qp, union ib_gid *gid, u16 lid);
  * @lid: Multicast group LID in host byte order.
  */
 int ib_detach_mcast(struct ib_qp *qp, union ib_gid *gid, u16 lid);
+
+/**
+  * ib_get_eth_l2_addr - get the mac and vlan id for the specified gid
+  * @device: IB device used for traffic
+  * @port: port number used.
+  * @gid: gid to be resolved into mac
+  * @sgid_idx: index to port's gid table for the corresponding address vector
+  * @mac: mac of the port bearing this gid
+  * @vlan_id: vlan to be used to reach this gid
+  */
+int ib_get_eth_l2_addr(struct ib_device *device, u8 port, union ib_gid *gid,
+		       int sgid_idx, u8 *mac, __u16 *vlan_id);
 
 #endif /* IB_VERBS_H */

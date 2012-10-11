@@ -11,6 +11,7 @@
  * Written by: Anil Veerabhadrappa (anilgv@broadcom.com)
  */
 
+#include <linux/gfp.h>
 #include <scsi/scsi_tcq.h>
 #include <scsi/libiscsi.h>
 #include "bnx2i.h"
@@ -133,20 +134,38 @@ void bnx2i_arm_cq_event_coalescing(struct bnx2i_endpoint *ep, u8 action)
 {
 	struct bnx2i_5771x_cq_db *cq_db;
 	u16 cq_index;
+	u16 next_index;
+	u32 num_active_cmds;
 
+
+	/* Coalesce CQ entries only on 10G devices */
 	if (!test_bit(BNX2I_NX2_DEV_57710, &ep->hba->cnic_dev_type))
 		return;
 
+	/* Do not update CQ DB multiple times before firmware writes
+	 * '0xFFFF' to CQDB->SQN field. Deviation may cause spurious
+	 * interrupts and other unwanted results
+	 */
+	cq_db = (struct bnx2i_5771x_cq_db *) ep->qp.cq_pgtbl_virt;
+	if (cq_db->sqn[0] && cq_db->sqn[0] != 0xFFFF)
+		return;
+
 	if (action == CNIC_ARM_CQE) {
-		cq_index = ep->qp.cqe_exp_seq_sn +
-			   ep->num_active_cmds / event_coal_div;
-		cq_index %= (ep->qp.cqe_size * 2 + 1);
-		if (!cq_index) {
+		num_active_cmds = ep->num_active_cmds;
+		if (num_active_cmds <= event_coal_min)
+			next_index = 1;
+		else
+			next_index = event_coal_min +
+				(num_active_cmds - event_coal_min) / event_coal_div;
+		if (!next_index)
+			next_index = 1;
+		cq_index = ep->qp.cqe_exp_seq_sn + next_index - 1;
+		if (cq_index > ep->qp.cqe_size * 2)
+			cq_index -= ep->qp.cqe_size * 2;
+		if (!cq_index)
 			cq_index = 1;
-			cq_db = (struct bnx2i_5771x_cq_db *)
-					ep->qp.cq_pgtbl_virt;
-			cq_db->sqn[0] = cq_index;
-		}
+
+		cq_db->sqn[0] = cq_index;
 	}
 }
 
@@ -328,6 +347,7 @@ int bnx2i_send_iscsi_login(struct bnx2i_conn *bnx2i_conn,
 
 	login_wqe->cmd_sn = be32_to_cpu(login_hdr->cmdsn);
 	login_wqe->exp_stat_sn = be32_to_cpu(login_hdr->exp_statsn);
+	login_wqe->flags = ISCSI_LOGIN_REQUEST_UPDATE_EXP_STAT_SN;
 
 	login_wqe->resp_bd_list_addr_lo = (u32) bnx2i_conn->gen_pdu.resp_bd_dma;
 	login_wqe->resp_bd_list_addr_hi =
@@ -337,7 +357,6 @@ int bnx2i_send_iscsi_login(struct bnx2i_conn *bnx2i_conn,
 		 (bnx2i_conn->gen_pdu.resp_buf_size <<
 		  ISCSI_LOGIN_REQUEST_RESP_BUFFER_LENGTH_SHIFT));
 	login_wqe->resp_buffer = dword;
-	login_wqe->flags = 0;
 	login_wqe->bd_list_addr_lo = (u32) bnx2i_conn->gen_pdu.req_bd_dma;
 	login_wqe->bd_list_addr_hi =
 		(u32) ((u64) bnx2i_conn->gen_pdu.req_bd_dma >> 32);
@@ -366,6 +385,7 @@ int bnx2i_send_iscsi_tmf(struct bnx2i_conn *bnx2i_conn,
 	struct bnx2i_cmd *bnx2i_cmd;
 	struct bnx2i_tmf_request *tmfabort_wqe;
 	u32 dword;
+	u32 scsi_lun[2];
 
 	bnx2i_cmd = (struct bnx2i_cmd *)mtask->dd_data;
 	tmfabort_hdr = (struct iscsi_tm *)mtask->hdr;
@@ -376,27 +396,35 @@ int bnx2i_send_iscsi_tmf(struct bnx2i_conn *bnx2i_conn,
 	tmfabort_wqe->op_attr = 0;
 	tmfabort_wqe->op_attr =
 		ISCSI_TMF_REQUEST_ALWAYS_ONE | ISCSI_TM_FUNC_ABORT_TASK;
-	tmfabort_wqe->lun[0] = be32_to_cpu(tmfabort_hdr->lun[0]);
-	tmfabort_wqe->lun[1] = be32_to_cpu(tmfabort_hdr->lun[1]);
 
 	tmfabort_wqe->itt = (mtask->itt | (ISCSI_TASK_TYPE_MPATH << 14));
 	tmfabort_wqe->reserved2 = 0;
 	tmfabort_wqe->cmd_sn = be32_to_cpu(tmfabort_hdr->cmdsn);
 
 	ctask = iscsi_itt_to_task(conn, tmfabort_hdr->rtt);
-	if (!ctask || ctask->sc)
+	if (!ctask || !ctask->sc)
 		/*
 		 * the iscsi layer must have completed the cmd while this
 		 * was starting up.
+		 *
+		 * Note: In the case of a SCSI cmd timeout, the task's sc
+		 *       is still active; hence ctask->sc != 0
+		 *       In this case, the task must be aborted
 		 */
 		return 0;
+
 	ref_sc = ctask->sc;
+
+	/* Retrieve LUN directly from the ref_sc */
+	int_to_scsilun(ref_sc->device->lun, (struct scsi_lun *) scsi_lun);
+	tmfabort_wqe->lun[0] = be32_to_cpu(scsi_lun[0]);
+	tmfabort_wqe->lun[1] = be32_to_cpu(scsi_lun[1]);
 
 	if (ref_sc->sc_data_direction == DMA_TO_DEVICE)
 		dword = (ISCSI_TASK_TYPE_WRITE << ISCSI_CMD_REQUEST_TYPE_SHIFT);
 	else
 		dword = (ISCSI_TASK_TYPE_READ << ISCSI_CMD_REQUEST_TYPE_SHIFT);
-	tmfabort_wqe->ref_itt = (dword | tmfabort_hdr->rtt);
+	tmfabort_wqe->ref_itt = (dword | (tmfabort_hdr->rtt & ISCSI_ITT_MASK));
 	tmfabort_wqe->ref_cmd_sn = be32_to_cpu(tmfabort_hdr->refcmdsn);
 
 	tmfabort_wqe->bd_list_addr_lo = (u32) bnx2i_conn->hba->mp_bd_dma;
@@ -1480,7 +1508,7 @@ static void bnx2i_process_nopin_local_cmpl(struct iscsi_session *session,
 	task = iscsi_itt_to_task(conn,
 				 nop_in->itt & ISCSI_NOP_IN_MSG_INDEX);
 	if (task)
-		iscsi_put_task(task);
+		__iscsi_put_task(task);
 	spin_unlock(&session->lock);
 }
 
@@ -1516,11 +1544,9 @@ static int bnx2i_process_nopin_mesg(struct iscsi_session *session,
 	struct iscsi_task *task;
 	struct bnx2i_nop_in_msg *nop_in;
 	struct iscsi_nopin *hdr;
-	u32 itt;
 	int tgt_async_nop = 0;
 
 	nop_in = (struct bnx2i_nop_in_msg *)cqe;
-	itt = nop_in->itt & ISCSI_NOP_IN_MSG_INDEX;
 
 	spin_lock(&session->lock);
 	hdr = (struct iscsi_nopin *)&bnx2i_conn->gen_pdu.resp_hdr;
@@ -1530,7 +1556,7 @@ static int bnx2i_process_nopin_mesg(struct iscsi_session *session,
 	hdr->exp_cmdsn = cpu_to_be32(nop_in->exp_cmd_sn);
 	hdr->ttt = cpu_to_be32(nop_in->ttt);
 
-	if (itt == (u16) RESERVED_ITT) {
+	if (nop_in->itt == (u16) RESERVED_ITT) {
 		bnx2i_unsol_pdu_adjust_rq(bnx2i_conn);
 		hdr->itt = RESERVED_ITT;
 		tgt_async_nop = 1;
@@ -1538,7 +1564,8 @@ static int bnx2i_process_nopin_mesg(struct iscsi_session *session,
 	}
 
 	/* this is a response to one of our nop-outs */
-	task = iscsi_itt_to_task(conn, itt);
+	task = iscsi_itt_to_task(conn,
+				 (u32) (nop_in->itt & ISCSI_NOP_IN_MSG_INDEX));
 	if (task) {
 		hdr->flags = ISCSI_FLAG_CMD_FINAL;
 		hdr->itt = task->hdr->itt;
@@ -1688,9 +1715,17 @@ static void bnx2i_process_new_cqes(struct bnx2i_conn *bnx2i_conn)
 		if (nopin->cq_req_sn != qp->cqe_exp_seq_sn)
 			break;
 
-		if (unlikely(test_bit(ISCSI_SUSPEND_BIT, &conn->suspend_rx)))
+		if (unlikely(test_bit(ISCSI_SUSPEND_BIT, &conn->suspend_rx))) {
+			if (nopin->op_code == ISCSI_OP_NOOP_IN) {
+				printk(KERN_ALERT "bnx2i: Unsolicited "
+					"NOP-In detected for suspended "
+					"Connection dev=%s!\n",
+					bnx2i_conn->hba->netdev->name);
+				bnx2i_unsol_pdu_adjust_rq(bnx2i_conn);
+				goto cqe_out;
+			}
 			break;
-
+		}
 		tgt_async_msg = 0;
 
 		switch (nopin->op_code) {
@@ -1737,10 +1772,9 @@ static void bnx2i_process_new_cqes(struct bnx2i_conn *bnx2i_conn)
 			printk(KERN_ALERT "bnx2i: unknown opcode 0x%x\n",
 					  nopin->op_code);
 		}
-
 		if (!tgt_async_msg)
 			bnx2i_conn->ep->num_active_cmds--;
-
+cqe_out:
 		/* clear out in production version only, till beta keep opcode
 		 * field intact, will be helpful in debugging (context dump)
 		 * nopin->op_code = 0;

@@ -53,9 +53,10 @@ extern struct iwl_cfg iwl4965_agn_cfg;
 extern struct iwl_cfg iwl5300_agn_cfg;
 extern struct iwl_cfg iwl5100_agn_cfg;
 extern struct iwl_cfg iwl5350_agn_cfg;
-extern struct iwl_cfg iwl5100_bg_cfg;
+extern struct iwl_cfg iwl5100_bgn_cfg;
 extern struct iwl_cfg iwl5100_abg_cfg;
 extern struct iwl_cfg iwl5150_agn_cfg;
+extern struct iwl_cfg iwl5150_abg_cfg;
 extern struct iwl_cfg iwl6000h_2agn_cfg;
 extern struct iwl_cfg iwl6000i_2agn_cfg;
 extern struct iwl_cfg iwl6000_3agn_cfg;
@@ -184,6 +185,10 @@ struct iwl_queue {
 	int n_bd;              /* number of BDs in this queue */
 	int write_ptr;       /* 1-st empty entry (index) host_w*/
 	int read_ptr;         /* last used entry (index) host_r*/
+	/* use for monitoring and recovering the stuck queue */
+	int last_read_ptr;      /* storing the last read_ptr */
+	/* number of time read_ptr and last_read_ptr are the same */
+	u8 repeat_same_read_ptr;
 	dma_addr_t dma_addr;   /* physical addr for BD's */
 	int n_window;	       /* safe queue window */
 	u32 id;
@@ -703,7 +708,7 @@ extern void iwl_txq_ctx_stop(struct iwl_priv *priv);
 extern int iwl_queue_space(const struct iwl_queue *q);
 static inline int iwl_queue_used(const struct iwl_queue *q, int i)
 {
-	return q->write_ptr > q->read_ptr ?
+	return q->write_ptr >= q->read_ptr ?
 		(i >= q->read_ptr && i < q->write_ptr) :
 		!(i < q->read_ptr && i >= q->write_ptr);
 }
@@ -963,6 +968,38 @@ struct traffic_stats {
 
 #define IWL_MAX_NUM_QUEUES	20 /* FIXME: do dynamic allocation */
 
+/*
+ * This is the threshold value of plcp error rate per 100mSecs.  It is
+ * used to set and check for the validity of plcp_delta.
+ */
+#define IWL_MAX_PLCP_ERR_THRESHOLD_MIN	(0)
+#define IWL_MAX_PLCP_ERR_THRESHOLD_DEF	(50)
+#define IWL_MAX_PLCP_ERR_LONG_THRESHOLD_DEF	(100)
+#define IWL_MAX_PLCP_ERR_EXT_LONG_THRESHOLD_DEF	(200)
+#define IWL_MAX_PLCP_ERR_THRESHOLD_MAX	(255)
+
+#define IWL_DELAY_NEXT_FORCE_RF_RESET  (HZ*3)
+#define IWL_DELAY_NEXT_FORCE_FW_RELOAD (HZ*5)
+
+/* timer constants use to monitor and recover stuck tx queues in mSecs */
+#define IWL_MONITORING_PERIOD  (1000)
+#define IWL_ONE_HUNDRED_MSECS   (100)
+#define IWL_SIXTY_SECS          (60000)
+
+enum iwl_reset {
+	IWL_RF_RESET = 0,
+	IWL_FW_RESET,
+	IWL_MAX_FORCE_RESET,
+};
+
+struct iwl_force_reset {
+	int reset_request_count;
+	int reset_success_count;
+	int reset_reject_count;
+	unsigned long reset_duration;
+	unsigned long last_force_reset_jiffies;
+};
+
 struct iwl_priv {
 
 	/* ieee device used by generic ieee processing code */
@@ -991,6 +1028,12 @@ struct iwl_priv {
 	/* ucode beacon time */
 	u32 ucode_beacon_time;
 
+	/* storing the jiffies when the plcp error rate is received */
+	unsigned long plcp_jiffies;
+
+	/* force reset */
+	struct iwl_force_reset force_reset[IWL_MAX_FORCE_RESET];
+
 	/* we allocate array of iwl4965_channel_info for NIC's valid channels.
 	 *    Access via channel # using indirect index array */
 	struct iwl_channel_info *channel_info;	/* channel info array */
@@ -1016,6 +1059,7 @@ struct iwl_priv {
 	void *scan;
 	int scan_bands;
 	struct cfg80211_scan_request *scan_request;
+	bool is_internal_short_scan;
 	u8 scan_tx_ant[IEEE80211_NUM_BANDS];
 	u8 mgmt_tx_ant;
 
@@ -1149,7 +1193,7 @@ struct iwl_priv {
 	u32 last_beacon_time;
 	u64 last_tsf;
 
-	/* eeprom */
+	/* eeprom -- this is in the card's little endian byte order */
 	u8 *eeprom;
 	int    nvm_device_type;
 	struct iwl_eeprom_calib_info *calib_info;
@@ -1162,6 +1206,16 @@ struct iwl_priv {
 	u64 timestamp;
 	u16 beacon_int;
 	struct ieee80211_vif *vif;
+
+	union {
+		struct {
+			/*
+			 * reporting the number of tids has AGG on. 0 means
+			 * no AGGREGATION
+			 */
+			u8 agg_tids_count;
+		} _agn;
+	};
 
 	/*Added for 3945 */
 	void *shared_virt;
@@ -1202,6 +1256,7 @@ struct iwl_priv {
 	struct work_struct tt_work;
 	struct work_struct ct_enter;
 	struct work_struct ct_exit;
+	struct work_struct start_internal_scan;
 
 	struct tasklet_struct irq_tasklet;
 
@@ -1241,6 +1296,7 @@ struct iwl_priv {
 	u32 disable_tx_power_cal;
 	struct work_struct run_time_calib_work;
 	struct timer_list statistics_periodic;
+	struct timer_list monitor_recover;
 	bool hw_ready;
 	/*For 3945*/
 #define IWL_DEFAULT_TX_POWER 0x0F

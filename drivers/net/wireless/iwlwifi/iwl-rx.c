@@ -345,10 +345,10 @@ void iwl_rx_queue_free(struct iwl_priv *priv, struct iwl_rx_queue *rxq)
 		}
 	}
 
-	pci_free_consistent(priv->pci_dev, 4 * RX_QUEUE_SIZE, rxq->bd,
-			    rxq->dma_addr);
-	pci_free_consistent(priv->pci_dev, sizeof(struct iwl_rb_status),
-			    rxq->rb_stts, rxq->rb_stts_dma);
+	dma_free_coherent(&priv->pci_dev->dev, 4 * RX_QUEUE_SIZE, rxq->bd,
+			  rxq->dma_addr);
+	dma_free_coherent(&priv->pci_dev->dev, sizeof(struct iwl_rb_status),
+			  rxq->rb_stts, rxq->rb_stts_dma);
 	rxq->bd = NULL;
 	rxq->rb_stts  = NULL;
 }
@@ -357,7 +357,7 @@ EXPORT_SYMBOL(iwl_rx_queue_free);
 int iwl_rx_queue_alloc(struct iwl_priv *priv)
 {
 	struct iwl_rx_queue *rxq = &priv->rxq;
-	struct pci_dev *dev = priv->pci_dev;
+	struct device *dev = &priv->pci_dev->dev;
 	int i;
 
 	spin_lock_init(&rxq->lock);
@@ -365,12 +365,13 @@ int iwl_rx_queue_alloc(struct iwl_priv *priv)
 	INIT_LIST_HEAD(&rxq->rx_used);
 
 	/* Alloc the circular buffer of Read Buffer Descriptors (RBDs) */
-	rxq->bd = pci_alloc_consistent(dev, 4 * RX_QUEUE_SIZE, &rxq->dma_addr);
+	rxq->bd = dma_alloc_coherent(dev, 4 * RX_QUEUE_SIZE, &rxq->dma_addr,
+				     GFP_KERNEL);
 	if (!rxq->bd)
 		goto err_bd;
 
-	rxq->rb_stts = pci_alloc_consistent(dev, sizeof(struct iwl_rb_status),
-					&rxq->rb_stts_dma);
+	rxq->rb_stts = dma_alloc_coherent(dev, sizeof(struct iwl_rb_status),
+					  &rxq->rb_stts_dma, GFP_KERNEL);
 	if (!rxq->rb_stts)
 		goto err_rb;
 
@@ -387,8 +388,8 @@ int iwl_rx_queue_alloc(struct iwl_priv *priv)
 	return 0;
 
 err_rb:
-	pci_free_consistent(priv->pci_dev, 4 * RX_QUEUE_SIZE, rxq->bd,
-			    rxq->dma_addr);
+	dma_free_coherent(&priv->pci_dev->dev, 4 * RX_QUEUE_SIZE, rxq->bd,
+			  rxq->dma_addr);
 err_bd:
 	return -ENOMEM;
 }
@@ -550,11 +551,105 @@ static void iwl_rx_calc_noise(struct iwl_priv *priv)
 
 #define REG_RECALIB_PERIOD (60)
 
+/**
+ * iwl_good_plcp_health - checks for plcp error.
+ *
+ * When the plcp error is exceeding the thresholds, reset the radio
+ * to improve the throughput.
+ */
+bool iwl_good_plcp_health(struct iwl_priv *priv,
+				struct iwl_rx_packet *pkt)
+{
+	bool rc = true;
+	int combined_plcp_delta;
+	unsigned int plcp_msec;
+	unsigned long plcp_received_jiffies;
+
+	/*
+	 * check for plcp_err and trigger radio reset if it exceeds
+	 * the plcp error threshold plcp_delta.
+	 */
+	plcp_received_jiffies = jiffies;
+	plcp_msec = jiffies_to_msecs((long) plcp_received_jiffies -
+					(long) priv->plcp_jiffies);
+	priv->plcp_jiffies = plcp_received_jiffies;
+	/*
+	 * check to make sure plcp_msec is not 0 to prevent division
+	 * by zero.
+	 */
+	if (plcp_msec) {
+		combined_plcp_delta =
+			(le32_to_cpu(pkt->u.stats.rx.ofdm.plcp_err) -
+			le32_to_cpu(priv->statistics.rx.ofdm.plcp_err)) +
+			(le32_to_cpu(pkt->u.stats.rx.ofdm_ht.plcp_err) -
+			le32_to_cpu(priv->statistics.rx.ofdm_ht.plcp_err));
+
+		if ((combined_plcp_delta > 0) &&
+		    ((combined_plcp_delta * 100) / plcp_msec) >
+			priv->cfg->plcp_delta_threshold) {
+			/*
+			 * if plcp_err exceed the threshold,
+			 * the following data is printed in csv format:
+			 *    Text: plcp_err exceeded %d,
+			 *    Received ofdm.plcp_err,
+			 *    Current ofdm.plcp_err,
+			 *    Received ofdm_ht.plcp_err,
+			 *    Current ofdm_ht.plcp_err,
+			 *    combined_plcp_delta,
+			 *    plcp_msec
+			 */
+			IWL_DEBUG_RADIO(priv, "plcp_err exceeded %u, "
+				"%u, %u, %u, %u, %d, %u mSecs\n",
+				priv->cfg->plcp_delta_threshold,
+				le32_to_cpu(pkt->u.stats.rx.ofdm.plcp_err),
+				le32_to_cpu(priv->statistics.rx.ofdm.plcp_err),
+				le32_to_cpu(pkt->u.stats.rx.ofdm_ht.plcp_err),
+				le32_to_cpu(
+				  priv->statistics.rx.ofdm_ht.plcp_err),
+				combined_plcp_delta, plcp_msec);
+			rc = false;
+		}
+	}
+	return rc;
+}
+EXPORT_SYMBOL(iwl_good_plcp_health);
+
+static void iwl_recover_from_statistics(struct iwl_priv *priv,
+				struct iwl_rx_packet *pkt)
+{
+	if (test_bit(STATUS_EXIT_PENDING, &priv->status))
+		return;
+	if (iwl_is_associated(priv)) {
+		if (priv->cfg->ops->lib->check_ack_health) {
+			if (!priv->cfg->ops->lib->check_ack_health(
+			    priv, pkt)) {
+				/*
+				 * low ack count detected
+				 * restart Firmware
+				 */
+				IWL_ERR(priv, "low ack count detected, "
+					"restart firmware\n");
+				iwl_force_reset(priv, IWL_FW_RESET);
+			}
+		} else if (priv->cfg->ops->lib->check_plcp_health) {
+			if (!priv->cfg->ops->lib->check_plcp_health(
+			    priv, pkt)) {
+				/*
+				 * high plcp error detected
+				 * reset Radio
+				 */
+				iwl_force_reset(priv, IWL_RF_RESET);
+			}
+		}
+	}
+}
+
 void iwl_rx_statistics(struct iwl_priv *priv,
 			      struct iwl_rx_mem_buffer *rxb)
 {
 	int change;
 	struct iwl_rx_packet *pkt = (struct iwl_rx_packet *)rxb->skb->data;
+
 
 	IWL_DEBUG_RX(priv, "Statistics notification received (%d vs %d).\n",
 		     (int)sizeof(priv->statistics),
@@ -565,6 +660,8 @@ void iwl_rx_statistics(struct iwl_priv *priv,
 		  ((priv->statistics.flag &
 		    STATISTICS_REPLY_FLG_HT40_MODE_MSK) !=
 		   (pkt->u.stats.flag & STATISTICS_REPLY_FLG_HT40_MODE_MSK)));
+
+	iwl_recover_from_statistics(priv, pkt);
 
 	memcpy(&priv->statistics, &pkt->u.stats, sizeof(priv->statistics));
 

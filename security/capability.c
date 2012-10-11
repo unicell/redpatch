@@ -303,12 +303,13 @@ static int cap_path_rename(struct path *old_path, struct dentry *old_dentry,
 	return 0;
 }
 
+#endif
+
 static int cap_path_truncate(struct path *path, loff_t length,
 			     unsigned int time_attrs)
 {
 	return 0;
 }
-#endif
 
 static int cap_file_permission(struct file *file, int mask)
 {
@@ -405,7 +406,7 @@ static int cap_kernel_create_files_as(struct cred *new, struct inode *inode)
 	return 0;
 }
 
-static int cap_kernel_module_request(void)
+static int cap_kernel_module_request(char *kmod_name)
 {
 	return 0;
 }
@@ -450,7 +451,8 @@ static int cap_task_getioprio(struct task_struct *p)
 	return 0;
 }
 
-static int cap_task_setrlimit(unsigned int resource, struct rlimit *new_rlim)
+static int cap_task_setrlimit(struct task_struct *p, unsigned int resource,
+		struct rlimit *new_rlim)
 {
 	return 0;
 }
@@ -976,8 +978,8 @@ void security_fixup_ops(struct security_operations *ops)
 	set_to_cap_if_null(ops, path_symlink);
 	set_to_cap_if_null(ops, path_link);
 	set_to_cap_if_null(ops, path_rename);
-	set_to_cap_if_null(ops, path_truncate);
 #endif
+	set_to_cap_if_null(ops, path_truncate);
 	set_to_cap_if_null(ops, file_permission);
 	set_to_cap_if_null(ops, file_alloc_security);
 	set_to_cap_if_null(ops, file_free_security);

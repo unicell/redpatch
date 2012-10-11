@@ -45,17 +45,6 @@ static unsigned long reset_value[NUM_VIRT_COUNTERS];
 
 #ifdef CONFIG_OPROFILE_IBS
 
-/* IbsFetchCtl bits/masks */
-#define IBS_FETCH_RAND_EN		(1ULL<<57)
-#define IBS_FETCH_VAL			(1ULL<<49)
-#define IBS_FETCH_ENABLE		(1ULL<<48)
-#define IBS_FETCH_CNT_MASK		0xFFFF0000ULL
-
-/*IbsOpCtl bits */
-#define IBS_OP_CNT_CTL			(1ULL<<19)
-#define IBS_OP_VAL			(1ULL<<18)
-#define IBS_OP_ENABLE			(1ULL<<17)
-
 #define IBS_FETCH_SIZE			6
 #define IBS_OP_SIZE			12
 
@@ -76,19 +65,6 @@ static struct op_ibs_config ibs_config;
 
 #ifdef CONFIG_OPROFILE_EVENT_MULTIPLEX
 
-static void op_mux_fill_in_addresses(struct op_msrs * const msrs)
-{
-	int i;
-
-	for (i = 0; i < NUM_VIRT_COUNTERS; i++) {
-		int hw_counter = op_x86_virt_to_phys(i);
-		if (reserve_perfctr_nmi(MSR_K7_PERFCTR0 + i))
-			msrs->multiplex[i].addr = MSR_K7_PERFCTR0 + hw_counter;
-		else
-			msrs->multiplex[i].addr = 0;
-	}
-}
-
 static void op_mux_switch_ctrl(struct op_x86_model_spec const *model,
 			       struct op_msrs const * const msrs)
 {
@@ -98,7 +74,7 @@ static void op_mux_switch_ctrl(struct op_x86_model_spec const *model,
 	/* enable active counters */
 	for (i = 0; i < NUM_COUNTERS; ++i) {
 		int virt = op_x86_phys_to_virt(i);
-		if (!counter_config[virt].enabled)
+		if (!reset_value[virt])
 			continue;
 		rdmsrl(msrs->controls[i].addr, val);
 		val &= model->reserved;
@@ -106,10 +82,6 @@ static void op_mux_switch_ctrl(struct op_x86_model_spec const *model,
 		wrmsrl(msrs->controls[i].addr, val);
 	}
 }
-
-#else
-
-static inline void op_mux_fill_in_addresses(struct op_msrs * const msrs) { }
 
 #endif
 
@@ -122,18 +94,12 @@ static void op_amd_fill_in_addresses(struct op_msrs * const msrs)
 	for (i = 0; i < NUM_COUNTERS; i++) {
 		if (reserve_perfctr_nmi(MSR_K7_PERFCTR0 + i))
 			msrs->counters[i].addr = MSR_K7_PERFCTR0 + i;
-		else
-			msrs->counters[i].addr = 0;
 	}
 
 	for (i = 0; i < NUM_CONTROLS; i++) {
 		if (reserve_evntsel_nmi(MSR_K7_EVNTSEL0 + i))
 			msrs->controls[i].addr = MSR_K7_EVNTSEL0 + i;
-		else
-			msrs->controls[i].addr = 0;
 	}
-
-	op_mux_fill_in_addresses(msrs);
 }
 
 static void op_amd_setup_ctrs(struct op_x86_model_spec const *model,
@@ -144,7 +110,8 @@ static void op_amd_setup_ctrs(struct op_x86_model_spec const *model,
 
 	/* setup reset_value */
 	for (i = 0; i < NUM_VIRT_COUNTERS; ++i) {
-		if (counter_config[i].enabled)
+		if (counter_config[i].enabled
+		    && msrs->counters[op_x86_virt_to_phys(i)].addr)
 			reset_value[i] = counter_config[i].count;
 		else
 			reset_value[i] = 0;
@@ -169,9 +136,7 @@ static void op_amd_setup_ctrs(struct op_x86_model_spec const *model,
 	/* enable active counters */
 	for (i = 0; i < NUM_COUNTERS; ++i) {
 		int virt = op_x86_phys_to_virt(i);
-		if (!counter_config[virt].enabled)
-			continue;
-		if (!msrs->counters[i].addr)
+		if (!reset_value[virt])
 			continue;
 
 		/* setup counter registers */
@@ -210,7 +175,7 @@ op_amd_handle_ibs(struct pt_regs * const regs,
 			oprofile_write_commit(&entry);
 
 			/* reenable the IRQ */
-			ctl &= ~(IBS_FETCH_VAL | IBS_FETCH_CNT_MASK);
+			ctl &= ~(IBS_FETCH_VAL | IBS_FETCH_CNT);
 			ctl |= IBS_FETCH_ENABLE;
 			wrmsrl(MSR_AMD64_IBSFETCHCTL, ctl);
 		}
@@ -247,14 +212,14 @@ static inline void op_amd_start_ibs(void)
 {
 	u64 val;
 	if (has_ibs && ibs_config.fetch_enabled) {
-		val = (ibs_config.max_cnt_fetch >> 4) & 0xFFFF;
+		val = (ibs_config.max_cnt_fetch >> 4) & IBS_FETCH_MAX_CNT;
 		val |= ibs_config.rand_en ? IBS_FETCH_RAND_EN : 0;
 		val |= IBS_FETCH_ENABLE;
 		wrmsrl(MSR_AMD64_IBSFETCHCTL, val);
 	}
 
 	if (has_ibs && ibs_config.op_enabled) {
-		val = (ibs_config.max_cnt_op >> 4) & 0xFFFF;
+		val = (ibs_config.max_cnt_op >> 4) & IBS_OP_MAX_CNT;
 		val |= ibs_config.dispatched_ops ? IBS_OP_CNT_CTL : 0;
 		val |= IBS_OP_ENABLE;
 		wrmsrl(MSR_AMD64_IBSOPCTL, val);
@@ -314,7 +279,7 @@ static void op_amd_start(struct op_msrs const * const msrs)
 		if (!reset_value[op_x86_phys_to_virt(i)])
 			continue;
 		rdmsrl(msrs->controls[i].addr, val);
-		val |= ARCH_PERFMON_EVENTSEL0_ENABLE;
+		val |= ARCH_PERFMON_EVENTSEL_ENABLE;
 		wrmsrl(msrs->controls[i].addr, val);
 	}
 
@@ -334,7 +299,7 @@ static void op_amd_stop(struct op_msrs const * const msrs)
 		if (!reset_value[op_x86_phys_to_virt(i)])
 			continue;
 		rdmsrl(msrs->controls[i].addr, val);
-		val &= ~ARCH_PERFMON_EVENTSEL0_ENABLE;
+		val &= ~ARCH_PERFMON_EVENTSEL_ENABLE;
 		wrmsrl(msrs->controls[i].addr, val);
 	}
 
@@ -405,16 +370,6 @@ static int init_ibs_nmi(void)
 		return 1;
 	}
 
-#ifdef CONFIG_NUMA
-	/* Sanity check */
-	/* Works only for 64bit with proper numa implementation. */
-	if (nodes != num_possible_nodes()) {
-		printk(KERN_DEBUG "Failed to setup CPU node(s) for IBS, "
-			"found: %d, expected %d",
-			nodes, num_possible_nodes());
-		return 1;
-	}
-#endif
 	return 0;
 }
 

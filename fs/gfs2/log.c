@@ -417,7 +417,7 @@ static unsigned int calc_reserved(struct gfs2_sbd *sdp)
 	databufhdrs_needed = (sdp->sd_log_commited_databuf +
 			      (dbuf_limit - 1)) / dbuf_limit;
 
-	if (sdp->sd_log_commited_revoke)
+	if (sdp->sd_log_commited_revoke > 0)
 		revokes = gfs2_struct2blk(sdp, sdp->sd_log_commited_revoke,
 					  sizeof(u64));
 
@@ -613,6 +613,7 @@ static void log_write_header(struct gfs2_sbd *sdp, u32 flags, int pull)
 	if (buffer_eopnotsupp(bh)) {
 		clear_buffer_eopnotsupp(bh);
 		set_buffer_uptodate(bh);
+		fs_info(sdp, "barrier sync failed - disabling barriers\n");
 		set_bit(SDF_NOBARRIERS, &sdp->sd_flags);
 		lock_buffer(bh);
 skip_barrier:
@@ -708,7 +709,7 @@ static void gfs2_ordered_wait(struct gfs2_sbd *sdp)
  *
  */
 
-void __gfs2_log_flush(struct gfs2_sbd *sdp, struct gfs2_glock *gl)
+void gfs2_log_flush(struct gfs2_sbd *sdp, struct gfs2_glock *gl)
 {
 	struct gfs2_ail *ai;
 
@@ -788,7 +789,6 @@ static void log_refund(struct gfs2_sbd *sdp, struct gfs2_trans *tr)
 	gfs2_assert_withdraw(sdp, (((int)sdp->sd_log_commited_buf) >= 0) ||
 			     (((int)sdp->sd_log_commited_databuf) >= 0));
 	sdp->sd_log_commited_revoke += tr->tr_num_revoke - tr->tr_num_revoke_rm;
-	gfs2_assert_withdraw(sdp, ((int)sdp->sd_log_commited_revoke) >= 0);
 	reserved = calc_reserved(sdp);
 	gfs2_assert_withdraw(sdp, sdp->sd_log_blks_reserved + tr->tr_reserved >= reserved);
 	unused = sdp->sd_log_blks_reserved - reserved + tr->tr_reserved;

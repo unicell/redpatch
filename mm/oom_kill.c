@@ -31,6 +31,7 @@
 int sysctl_panic_on_oom;
 int sysctl_oom_kill_allocating_task;
 int sysctl_oom_dump_tasks;
+int sysctl_would_have_oomkilled;
 static DEFINE_SPINLOCK(zone_scan_lock);
 /* #define DEBUG */
 
@@ -337,6 +338,8 @@ static void dump_tasks(const struct mem_cgroup *mem)
 	} while_each_thread(g, p);
 }
 
+#define K(x) ((x) << (PAGE_SHIFT-10))
+
 /*
  * Send SIGKILL to the selected  process irrespective of  CAP_SYS_RAW_IO
  * flag though it's unlikely that  we select a process with CAP_SYS_RAW_IO
@@ -356,9 +359,19 @@ static void __oom_kill_task(struct task_struct *p, int verbose)
 		return;
 	}
 
-	if (verbose)
-		printk(KERN_ERR "Killed process %d (%s)\n",
+	if (sysctl_would_have_oomkilled == 1) {
+		printk(KERN_ERR "Would have killed process %d (%s). But continuing instead.\n",
 				task_pid_nr(p), p->comm);
+		return;
+	}
+
+	if (verbose)
+		printk(KERN_ERR "Killed process %d (%s) "
+				"vsz:%lukB, anon-rss:%lukB, file-rss:%lukB\n",
+				task_pid_nr(p), p->comm,
+				K(p->mm->total_vm),
+				K(get_mm_counter(p->mm, anon_rss)),
+				K(get_mm_counter(p->mm, file_rss)));
 
 	/*
 	 * We give our sacrificial lamb high priority and access to
@@ -404,7 +417,7 @@ static int oom_kill_process(struct task_struct *p, gfp_t gfp_mask, int order,
 		cpuset_print_task_mems_allowed(current);
 		task_unlock(current);
 		dump_stack();
-		mem_cgroup_print_oom_info(mem, current);
+		mem_cgroup_print_oom_info(mem, p);
 		show_mem();
 		if (sysctl_oom_dump_tasks)
 			dump_tasks(mem);
@@ -425,6 +438,8 @@ static int oom_kill_process(struct task_struct *p, gfp_t gfp_mask, int order,
 	/* Try to kill a child first */
 	list_for_each_entry(c, &p->children, sibling) {
 		if (c->mm == p->mm)
+			continue;
+		if (mem && !task_in_mem_cgroup(c, mem))
 			continue;
 		if (!oom_kill_task(c))
 			return 0;

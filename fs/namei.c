@@ -35,6 +35,8 @@
 #include <linux/fs_struct.h>
 #include <asm/uaccess.h>
 
+#include "internal.h"
+
 #define ACC_MODE(x) ("\000\004\002\006"[(x)&O_ACCMODE])
 
 /* [Feb-1997 T. Schoebel-Theuer]
@@ -234,6 +236,7 @@ int generic_permission(struct inode *inode, int mask,
 	/*
 	 * Searching includes executable on directories, else just read.
 	 */
+	mask &= MAY_READ | MAY_WRITE | MAY_EXEC;
 	if (mask == MAY_READ || (S_ISDIR(inode->i_mode) && !(mask & MAY_WRITE)))
 		if (capable(CAP_DAC_READ_SEARCH))
 			return 0;
@@ -431,6 +434,46 @@ static struct dentry * cached_lookup(struct dentry * parent, struct qstr * name,
 		dentry = do_revalidate(dentry, nd);
 
 	return dentry;
+}
+
+/*
+ * force_reval_path - force revalidation of a dentry
+ *
+ * In some situations the path walking code will trust dentries without
+ * revalidating them. This causes problems for filesystems that depend on
+ * d_revalidate to handle file opens (e.g. NFSv4). When FS_REVAL_DOT is set
+ * (which indicates that it's possible for the dentry to go stale), force
+ * a d_revalidate call before proceeding.
+ *
+ * Returns 0 if the revalidation was successful. If the revalidation fails,
+ * either return the error returned by d_revalidate or -ESTALE if the
+ * revalidation it just returned 0. If d_revalidate returns 0, we attempt to
+ * invalidate the dentry. It's up to the caller to handle putting references
+ * to the path if necessary.
+ */
+static int
+force_reval_path(struct path *path, struct nameidata *nd)
+{
+	int status;
+	struct dentry *dentry = path->dentry;
+
+	/*
+	 * only check on filesystems where it's possible for the dentry to
+	 * become stale. It's assumed that if this flag is set then the
+	 * d_revalidate op will also be defined.
+	 */
+	if (!(dentry->d_sb->s_type->fs_flags & FS_REVAL_DOT))
+		return 0;
+
+	status = dentry->d_op->d_revalidate(dentry, nd);
+	if (status > 0)
+		return 0;
+
+	if (!status) {
+		d_invalidate(dentry);
+		status = -ESTALE;
+	}
+	return status;
 }
 
 /*
@@ -641,6 +684,11 @@ static __always_inline int __do_follow_link(struct path *path, struct nameidata 
 		error = 0;
 		if (s)
 			error = __vfs_follow_link(nd, s);
+		else if (nd->last_type == LAST_BIND) {
+			error = force_reval_path(&nd->path, nd);
+			if (error)
+				path_put(&nd->path);
+		}
 		if (dentry->d_inode->i_op->put_link)
 			dentry->d_inode->i_op->put_link(dentry, nd, cookie);
 	}
@@ -828,6 +876,17 @@ fail:
 }
 
 /*
+ * This is a temporary kludge to deal with "automount" symlinks; proper
+ * solution is to trigger them on follow_mount(), so that do_lookup()
+ * would DTRT.  To be killed before 2.6.34-final.
+ */
+static inline int follow_on_final(struct inode *inode, unsigned lookup_flags)
+{
+	return inode && unlikely(inode->i_op->follow_link) &&
+		((lookup_flags & LOOKUP_FOLLOW) || S_ISDIR(inode->i_mode));
+}
+
+/*
  * Name resolution.
  * This is the basic name resolution function, turning a pathname into
  * the final dentry. We expect 'base' to be positive and a directory.
@@ -963,8 +1022,7 @@ last_component:
 		if (err)
 			break;
 		inode = next.dentry->d_inode;
-		if ((lookup_flags & LOOKUP_FOLLOW)
-		    && inode && inode->i_op->follow_link) {
+		if (follow_on_final(inode, lookup_flags)) {
 			err = do_follow_link(&next, nd);
 			if (err)
 				goto return_err;
@@ -1533,69 +1591,46 @@ int may_open(struct path *path, int acc_mode, int flag)
 	if (error)
 		return error;
 
-	error = ima_path_check(path, acc_mode ?
-			       acc_mode & (MAY_READ | MAY_WRITE | MAY_EXEC) :
-			       ACC_MODE(flag) & (MAY_READ | MAY_WRITE),
-			       IMA_COUNT_UPDATE);
-
-	if (error)
-		return error;
 	/*
 	 * An append-only file must be opened in append mode for writing.
 	 */
 	if (IS_APPEND(inode)) {
-		error = -EPERM;
 		if  ((flag & FMODE_WRITE) && !(flag & O_APPEND))
-			goto err_out;
+			return -EPERM;
 		if (flag & O_TRUNC)
-			goto err_out;
+			return -EPERM;
 	}
 
 	/* O_NOATIME can only be set by the owner or superuser */
-	if (flag & O_NOATIME)
-		if (!is_owner_or_cap(inode)) {
-			error = -EPERM;
-			goto err_out;
-		}
+	if (flag & O_NOATIME && !is_owner_or_cap(inode))
+		return -EPERM;
 
 	/*
 	 * Ensure there are no outstanding leases on the file.
 	 */
-	error = break_lease(inode, flag);
+	return break_lease(inode, flag);
+}
+
+static int handle_truncate(struct file *filp)
+{
+	struct path *path = &filp->f_path;
+	struct inode *inode = path->dentry->d_inode;
+	int error = get_write_access(inode);
 	if (error)
-		goto err_out;
-
-	if (flag & O_TRUNC) {
-		error = get_write_access(inode);
-		if (error)
-			goto err_out;
-
-		/*
-		 * Refuse to truncate files with mandatory locks held on them.
-		 */
-		error = locks_verify_locked(inode);
-		if (!error)
-			error = security_path_truncate(path, 0,
-					       ATTR_MTIME|ATTR_CTIME|ATTR_OPEN);
-		if (!error) {
-			vfs_dq_init(inode);
-
-			error = do_truncate(dentry, 0,
-					    ATTR_MTIME|ATTR_CTIME|ATTR_OPEN,
-					    NULL);
-		}
-		put_write_access(inode);
-		if (error)
-			goto err_out;
-	} else
-		if (flag & FMODE_WRITE)
-			vfs_dq_init(inode);
-
-	return 0;
-err_out:
-	ima_counts_put(path, acc_mode ?
-		       acc_mode & (MAY_READ | MAY_WRITE | MAY_EXEC) :
-		       ACC_MODE(flag) & (MAY_READ | MAY_WRITE));
+		return error;
+	/*
+	 * Refuse to truncate files with mandatory locks held on them.
+	 */
+	error = locks_verify_locked(inode);
+	if (!error)
+		error = security_path_truncate(path, 0,
+				       ATTR_MTIME|ATTR_CTIME|ATTR_OPEN);
+	if (!error) {
+		error = do_truncate(path->dentry, 0,
+				    ATTR_MTIME|ATTR_CTIME|ATTR_OPEN,
+				    filp);
+	}
+	put_write_access(inode);
 	return error;
 }
 
@@ -1650,7 +1685,7 @@ static inline int open_to_namei_flags(int flag)
 	return flag;
 }
 
-static int open_will_write_to_fs(int flag, struct inode *inode)
+static int open_will_truncate(int flag, struct inode *inode)
 {
 	/*
 	 * We'll never write to the fs underlying
@@ -1675,7 +1710,7 @@ struct file *do_filp_open(int dfd, const char *pathname,
 	struct path path;
 	struct dentry *dir;
 	int count = 0;
-	int will_write;
+	int will_truncate;
 	int flag = open_to_namei_flags(open_flag);
 
 	if (!acc_mode)
@@ -1771,13 +1806,16 @@ do_last:
 			goto exit;
 		}
 		filp = nameidata_to_filp(&nd, open_flag);
-		if (IS_ERR(filp))
-			ima_counts_put(&nd.path,
-				       acc_mode & (MAY_READ | MAY_WRITE |
-						   MAY_EXEC));
 		mnt_drop_write(nd.path.mnt);
 		if (nd.root.mnt)
 			path_put(&nd.root);
+		if (!IS_ERR(filp)) {
+			error = ima_file_check(filp, acc_mode);
+			if (error) {
+				fput(filp);
+				filp = ERR_PTR(error);
+			}
+		}
 		return filp;
 	}
 
@@ -1818,28 +1856,44 @@ ok:
 	 * be avoided. Taking this mnt write here
 	 * ensures that (2) can not occur.
 	 */
-	will_write = open_will_write_to_fs(flag, nd.path.dentry->d_inode);
-	if (will_write) {
+	will_truncate = open_will_truncate(flag, nd.path.dentry->d_inode);
+	if (will_truncate) {
 		error = mnt_want_write(nd.path.mnt);
 		if (error)
 			goto exit;
 	}
 	error = may_open(&nd.path, acc_mode, flag);
 	if (error) {
-		if (will_write)
+		if (will_truncate)
 			mnt_drop_write(nd.path.mnt);
 		goto exit;
 	}
 	filp = nameidata_to_filp(&nd, open_flag);
-	if (IS_ERR(filp))
-		ima_counts_put(&nd.path,
-			       acc_mode & (MAY_READ | MAY_WRITE | MAY_EXEC));
+	if (!IS_ERR(filp)) {
+		error = ima_file_check(filp, acc_mode);
+		if (error) {
+			fput(filp);
+			filp = ERR_PTR(error);
+		}
+	}
+	if (!IS_ERR(filp)) {
+		if (acc_mode & MAY_WRITE)
+			vfs_dq_init(nd.path.dentry->d_inode);
+
+		if (will_truncate) {
+			error = handle_truncate(filp);
+			if (error) {
+				fput(filp);
+				filp = ERR_PTR(error);
+			}
+		}
+	}
 	/*
 	 * It is now safe to drop the mnt write
 	 * because the filp has had a write taken
 	 * on its behalf.
 	 */
-	if (will_write)
+	if (will_truncate)
 		mnt_drop_write(nd.path.mnt);
 	if (nd.root.mnt)
 		path_put(&nd.root);

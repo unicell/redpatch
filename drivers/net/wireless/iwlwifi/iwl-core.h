@@ -183,6 +183,14 @@ struct iwl_lib_ops {
 
 	/* temperature */
 	struct iwl_temp_ops temp_ops;
+	/* recover from tx queue stall */
+	void (*recover_from_tx_stall)(unsigned long data);
+	/* check for plcp health */
+	bool (*check_plcp_health)(struct iwl_priv *priv,
+					struct iwl_rx_packet *pkt);
+	/* check for ack health */
+	bool (*check_ack_health)(struct iwl_priv *priv,
+					struct iwl_rx_packet *pkt);
 };
 
 struct iwl_ops {
@@ -214,6 +222,8 @@ struct iwl_mod_params {
  * @max_ll_items: max number of OTP blocks
  * @shadow_ram_support: shadow support for OTP memory
  * @use_rts_for_ht: use rts/cts protection for HT traffic
+ * @plcp_delta_threshold: plcp error rate threshold used to trigger
+ *	radio tuning when there is a high receiving plcp error rate
  *
  * We enable the driver to be backward compatible wrt API version. The
  * driver specifies which APIs it supports (with @ucode_api_max being the
@@ -257,6 +267,9 @@ struct iwl_cfg {
 	const bool ht_greenfield_support;
 	const bool broken_powersave;
 	bool use_rts_for_ht;
+	u8 plcp_delta_threshold;
+	/* timer period for monitor the driver queues */
+	u32 monitor_recover_period;
 };
 
 /***************************
@@ -391,6 +404,10 @@ int iwl_tx_queue_reclaim(struct iwl_priv *priv, int txq_id, int index);
 /* Handlers */
 void iwl_rx_missed_beacon_notif(struct iwl_priv *priv,
 			       struct iwl_rx_mem_buffer *rxb);
+bool iwl_good_plcp_health(struct iwl_priv *priv,
+				 struct iwl_rx_packet *pkt);
+bool iwl_good_ack_health(struct iwl_priv *priv,
+				 struct iwl_rx_packet *pkt);
 void iwl_rx_statistics(struct iwl_priv *priv,
 			      struct iwl_rx_mem_buffer *rxb);
 void iwl_rx_csa(struct iwl_priv *priv, struct iwl_rx_mem_buffer *rxb);
@@ -410,6 +427,8 @@ void iwl_hw_txq_ctx_free(struct iwl_priv *priv);
 int iwl_hw_tx_queue_init(struct iwl_priv *priv,
 			 struct iwl_tx_queue *txq);
 int iwl_txq_update_write_ptr(struct iwl_priv *priv, struct iwl_tx_queue *txq);
+void iwl_free_tfds_in_queue(struct iwl_priv *priv,
+			    int sta_id, int tid, int freed);
 int iwl_tx_queue_init(struct iwl_priv *priv, struct iwl_tx_queue *txq,
 		      int slots_num, u32 txq_id);
 void iwl_tx_queue_free(struct iwl_priv *priv, int txq_id);
@@ -459,6 +478,8 @@ void iwl_init_scan_params(struct iwl_priv *priv);
 int iwl_scan_cancel(struct iwl_priv *priv);
 int iwl_scan_cancel_timeout(struct iwl_priv *priv, unsigned long ms);
 int iwl_mac_hw_scan(struct ieee80211_hw *hw, struct cfg80211_scan_request *req);
+void iwl_internal_short_hw_scan(struct iwl_priv *priv);
+int iwl_force_reset(struct iwl_priv *priv, int mode);
 u16 iwl_fill_probe_req(struct iwl_priv *priv, struct ieee80211_mgmt *frame,
 		       const u8 *ie, int ie_len, int left);
 void iwl_setup_rx_scan_handlers(struct iwl_priv *priv);
@@ -527,6 +548,8 @@ void iwl_disable_ict(struct iwl_priv *priv);
 int iwl_alloc_isr_ict(struct iwl_priv *priv);
 void iwl_free_isr_ict(struct iwl_priv *priv);
 irqreturn_t iwl_isr_ict(int irq, void *data);
+bool iwl_good_ack_health(struct iwl_priv *priv,
+			 struct iwl_rx_packet *pkt);
 
 static inline u16 iwl_pcie_link_ctl(struct iwl_priv *priv)
 {
@@ -536,6 +559,9 @@ static inline u16 iwl_pcie_link_ctl(struct iwl_priv *priv)
 	pci_read_config_word(priv->pci_dev, pos + PCI_EXP_LNKCTL, &pci_lnk_ctl);
 	return pci_lnk_ctl;
 }
+
+void iwl_bg_monitor_recover(unsigned long data);
+
 #ifdef CONFIG_PM
 int iwl_pci_suspend(struct pci_dev *pdev, pm_message_t state);
 int iwl_pci_resume(struct pci_dev *pdev);

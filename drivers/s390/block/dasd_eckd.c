@@ -86,11 +86,12 @@ dasd_eckd_probe (struct ccw_device *cdev)
 	int ret;
 
 	/* set ECKD specific ccw-device options */
-	ret = ccw_device_set_options(cdev, CCWDEV_ALLOW_FORCE);
+	ret = ccw_device_set_options(cdev, CCWDEV_ALLOW_FORCE |
+				     CCWDEV_DO_PATHGROUP | CCWDEV_DO_MULTIPATH);
 	if (ret) {
-		DBF_EVENT(DBF_WARNING,
-		       "dasd_eckd_probe: could not set ccw-device options "
-		       "for %s\n", dev_name(&cdev->dev));
+		DBF_EVENT_DEVID(DBF_WARNING, cdev, "%s",
+				"dasd_eckd_probe: could not set "
+				"ccw-device options");
 		return ret;
 	}
 	ret = dasd_generic_probe(cdev, &dasd_eckd_discipline);
@@ -885,16 +886,15 @@ static int dasd_eckd_read_conf(struct dasd_device *device)
 			rc = dasd_eckd_read_conf_lpm(device, &conf_data,
 						     &conf_len, lpm);
 			if (rc && rc != -EOPNOTSUPP) {	/* -EOPNOTSUPP is ok */
-				DBF_EVENT(DBF_WARNING,
+				DBF_EVENT_DEVID(DBF_WARNING, device->cdev,
 					  "Read configuration data returned "
-					  "error %d for device: %s", rc,
-					  dev_name(&device->cdev->dev));
+					  "error %d", rc);
 				return rc;
 			}
 			if (conf_data == NULL) {
-				DBF_EVENT(DBF_WARNING, "No configuration "
-					  "data retrieved for device: %s",
-					  dev_name(&device->cdev->dev));
+				DBF_EVENT_DEVID(DBF_WARNING, device->cdev, "%s",
+						"No configuration data "
+						"retrieved");
 				continue;	/* no error */
 			}
 			/* save first valid configuration data */
@@ -941,9 +941,8 @@ static int dasd_eckd_read_features(struct dasd_device *device)
 				    sizeof(struct dasd_rssd_features)),
 				   device);
 	if (IS_ERR(cqr)) {
-		DBF_EVENT(DBF_WARNING, "Could not allocate initialization "
-			  "request for device: %s",
-			  dev_name(&device->cdev->dev));
+		DBF_EVENT_DEVID(DBF_WARNING, device->cdev, "%s", "Could not "
+				"allocate initialization request");
 		return PTR_ERR(cqr);
 	}
 	cqr->startdev = device;
@@ -1012,9 +1011,9 @@ static struct dasd_ccw_req *dasd_eckd_build_psf_ssc(struct dasd_device *device,
 	}
 	psf_ssc_data = (struct dasd_psf_ssc_data *)cqr->data;
 	psf_ssc_data->order = PSF_ORDER_SSC;
-	psf_ssc_data->suborder = 0x40;
+	psf_ssc_data->suborder = 0xc0;
 	if (enable_pav) {
-		psf_ssc_data->suborder |= 0x88;
+		psf_ssc_data->suborder |= 0x08;
 		psf_ssc_data->reserved[0] = 0x88;
 	}
 	ccw = cqr->cpaddr;
@@ -1057,7 +1056,7 @@ dasd_eckd_psf_ssc(struct dasd_device *device, int enable_pav)
 /*
  * Valide storage server of current device.
  */
-static int dasd_eckd_validate_server(struct dasd_device *device)
+static void dasd_eckd_validate_server(struct dasd_device *device)
 {
 	int rc;
 	struct dasd_eckd_private *private;
@@ -1071,12 +1070,8 @@ static int dasd_eckd_validate_server(struct dasd_device *device)
 	/* may be requested feature is not available on server,
 	 * therefore just report error and go ahead */
 	private = (struct dasd_eckd_private *) device->private;
-	DBF_EVENT(DBF_WARNING, "PSF-SSC on storage subsystem %s.%s.%04x "
-		  "returned rc=%d for device: %s",
-		  private->uid.vendor, private->uid.serial,
-		  private->uid.ssid, rc, dev_name(&device->cdev->dev));
-	/* RE-Read Configuration Data */
-	return dasd_eckd_read_conf(device);
+	DBF_EVENT_DEVID(DBF_WARNING, device->cdev, "PSF-SSC for SSID %04x "
+			"returned rc=%d", private->uid.ssid, rc);
 }
 
 /*
@@ -1090,6 +1085,15 @@ dasd_eckd_check_characteristics(struct dasd_device *device)
 	struct dasd_block *block;
 	int is_known, rc;
 
+	if (!ccw_device_is_pathgroup(device->cdev)) {
+		dev_warn(&device->cdev->dev,
+			 "A channel path group could not be established\n");
+		return -EIO;
+	}
+	if (!ccw_device_is_multipath(device->cdev)) {
+		dev_info(&device->cdev->dev,
+			 "The DASD is not operating in multipath mode\n");
+	}
 	private = (struct dasd_eckd_private *) device->private;
 	if (!private) {
 		private = kzalloc(sizeof(*private), GFP_KERNEL | GFP_DMA);
@@ -1123,9 +1127,9 @@ dasd_eckd_check_characteristics(struct dasd_device *device)
 	if (private->uid.type == UA_BASE_DEVICE) {
 		block = dasd_alloc_block();
 		if (IS_ERR(block)) {
-			DBF_EVENT(DBF_WARNING, "could not allocate dasd "
-				  "block structure for device: %s",
-				  dev_name(&device->cdev->dev));
+			DBF_EVENT_DEVID(DBF_WARNING, device->cdev, "%s",
+					"could not allocate dasd "
+					"block structure");
 			rc = PTR_ERR(block);
 			goto out_err1;
 		}
@@ -1139,12 +1143,21 @@ dasd_eckd_check_characteristics(struct dasd_device *device)
 		rc = is_known;
 		goto out_err2;
 	}
+	/*
+	 * dasd_eckd_vaildate_server is done on the first device that
+	 * is found for an LCU. All later other devices have to wait
+	 * for it, so they will read the correct feature codes.
+	 */
 	if (!is_known) {
-		/* new lcu found */
-		rc = dasd_eckd_validate_server(device); /* will switch pav on */
-		if (rc)
-			goto out_err3;
-	}
+		dasd_eckd_validate_server(device);
+		dasd_alias_lcu_setup_complete(device);
+	} else
+		dasd_alias_wait_for_lcu_setup(device);
+
+	/* device may report different configuration data after LCU setup */
+	rc = dasd_eckd_read_conf(device);
+	if (rc)
+		goto out_err3;
 
 	/* Read Feature Codes */
 	dasd_eckd_read_features(device);
@@ -1153,9 +1166,8 @@ dasd_eckd_check_characteristics(struct dasd_device *device)
 	rc = dasd_generic_read_dev_chars(device, DASD_ECKD_MAGIC,
 					 &private->rdc_data, 64);
 	if (rc) {
-		DBF_EVENT(DBF_WARNING,
-			  "Read device characteristics failed, rc=%d for "
-			  "device: %s", rc, dev_name(&device->cdev->dev));
+		DBF_EVENT_DEVID(DBF_WARNING, device->cdev,
+				"Read device characteristic failed, rc=%d", rc);
 		goto out_err3;
 	}
 	/* find the vaild cylinder size */
@@ -2789,7 +2801,12 @@ static int dasd_symm_io(struct dasd_device *device, void __user *argp)
 	char *psf_data, *rssd_result;
 	struct dasd_ccw_req *cqr;
 	struct ccw1 *ccw;
+	char psf0, psf1;
 	int rc;
+
+	if (!capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_RAWIO))
+		return -EACCES;
+	psf0 = psf1 = 0;
 
 	/* Copy parms from caller */
 	rc = -EFAULT;
@@ -2816,12 +2833,8 @@ static int dasd_symm_io(struct dasd_device *device, void __user *argp)
 			   (void __user *)(unsigned long) usrparm.psf_data,
 			   usrparm.psf_data_len))
 		goto out_free;
-
-	/* sanity check on syscall header */
-	if (psf_data[0] != 0x17 && psf_data[1] != 0xce) {
-		rc = -EINVAL;
-		goto out_free;
-	}
+	psf0 = psf_data[0];
+	psf1 = psf_data[1];
 
 	/* setup CCWs for PSF + RSSD */
 	cqr = dasd_smalloc_request(DASD_ECKD_MAGIC, 2 , 0, device);
@@ -2872,7 +2885,9 @@ out_free:
 	kfree(rssd_result);
 	kfree(psf_data);
 out:
-	DBF_DEV_EVENT(DBF_WARNING, device, "Symmetrix ioctl: rc=%d", rc);
+	DBF_DEV_EVENT(DBF_WARNING, device,
+		      "Symmetrix ioctl (0x%02x 0x%02x): rc=%d",
+		      (int) psf0, (int) psf1, rc);
 	return rc;
 }
 
@@ -2980,7 +2995,7 @@ static void dasd_eckd_dump_sense_ccw(struct dasd_device *device,
 	len += sprintf(page + len, KERN_ERR PRINTK_HEADER
 		       " in req: %p CS: 0x%02X DS: 0x%02X CC: 0x%02X RC: %d\n",
 		       req, scsw_cstat(&irb->scsw), scsw_dstat(&irb->scsw),
-		       scsw_cc(&irb->scsw), req->intrc);
+		       scsw_cc(&irb->scsw), req ? req->intrc : 0);
 	len += sprintf(page + len, KERN_ERR PRINTK_HEADER
 		       " device %s: Failing CCW: %p\n",
 		       dev_name(&device->cdev->dev),
@@ -3240,11 +3255,15 @@ int dasd_eckd_restore_device(struct dasd_device *device)
 	if (is_known < 0)
 		return is_known;
 	if (!is_known) {
-		/* new lcu found */
-		rc = dasd_eckd_validate_server(device); /* will switch pav on */
-		if (rc)
-			goto out_err;
-	}
+		dasd_eckd_validate_server(device);
+		dasd_alias_lcu_setup_complete(device);
+	} else
+		dasd_alias_wait_for_lcu_setup(device);
+
+	/* RE-Read Configuration Data */
+	rc = dasd_eckd_read_conf(device);
+	if (rc)
+		goto out_err;
 
 	/* Read Feature Codes */
 	dasd_eckd_read_features(device);
@@ -3253,9 +3272,8 @@ int dasd_eckd_restore_device(struct dasd_device *device)
 	rc = dasd_generic_read_dev_chars(device, DASD_ECKD_MAGIC,
 					 &temp_rdc_data, 64);
 	if (rc) {
-		DBF_EVENT(DBF_WARNING,
-			  "Read device characteristics failed, rc=%d for "
-			  "device: %s", rc, dev_name(&device->cdev->dev));
+		DBF_EVENT_DEVID(DBF_WARNING, device->cdev,
+				"Read device characteristic failed, rc=%d", rc);
 		goto out_err;
 	}
 	spin_lock_irqsave(get_ccwdev_lock(device->cdev), flags);

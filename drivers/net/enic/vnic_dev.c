@@ -36,7 +36,6 @@ struct vnic_res {
 };
 
 #define VNIC_DEV_CAP_INIT	0x0001
-#define VNIC_DEV_CAP_PERBI	0x0002
 
 struct vnic_dev {
 	void *priv;
@@ -267,6 +266,11 @@ int vnic_dev_cmd(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 	int err;
 
 	status = ioread32(&devcmd->status);
+	if (status == 0xFFFFFFFF) {
+		/* PCI-e target device is gone */
+		return -ENODEV;
+	}
+
 	if (status & STAT_BUSY) {
 		printk(KERN_ERR "Busy devcmd %d\n", _CMD_N(cmd));
 		return -EBUSY;
@@ -288,6 +292,11 @@ int vnic_dev_cmd(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 		udelay(100);
 
 		status = ioread32(&devcmd->status);
+		if (status == 0xFFFFFFFF) {
+			/* PCI-e target device is gone */
+			return -ENODEV;
+		}
+
 		if (!(status & STAT_BUSY)) {
 
 			if (status & STAT_ERROR) {
@@ -530,7 +539,7 @@ void vnic_dev_packet_filter(struct vnic_dev *vdev, int directed, int multicast,
 		printk(KERN_ERR "Can't set packet filter\n");
 }
 
-void vnic_dev_add_addr(struct vnic_dev *vdev, u8 *addr)
+int vnic_dev_add_addr(struct vnic_dev *vdev, u8 *addr)
 {
 	u64 a0 = 0, a1 = 0;
 	int wait = 1000;
@@ -543,9 +552,11 @@ void vnic_dev_add_addr(struct vnic_dev *vdev, u8 *addr)
 	err = vnic_dev_cmd(vdev, CMD_ADDR_ADD, &a0, &a1, wait);
 	if (err)
 		printk(KERN_ERR "Can't add addr [%pM], %d\n", addr, err);
+
+	return err;
 }
 
-void vnic_dev_del_addr(struct vnic_dev *vdev, u8 *addr)
+int vnic_dev_del_addr(struct vnic_dev *vdev, u8 *addr)
 {
 	u64 a0 = 0, a1 = 0;
 	int wait = 1000;
@@ -558,6 +569,22 @@ void vnic_dev_del_addr(struct vnic_dev *vdev, u8 *addr)
 	err = vnic_dev_cmd(vdev, CMD_ADDR_DEL, &a0, &a1, wait);
 	if (err)
 		printk(KERN_ERR "Can't del addr [%pM], %d\n", addr, err);
+
+	return err;
+}
+
+int vnic_dev_set_ig_vlan_rewrite_mode(struct vnic_dev *vdev,
+	u8 ig_vlan_rewrite_mode)
+{
+	u64 a0 = ig_vlan_rewrite_mode, a1 = 0;
+	int wait = 1000;
+	int err;
+
+	err = vnic_dev_cmd(vdev, CMD_IG_VLAN_REWRITE_MODE, &a0, &a1, wait);
+	if (err == ERR_ECMDUNKNOWN)
+		return 0;
+
+	return err;
 }
 
 int vnic_dev_raise_intr(struct vnic_dev *vdev, u16 intr)
@@ -574,22 +601,18 @@ int vnic_dev_raise_intr(struct vnic_dev *vdev, u16 intr)
 	return err;
 }
 
-int vnic_dev_notify_set(struct vnic_dev *vdev, u16 intr)
+int vnic_dev_notify_setcmd(struct vnic_dev *vdev,
+	void *notify_addr, dma_addr_t notify_pa, u16 intr)
 {
 	u64 a0, a1;
 	int wait = 1000;
 	int r;
 
-	if (!vdev->notify) {
-		vdev->notify = pci_alloc_consistent(vdev->pdev,
-			sizeof(struct vnic_devcmd_notify),
-			&vdev->notify_pa);
-		if (!vdev->notify)
-			return -ENOMEM;
-		memset(vdev->notify, 0, sizeof(struct vnic_devcmd_notify));
-	}
+	memset(notify_addr, 0, sizeof(struct vnic_devcmd_notify));
+	vdev->notify = notify_addr;
+	vdev->notify_pa = notify_pa;
 
-	a0 = vdev->notify_pa;
+	a0 = (u64)notify_pa;
 	a1 = ((u64)intr << 32) & 0x0000ffff00000000ULL;
 	a1 += sizeof(struct vnic_devcmd_notify);
 
@@ -598,7 +621,27 @@ int vnic_dev_notify_set(struct vnic_dev *vdev, u16 intr)
 	return r;
 }
 
-void vnic_dev_notify_unset(struct vnic_dev *vdev)
+int vnic_dev_notify_set(struct vnic_dev *vdev, u16 intr)
+{
+	void *notify_addr;
+	dma_addr_t notify_pa;
+
+	if (vdev->notify || vdev->notify_pa) {
+		printk(KERN_ERR "notify block %p still allocated",
+			vdev->notify);
+		return -EINVAL;
+	}
+
+	notify_addr = pci_alloc_consistent(vdev->pdev,
+			sizeof(struct vnic_devcmd_notify),
+			&notify_pa);
+	if (!notify_addr)
+		return -ENOMEM;
+
+	return vnic_dev_notify_setcmd(vdev, notify_addr, notify_pa, intr);
+}
+
+void vnic_dev_notify_unsetcmd(struct vnic_dev *vdev)
 {
 	u64 a0, a1;
 	int wait = 1000;
@@ -608,7 +651,21 @@ void vnic_dev_notify_unset(struct vnic_dev *vdev)
 	a1 += sizeof(struct vnic_devcmd_notify);
 
 	vnic_dev_cmd(vdev, CMD_NOTIFY, &a0, &a1, wait);
+	vdev->notify = NULL;
+	vdev->notify_pa = 0;
 	vdev->notify_sz = 0;
+}
+
+void vnic_dev_notify_unset(struct vnic_dev *vdev)
+{
+	if (vdev->notify) {
+		pci_free_consistent(vdev->pdev,
+			sizeof(struct vnic_devcmd_notify),
+			vdev->notify,
+			vdev->notify_pa);
+	}
+
+	vnic_dev_notify_unsetcmd(vdev);
 }
 
 static int vnic_dev_notify_ready(struct vnic_dev *vdev)
@@ -650,6 +707,56 @@ int vnic_dev_init(struct vnic_dev *vdev, int arg)
 		}
 	}
 	return r;
+}
+
+int vnic_dev_init_done(struct vnic_dev *vdev, int *done, int *err)
+{
+	u64 a0 = 0, a1 = 0;
+	int wait = 1000;
+	int ret;
+
+	*done = 0;
+
+	ret = vnic_dev_cmd(vdev, CMD_INIT_STATUS, &a0, &a1, wait);
+	if (ret)
+		return ret;
+
+	*done = (a0 == 0);
+
+	*err = (a0 == 0) ? a1 : 0;
+
+	return 0;
+}
+
+int vnic_dev_init_prov(struct vnic_dev *vdev, u8 *buf, u32 len)
+{
+	u64 a0, a1 = len;
+	int wait = 1000;
+	u64 prov_pa;
+	void *prov_buf;
+	int ret;
+
+	prov_buf = pci_alloc_consistent(vdev->pdev, len, &prov_pa);
+	if (!prov_buf)
+		return -ENOMEM;
+
+	memcpy(prov_buf, buf, len);
+
+	a0 = prov_pa;
+
+	ret = vnic_dev_cmd(vdev, CMD_INIT_PROV_INFO, &a0, &a1, wait);
+
+	pci_free_consistent(vdev->pdev, len, prov_buf, prov_pa);
+
+	return ret;
+}
+
+int vnic_dev_deinit(struct vnic_dev *vdev)
+{
+	u64 a0 = 0, a1 = 0;
+	int wait = 1000;
+
+	return vnic_dev_cmd(vdev, CMD_DEINIT, &a0, &a1, wait);
 }
 
 int vnic_dev_link_status(struct vnic_dev *vdev)

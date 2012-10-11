@@ -35,7 +35,6 @@
 #include <linux/key.h>
 #include <linux/parser.h>
 #include <linux/fs_stack.h>
-#include <linux/ima.h>
 #include "ecryptfs_kernel.h"
 
 /**
@@ -119,7 +118,6 @@ int ecryptfs_init_persistent_file(struct dentry *ecryptfs_dentry)
 	const struct cred *cred = current_cred();
 	struct ecryptfs_inode_info *inode_info =
 		ecryptfs_inode_to_private(ecryptfs_dentry->d_inode);
-	int opened_lower_file = 0;
 	int rc = 0;
 
 	mutex_lock(&inode_info->lower_file_mutex);
@@ -136,12 +134,9 @@ int ecryptfs_init_persistent_file(struct dentry *ecryptfs_dentry)
 			       "for lower_dentry [0x%p] and lower_mnt [0x%p]; "
 			       "rc = [%d]\n", lower_dentry, lower_mnt, rc);
 			inode_info->lower_file = NULL;
-		} else
-			opened_lower_file = 1;
+		}
 	}
 	mutex_unlock(&inode_info->lower_file_mutex);
-	if (opened_lower_file)
-		ima_counts_get(inode_info->lower_file);
 	return rc;
 }
 
@@ -598,28 +593,46 @@ static int ecryptfs_get_sb(struct file_system_type *fs_type, int flags,
 			struct vfsmount *mnt)
 {
 	int rc;
-	struct super_block *sb;
+	struct super_block *sb, *lower_sb;
+	struct nameidata nd;
+
+	rc = path_lookup(dev_name, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &nd);
+	if (rc) {
+		printk(KERN_WARNING
+			"path_lookup() failed on dev_name = [%s]\n", dev_name);
+		goto out;
+	}
+	lower_sb = nd.path.dentry->d_sb;
+	if (strcmp(lower_sb->s_type->name, "ecryptfs") == 0) {
+		rc = -EINVAL;
+		printk(KERN_ERR "Mount on filesystem of type "
+			"eCryptfs explicitly disallowed due to "
+			"known incompatibilities\n");
+		goto out_pathput;
+	}
 
 	rc = get_sb_nodev(fs_type, flags, raw_data, ecryptfs_fill_super, mnt);
 	if (rc < 0) {
 		printk(KERN_ERR "Getting sb failed; rc = [%d]\n", rc);
-		goto out;
+		goto out_pathput;
 	}
 	sb = mnt->mnt_sb;
 	rc = ecryptfs_parse_options(sb, raw_data);
 	if (rc) {
 		printk(KERN_ERR "Error parsing options; rc = [%d]\n", rc);
-		goto out_abort;
+		goto out_dput;
 	}
 	rc = ecryptfs_read_super(sb, dev_name);
 	if (rc) {
 		printk(KERN_ERR "Reading sb failed; rc = [%d]\n", rc);
-		goto out_abort;
+		goto out_dput;
 	}
 	goto out;
-out_abort:
+out_dput:
 	dput(sb->s_root); /* aka mnt->mnt_root, as set by get_sb_nodev() */
 	deactivate_locked_super(sb);
+out_pathput:
+	path_put(&nd.path);
 out:
 	return rc;
 }

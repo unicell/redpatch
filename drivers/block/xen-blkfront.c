@@ -345,15 +345,14 @@ static int xlvbd_init_blk_queue(struct gendisk *gd, u16 sector_size)
 
 	/* Hard sector size and max sectors impersonate the equiv. hardware. */
 	blk_queue_logical_block_size(rq, sector_size);
-	blk_queue_max_sectors(rq, 512);
+	blk_queue_max_hw_sectors(rq, 512);
 
 	/* Each segment in a request is up to an aligned page in size. */
 	blk_queue_segment_boundary(rq, PAGE_SIZE - 1);
 	blk_queue_max_segment_size(rq, PAGE_SIZE);
 
 	/* Ensure a merged request will fit in a single I/O ring slot. */
-	blk_queue_max_phys_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
-	blk_queue_max_hw_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+	blk_queue_max_segments(rq, BLKIF_MAX_SEGMENTS_PER_REQUEST);
 
 	/* Make sure buffer addresses are sector-aligned. */
 	blk_queue_dma_alignment(rq, 511);
@@ -736,6 +735,62 @@ static int blkfront_probe(struct xenbus_device *dev,
 		}
 	}
 
+	/* 	
+	 * Prevent hooking up IDE if ide-unplug not supported;
+	 * Never hook up SCSI devices on pv-on-hvm guest
+	 */
+	if (xen_hvm_domain()) {
+		extern int xen_ide_unplug_unsupported;
+		int major;
+		int cfg = 1;
+
+		if (!VDEV_IS_EXTENDED(vdevice))
+			major = BLKIF_MAJOR(vdevice);
+		else
+			major = XENVBD_MAJOR;
+
+		switch(major) {
+		case IDE0_MAJOR:
+		case IDE1_MAJOR:
+		case IDE2_MAJOR:
+		case IDE3_MAJOR:
+		case IDE4_MAJOR:
+		case IDE5_MAJOR:
+		case IDE6_MAJOR:
+		case IDE7_MAJOR:
+		case IDE8_MAJOR:
+		case IDE9_MAJOR:
+			if (xen_ide_unplug_unsupported)
+				cfg = 0;
+			break;
+		case SCSI_DISK0_MAJOR:
+		case SCSI_DISK1_MAJOR:
+		case SCSI_DISK2_MAJOR:
+		case SCSI_DISK3_MAJOR:
+		case SCSI_DISK4_MAJOR:
+		case SCSI_DISK5_MAJOR:
+		case SCSI_DISK6_MAJOR:
+		case SCSI_DISK7_MAJOR:
+		case SCSI_DISK8_MAJOR:
+		case SCSI_DISK9_MAJOR:
+		case SCSI_DISK10_MAJOR:
+		case SCSI_DISK11_MAJOR:
+		case SCSI_DISK12_MAJOR:
+		case SCSI_DISK13_MAJOR:
+		case SCSI_DISK14_MAJOR:
+		case SCSI_DISK15_MAJOR:
+			cfg = 0;
+			break;
+		}
+		if (cfg == 0) {
+			printk(KERN_INFO
+				"%s: HVM does not support vbd %d as xen block device\n",
+			__FUNCTION__, vdevice);
+			return -ENODEV;
+		}
+	}
+
+
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
 	if (!info) {
 		xenbus_dev_fatal(dev, -ENOMEM, "allocating info structure");
@@ -1070,6 +1125,7 @@ static int __init xlblk_init(void)
 	if (!xen_domain())
 		return -ENODEV;
 
+	printk("%s: register_blkdev major: %d \n", __FUNCTION__, XENVBD_MAJOR);
 	if (register_blkdev(XENVBD_MAJOR, DEV_NAME)) {
 		printk(KERN_WARNING "xen_blk: can't get major %d with name %s\n",
 		       XENVBD_MAJOR, DEV_NAME);

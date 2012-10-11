@@ -123,6 +123,8 @@ static const struct file_operations acpi_processor_info_fops = {
 #endif
 
 DEFINE_PER_CPU(struct acpi_processor *, processors);
+EXPORT_PER_CPU_SYMBOL(processors);
+
 struct acpi_processor_errata errata __read_mostly;
 static int set_no_mwait(const struct dmi_system_id *id)
 {
@@ -977,6 +979,17 @@ static void __ref acpi_processor_hotplug_notify(acpi_handle handle,
 	struct acpi_device *device = NULL;
 	int result;
 
+#ifdef __i386__
+	/*
+	 * BZ 600435 -- disable physical CPU Hotplug (hot add) for
+	 * 32-bit kernel.  This code block must be removed if hot add is
+	 * re-enabled for 32-bit
+	 */
+
+	printk(KERN_WARNING PREFIX
+	       "CPU Hot Add is currently disabled for x86 32-bit.\n");
+	return;
+#endif
 
 	switch (event) {
 	case ACPI_NOTIFY_BUS_CHECK:

@@ -29,6 +29,7 @@
 #include "drmP.h"
 #include "rv515d.h"
 #include "radeon.h"
+#include "radeon_asic.h"
 #include "atom.h"
 #include "rv515_reg_safe.h"
 
@@ -145,16 +146,11 @@ void rv515_gpu_init(struct radeon_device *rdev)
 {
 	unsigned pipe_select_current, gb_pipe_select, tmp;
 
-	r100_hdp_reset(rdev);
-	r100_rb2d_reset(rdev);
-
 	if (r100_gui_wait_for_idle(rdev)) {
 		printk(KERN_WARNING "Failed to wait GUI idle while "
 		       "reseting GPU. Bad things might happen.\n");
 	}
-
 	rv515_vga_render_disable(rdev);
-
 	r420_pipes_init(rdev);
 	gb_pipe_select = RREG32(0x402C);
 	tmp = RREG32(0x170C);
@@ -170,91 +166,6 @@ void rv515_gpu_init(struct radeon_device *rdev)
 		printk(KERN_WARNING "Failed to wait MC idle while "
 		       "programming pipes. Bad things might happen.\n");
 	}
-}
-
-int rv515_ga_reset(struct radeon_device *rdev)
-{
-	uint32_t tmp;
-	bool reinit_cp;
-	int i;
-
-	reinit_cp = rdev->cp.ready;
-	rdev->cp.ready = false;
-	for (i = 0; i < rdev->usec_timeout; i++) {
-		WREG32(CP_CSQ_MODE, 0);
-		WREG32(CP_CSQ_CNTL, 0);
-		WREG32(RBBM_SOFT_RESET, 0x32005);
-		(void)RREG32(RBBM_SOFT_RESET);
-		udelay(200);
-		WREG32(RBBM_SOFT_RESET, 0);
-		/* Wait to prevent race in RBBM_STATUS */
-		mdelay(1);
-		tmp = RREG32(RBBM_STATUS);
-		if (tmp & ((1 << 20) | (1 << 26))) {
-			DRM_ERROR("VAP & CP still busy (RBBM_STATUS=0x%08X)\n", tmp);
-			/* GA still busy soft reset it */
-			WREG32(0x429C, 0x200);
-			WREG32(VAP_PVS_STATE_FLUSH_REG, 0);
-			WREG32(0x43E0, 0);
-			WREG32(0x43E4, 0);
-			WREG32(0x24AC, 0);
-		}
-		/* Wait to prevent race in RBBM_STATUS */
-		mdelay(1);
-		tmp = RREG32(RBBM_STATUS);
-		if (!(tmp & ((1 << 20) | (1 << 26)))) {
-			break;
-		}
-	}
-	for (i = 0; i < rdev->usec_timeout; i++) {
-		tmp = RREG32(RBBM_STATUS);
-		if (!(tmp & ((1 << 20) | (1 << 26)))) {
-			DRM_INFO("GA reset succeed (RBBM_STATUS=0x%08X)\n",
-				 tmp);
-			DRM_INFO("GA_IDLE=0x%08X\n", RREG32(0x425C));
-			DRM_INFO("RB3D_RESET_STATUS=0x%08X\n", RREG32(0x46f0));
-			DRM_INFO("ISYNC_CNTL=0x%08X\n", RREG32(0x1724));
-			if (reinit_cp) {
-				return r100_cp_init(rdev, rdev->cp.ring_size);
-			}
-			return 0;
-		}
-		DRM_UDELAY(1);
-	}
-	tmp = RREG32(RBBM_STATUS);
-	DRM_ERROR("Failed to reset GA ! (RBBM_STATUS=0x%08X)\n", tmp);
-	return -1;
-}
-
-int rv515_gpu_reset(struct radeon_device *rdev)
-{
-	uint32_t status;
-
-	/* reset order likely matter */
-	status = RREG32(RBBM_STATUS);
-	/* reset HDP */
-	r100_hdp_reset(rdev);
-	/* reset rb2d */
-	if (status & ((1 << 17) | (1 << 18) | (1 << 27))) {
-		r100_rb2d_reset(rdev);
-	}
-	/* reset GA */
-	if (status & ((1 << 20) | (1 << 26))) {
-		rv515_ga_reset(rdev);
-	}
-	/* reset CP */
-	status = RREG32(RBBM_STATUS);
-	if (status & (1 << 16)) {
-		r100_cp_reset(rdev);
-	}
-	/* Check if GPU is idle */
-	status = RREG32(RBBM_STATUS);
-	if (status & (1 << 31)) {
-		DRM_ERROR("Failed to reset GPU (RBBM_STATUS=0x%08X)\n", status);
-		return -1;
-	}
-	DRM_INFO("GPU reset succeed (RBBM_STATUS=0x%08X)\n", status);
-	return 0;
 }
 
 static void rv515_vram_get_type(struct radeon_device *rdev)
@@ -277,19 +188,15 @@ static void rv515_vram_get_type(struct radeon_device *rdev)
 	}
 }
 
-void rv515_vram_info(struct radeon_device *rdev)
+void rv515_mc_init(struct radeon_device *rdev)
 {
-	fixed20_12 a;
 
 	rv515_vram_get_type(rdev);
-
 	r100_vram_init_sizes(rdev);
-	/* FIXME: we should enforce default clock in case GPU is not in
-	 * default setup
-	 */
-	a.full = rfixed_const(100);
-	rdev->pm.sclk.full = rfixed_const(rdev->clock.default_sclk);
-	rdev->pm.sclk.full = rfixed_div(rdev->pm.sclk, a);
+	radeon_vram_location(rdev, &rdev->mc, 0);
+	if (!(rdev->flags & RADEON_IS_AGP))
+		radeon_gtt_location(rdev, &rdev->mc);
+	radeon_update_bandwidth_info(rdev);
 }
 
 uint32_t rv515_mc_rreg(struct radeon_device *rdev, uint32_t reg)
@@ -337,7 +244,7 @@ static int rv515_debugfs_ga_info(struct seq_file *m, void *data)
 
 	tmp = RREG32(0x2140);
 	seq_printf(m, "VAP_CNTL_STATUS 0x%08x\n", tmp);
-	radeon_gpu_reset(rdev);
+	radeon_asic_reset(rdev);
 	tmp = RREG32(0x425C);
 	seq_printf(m, "GA_IDLE 0x%08x\n", tmp);
 	return 0;
@@ -478,8 +385,8 @@ static int rv515_startup(struct radeon_device *rdev)
 			return r;
 	}
 	/* Enable IRQ */
-	rdev->irq.sw_int = true;
 	rs600_irq_set(rdev);
+	rdev->config.r300.hdp_cntl = RREG32(RADEON_HOST_PATH_CNTL);
 	/* 1M ring buffer */
 	r = r100_cp_init(rdev, 1024 * 1024);
 	if (r) {
@@ -505,7 +412,7 @@ int rv515_resume(struct radeon_device *rdev)
 	/* Resume clock before doing reset */
 	rv515_clock_startup(rdev);
 	/* Reset gpu before posting otherwise ATOM will enter infinite loop */
-	if (radeon_gpu_reset(rdev)) {
+	if (radeon_asic_reset(rdev)) {
 		dev_warn(rdev->dev, "GPU reset failed ! (0xE40=0x%08X, 0x7C0=0x%08X)\n",
 			RREG32(R_000E40_RBBM_STATUS),
 			RREG32(R_0007C0_CP_STAT));
@@ -514,6 +421,8 @@ int rv515_resume(struct radeon_device *rdev)
 	atom_asic_init(rdev->mode_info.atom_context);
 	/* Resume clock after posting */
 	rv515_clock_startup(rdev);
+	/* Initialize surface registers */
+	radeon_surface_init(rdev);
 	return rv515_startup(rdev);
 }
 
@@ -535,16 +444,15 @@ void rv515_set_safe_registers(struct radeon_device *rdev)
 
 void rv515_fini(struct radeon_device *rdev)
 {
-	rv515_suspend(rdev);
 	r100_cp_fini(rdev);
 	r100_wb_fini(rdev);
 	r100_ib_fini(rdev);
 	radeon_gem_fini(rdev);
-    rv370_pcie_gart_fini(rdev);
+	rv370_pcie_gart_fini(rdev);
 	radeon_agp_fini(rdev);
 	radeon_irq_kms_fini(rdev);
 	radeon_fence_driver_fini(rdev);
-	radeon_object_fini(rdev);
+	radeon_bo_fini(rdev);
 	radeon_atombios_fini(rdev);
 	kfree(rdev->bios);
 	rdev->bios = NULL;
@@ -559,6 +467,8 @@ int rv515_init(struct radeon_device *rdev)
 	/* Initialize surface registers */
 	radeon_surface_init(rdev);
 	/* TODO: disable VGA need to use VGA request */
+	/* restore some register to sane defaults */
+	r100_restore_sanity(rdev);
 	/* BIOS*/
 	if (!radeon_get_bios(rdev)) {
 		if (ASIC_IS_AVIVO(rdev))
@@ -573,27 +483,28 @@ int rv515_init(struct radeon_device *rdev)
 		return -EINVAL;
 	}
 	/* Reset gpu before posting otherwise ATOM will enter infinite loop */
-	if (radeon_gpu_reset(rdev)) {
+	if (radeon_asic_reset(rdev)) {
 		dev_warn(rdev->dev,
 			"GPU reset failed ! (0xE40=0x%08X, 0x7C0=0x%08X)\n",
 			RREG32(R_000E40_RBBM_STATUS),
 			RREG32(R_0007C0_CP_STAT));
 	}
 	/* check if cards are posted or not */
-	if (!radeon_card_posted(rdev) && rdev->bios) {
-		DRM_INFO("GPU not posted. posting now...\n");
-		atom_asic_init(rdev->mode_info.atom_context);
-	}
+	if (radeon_boot_test_post_card(rdev) == false)
+		return -EINVAL;
 	/* Initialize clocks */
 	radeon_get_clock_info(rdev->ddev);
 	/* Initialize power management */
 	radeon_pm_init(rdev);
-	/* Get vram informations */
-	rv515_vram_info(rdev);
-	/* Initialize memory controller (also test AGP) */
-	r = r420_mc_init(rdev);
-	if (r)
-		return r;
+	/* initialize AGP */
+	if (rdev->flags & RADEON_IS_AGP) {
+		r = radeon_agp_init(rdev);
+		if (r) {
+			radeon_agp_disable(rdev);
+		}
+	}
+	/* initialize memory controller */
+	rv515_mc_init(rdev);
 	rv515_debugfs(rdev);
 	/* Fence driver */
 	r = radeon_fence_driver_init(rdev);
@@ -603,7 +514,7 @@ int rv515_init(struct radeon_device *rdev)
 	if (r)
 		return r;
 	/* Memory manager */
-	r = radeon_object_init(rdev);
+	r = radeon_bo_init(rdev);
 	if (r)
 		return r;
 	r = rv370_pcie_gart_init(rdev);
@@ -615,13 +526,12 @@ int rv515_init(struct radeon_device *rdev)
 	if (r) {
 		/* Somethings want wront with the accel init stop accel */
 		dev_err(rdev->dev, "Disabling GPU acceleration\n");
-		rv515_suspend(rdev);
 		r100_cp_fini(rdev);
 		r100_wb_fini(rdev);
 		r100_ib_fini(rdev);
+		radeon_irq_kms_fini(rdev);
 		rv370_pcie_gart_fini(rdev);
 		radeon_agp_fini(rdev);
-		radeon_irq_kms_fini(rdev);
 		rdev->accel_working = false;
 	}
 	return 0;
@@ -892,8 +802,9 @@ void rv515_crtc_bandwidth_compute(struct radeon_device *rdev,
 
 	b.full = rfixed_const(mode->crtc_hdisplay);
 	c.full = rfixed_const(256);
-	a.full = rfixed_mul(wm->num_line_pair, b);
-	request_fifo_depth.full = rfixed_div(a, c);
+	a.full = rfixed_div(b, c);
+	request_fifo_depth.full = rfixed_mul(a, wm->num_line_pair);
+	request_fifo_depth.full = rfixed_ceil(request_fifo_depth);
 	if (a.full < rfixed_const(4)) {
 		wm->lb_request_fifo_depth = 4;
 	} else {
@@ -995,15 +906,17 @@ void rv515_crtc_bandwidth_compute(struct radeon_device *rdev,
 	a.full = rfixed_const(16);
 	wm->priority_mark_max.full = rfixed_const(crtc->base.mode.crtc_hdisplay);
 	wm->priority_mark_max.full = rfixed_div(wm->priority_mark_max, a);
+	wm->priority_mark_max.full = rfixed_ceil(wm->priority_mark_max);
 
 	/* Determine estimated width */
 	estimated_width.full = tolerable_latency.full - wm->worst_case_latency.full;
 	estimated_width.full = rfixed_div(estimated_width, consumption_time);
 	if (rfixed_trunc(estimated_width) > crtc->base.mode.crtc_hdisplay) {
-		wm->priority_mark.full = rfixed_const(10);
+		wm->priority_mark.full = wm->priority_mark_max.full;
 	} else {
 		a.full = rfixed_const(16);
 		wm->priority_mark.full = rfixed_div(estimated_width, a);
+		wm->priority_mark.full = rfixed_ceil(wm->priority_mark);
 		wm->priority_mark.full = wm->priority_mark_max.full - wm->priority_mark.full;
 	}
 }
@@ -1014,7 +927,7 @@ void rv515_bandwidth_avivo_update(struct radeon_device *rdev)
 	struct drm_display_mode *mode1 = NULL;
 	struct rv515_watermark wm0;
 	struct rv515_watermark wm1;
-	u32 tmp;
+	u32 tmp, d1mode_priority_a_cnt, d2mode_priority_a_cnt;
 	fixed20_12 priority_mark02, priority_mark12, fill_rate;
 	fixed20_12 a, b;
 
@@ -1082,10 +995,16 @@ void rv515_bandwidth_avivo_update(struct radeon_device *rdev)
 			priority_mark12.full = 0;
 		if (wm1.priority_mark_max.full > priority_mark12.full)
 			priority_mark12.full = wm1.priority_mark_max.full;
-		WREG32(D1MODE_PRIORITY_A_CNT, rfixed_trunc(priority_mark02));
-		WREG32(D1MODE_PRIORITY_B_CNT, rfixed_trunc(priority_mark02));
-		WREG32(D2MODE_PRIORITY_A_CNT, rfixed_trunc(priority_mark12));
-		WREG32(D2MODE_PRIORITY_B_CNT, rfixed_trunc(priority_mark12));
+		d1mode_priority_a_cnt = rfixed_trunc(priority_mark02);
+		d2mode_priority_a_cnt = rfixed_trunc(priority_mark12);
+		if (rdev->disp_priority == 2) {
+			d1mode_priority_a_cnt |= MODE_PRIORITY_ALWAYS_ON;
+			d2mode_priority_a_cnt |= MODE_PRIORITY_ALWAYS_ON;
+		}
+		WREG32(D1MODE_PRIORITY_A_CNT, d1mode_priority_a_cnt);
+		WREG32(D1MODE_PRIORITY_B_CNT, d1mode_priority_a_cnt);
+		WREG32(D2MODE_PRIORITY_A_CNT, d2mode_priority_a_cnt);
+		WREG32(D2MODE_PRIORITY_B_CNT, d2mode_priority_a_cnt);
 	} else if (mode0) {
 		if (rfixed_trunc(wm0.dbpp) > 64)
 			a.full = rfixed_div(wm0.dbpp, wm0.num_line_pair);
@@ -1112,8 +1031,11 @@ void rv515_bandwidth_avivo_update(struct radeon_device *rdev)
 			priority_mark02.full = 0;
 		if (wm0.priority_mark_max.full > priority_mark02.full)
 			priority_mark02.full = wm0.priority_mark_max.full;
-		WREG32(D1MODE_PRIORITY_A_CNT, rfixed_trunc(priority_mark02));
-		WREG32(D1MODE_PRIORITY_B_CNT, rfixed_trunc(priority_mark02));
+		d1mode_priority_a_cnt = rfixed_trunc(priority_mark02);
+		if (rdev->disp_priority == 2)
+			d1mode_priority_a_cnt |= MODE_PRIORITY_ALWAYS_ON;
+		WREG32(D1MODE_PRIORITY_A_CNT, d1mode_priority_a_cnt);
+		WREG32(D1MODE_PRIORITY_B_CNT, d1mode_priority_a_cnt);
 		WREG32(D2MODE_PRIORITY_A_CNT, MODE_PRIORITY_OFF);
 		WREG32(D2MODE_PRIORITY_B_CNT, MODE_PRIORITY_OFF);
 	} else {
@@ -1142,10 +1064,13 @@ void rv515_bandwidth_avivo_update(struct radeon_device *rdev)
 			priority_mark12.full = 0;
 		if (wm1.priority_mark_max.full > priority_mark12.full)
 			priority_mark12.full = wm1.priority_mark_max.full;
+		d2mode_priority_a_cnt = rfixed_trunc(priority_mark12);
+		if (rdev->disp_priority == 2)
+			d2mode_priority_a_cnt |= MODE_PRIORITY_ALWAYS_ON;
 		WREG32(D1MODE_PRIORITY_A_CNT, MODE_PRIORITY_OFF);
 		WREG32(D1MODE_PRIORITY_B_CNT, MODE_PRIORITY_OFF);
-		WREG32(D2MODE_PRIORITY_A_CNT, rfixed_trunc(priority_mark12));
-		WREG32(D2MODE_PRIORITY_B_CNT, rfixed_trunc(priority_mark12));
+		WREG32(D2MODE_PRIORITY_A_CNT, d2mode_priority_a_cnt);
+		WREG32(D2MODE_PRIORITY_B_CNT, d2mode_priority_a_cnt);
 	}
 }
 
@@ -1154,6 +1079,8 @@ void rv515_bandwidth_update(struct radeon_device *rdev)
 	uint32_t tmp;
 	struct drm_display_mode *mode0 = NULL;
 	struct drm_display_mode *mode1 = NULL;
+
+	radeon_update_display_priority(rdev);
 
 	if (rdev->mode_info.crtcs[0]->base.enabled)
 		mode0 = &rdev->mode_info.crtcs[0]->base.mode;
@@ -1164,7 +1091,8 @@ void rv515_bandwidth_update(struct radeon_device *rdev)
 	 * modes if the user specifies HIGH for displaypriority
 	 * option.
 	 */
-	if (rdev->disp_priority == 2) {
+	if ((rdev->disp_priority == 2) &&
+	    (rdev->family == CHIP_RV515)) {
 		tmp = RREG32_MC(MC_MISC_LAT_TIMER);
 		tmp &= ~MC_DISP1R_INIT_LAT_MASK;
 		tmp &= ~MC_DISP0R_INIT_LAT_MASK;

@@ -3,6 +3,8 @@ PATCHLEVEL = 6
 SUBLEVEL = 32
 EXTRAVERSION =
 NAME = Man-Eating Seals of Antiquity
+RHEL_MAJOR = 6
+RHEL_MINOR = 0
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
@@ -15,6 +17,12 @@ NAME = Man-Eating Seals of Antiquity
 #    (this increases performance and avoids hard-to-debug behaviour);
 # o  print "Entering directory ...";
 MAKEFLAGS += -rR --no-print-directory
+
+# Avoid funny character set dependencies
+unexport LC_ALL
+LC_COLLATE=C
+LC_NUMERIC=C
+export LC_COLLATE LC_NUMERIC
 
 # We are using a recursive build, so we need to do a little thinking
 # to get the ordering right.
@@ -346,6 +354,24 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -Werror-implicit-function-declaration \
 		   -Wno-format-security \
 		   -fno-delete-null-pointer-checks
+
+ifneq (,$(filter $(ARCH), i386 x86_64))
+CPP_MAJOR       := $(shell $(CPP) -dumpversion 2>&1 | cut -d'.' -f1)
+CPP_MINOR       := $(shell $(CPP) -dumpversion 2>&1 | cut -d'.' -f2)
+CPP_PATCH       := $(shell $(CPP) -dumpversion 2>&1 | cut -d'.' -f3)
+# Assumes that major, minor, and patch cannot exceed 999
+CPP_VERS        := $(shell expr $(CPP_MAJOR) \* 1000000 + $(CPP_MINOR) \* 1000 \
+		   + $(CPP_PATCH))
+
+# GCC Bugzilla Bug 43949: http://gcc.gnu.org/bugzilla/show_bug.cgi?id=43949
+# add -Wno-array-bounds to remove bogus warnings.  This flag is present in
+# gcc version 4.4.4 .
+ifeq ($(KBUILD_EXTMOD),)
+KBUILD_CFLAGS   += $(shell if [ $(CPP_VERS) -ge 4004004 ]; then \
+		   echo "-Wno-array-bounds -Werror"; else echo ""; fi)
+endif ##($(KBUILD_EXTMOD),)
+endif #(,$(filter $(ARCH), i386 x86_64))
+
 KBUILD_AFLAGS   := -D__ASSEMBLY__
 
 # Read KERNELRELEASE from include/config/kernel.release (if it exists)
@@ -704,6 +730,10 @@ quiet_cmd_vmlinux__ ?= LD      $@
       --start-group $(vmlinux-main) --end-group                  \
       $(filter-out $(vmlinux-lds) $(vmlinux-init) $(vmlinux-main) vmlinux.o FORCE ,$^)
 
+ifdef AFTER_LINK
+cmd_vmlinux__ += ; $(AFTER_LINK)
+endif
+
 # Generate new vmlinux version
 quiet_cmd_vmlinux_version = GEN     .version
       cmd_vmlinux_version = set -e;                     \
@@ -1039,7 +1069,12 @@ endef
 define filechk_version.h
 	(echo \#define LINUX_VERSION_CODE $(shell                             \
 	expr $(VERSION) \* 65536 + $(PATCHLEVEL) \* 256 + $(SUBLEVEL));     \
-	echo '#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))';)
+	echo '#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))'; \
+	echo '#define RHEL_MAJOR $(RHEL_MAJOR)'; \
+	echo '#define RHEL_MINOR $(RHEL_MINOR)'; \
+	echo '#define RHEL_RELEASE_VERSION(a,b) (((a) << 8) + (b))'; \
+	echo '#define RHEL_RELEASE_CODE \
+		$(shell expr $(RHEL_MAJOR) \* 256 + $(RHEL_MINOR))';)
 endef
 
 include/linux/version.h: $(srctree)/Makefile FORCE
@@ -1215,6 +1250,7 @@ clean: archclean $(clean-dirs)
 	$(call cmd,rmfiles)
 	@find . $(RCS_FIND_IGNORE) \
 		\( -name '*.[oas]' -o -name '*.ko' -o -name '.*.cmd' \
+		-o -name '*.ko.*' \
 		-o -name '.*.d' -o -name '.*.tmp' -o -name '*.mod.c' \
 		-o -name '*.symtypes' -o -name 'modules.order' \
 		-o -name 'Module.markers' -o -name '.tmp_*.o.*' \
@@ -1405,7 +1441,9 @@ _emodinst_:
 
 PHONY += _emodinst_post
 _emodinst_post: _emodinst_
+ifeq ($(INSTALL_MOD_PATH),)
 	$(call cmd,depmod)
+endif
 
 clean-dirs := $(addprefix _clean_,$(KBUILD_EXTMOD))
 
@@ -1422,6 +1460,7 @@ clean: $(clean-dirs)
 	$(call cmd,rmfiles)
 	@find $(KBUILD_EXTMOD) $(RCS_FIND_IGNORE) \
 		\( -name '*.[oas]' -o -name '*.ko' -o -name '.*.cmd' \
+		-o -name '*.ko.*' \
 		-o -name '.*.d' -o -name '.*.tmp' -o -name '*.mod.c' \
 		-o -name '*.gcno' \) -type f -print | xargs rm -f
 

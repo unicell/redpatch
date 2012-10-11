@@ -49,6 +49,7 @@
 #include "xfs_buf_item.h"
 #include "xfs_utils.h"
 #include "xfs_qm.h"
+#include "xfs_trace.h"
 
 #ifdef DEBUG
 # define qdprintk(s, args...)	cmn_err(CE_DEBUG, s, ## args)
@@ -266,7 +267,7 @@ xfs_qm_scall_trunc_qfiles(
 	}
 
 	if ((flags & XFS_DQ_USER) && mp->m_sb.sb_uquotino != NULLFSINO) {
-		error = xfs_iget(mp, NULL, mp->m_sb.sb_uquotino, 0, 0, &qip, 0);
+		error = xfs_iget(mp, NULL, mp->m_sb.sb_uquotino, 0, 0, &qip);
 		if (!error) {
 			error = xfs_truncate_file(mp, qip);
 			IRELE(qip);
@@ -275,7 +276,7 @@ xfs_qm_scall_trunc_qfiles(
 
 	if ((flags & (XFS_DQ_GROUP|XFS_DQ_PROJ)) &&
 	    mp->m_sb.sb_gquotino != NULLFSINO) {
-		error2 = xfs_iget(mp, NULL, mp->m_sb.sb_gquotino, 0, 0, &qip, 0);
+		error2 = xfs_iget(mp, NULL, mp->m_sb.sb_gquotino, 0, 0, &qip);
 		if (!error2) {
 			error2 = xfs_truncate_file(mp, qip);
 			IRELE(qip);
@@ -420,12 +421,12 @@ xfs_qm_scall_getqstat(
 	}
 	if (!uip && mp->m_sb.sb_uquotino != NULLFSINO) {
 		if (xfs_iget(mp, NULL, mp->m_sb.sb_uquotino,
-					0, 0, &uip, 0) == 0)
+					0, 0, &uip) == 0)
 			tempuqip = B_TRUE;
 	}
 	if (!gip && mp->m_sb.sb_gquotino != NULLFSINO) {
 		if (xfs_iget(mp, NULL, mp->m_sb.sb_gquotino,
-					0, 0, &gip, 0) == 0)
+					0, 0, &gip) == 0)
 			tempgqip = B_TRUE;
 	}
 	if (uip) {
@@ -496,7 +497,6 @@ xfs_qm_scall_setqlim(
 		ASSERT(error != ENOENT);
 		return (error);
 	}
-	xfs_dqtrace_entry(dqp, "Q_SETQLIM: AFT DQGET");
 	xfs_trans_dqjoin(tp, dqp);
 	ddq = &dqp->q_core;
 
@@ -602,7 +602,6 @@ xfs_qm_scall_setqlim(
 	dqp->dq_flags |= XFS_DQ_DIRTY;
 	xfs_trans_log_dquot(tp, dqp);
 
-	xfs_dqtrace_entry(dqp, "Q_SETQLIM: COMMIT");
 	error = xfs_trans_commit(tp, 0);
 	xfs_qm_dqprint(dqp);
 	xfs_qm_dqrele(dqp);
@@ -630,7 +629,6 @@ xfs_qm_scall_getquota(
 		return (error);
 	}
 
-	xfs_dqtrace_entry(dqp, "Q_GETQUOTA SUCCESS");
 	/*
 	 * If everything's NULL, this dquot doesn't quite exist as far as
 	 * our utility programs are concerned.
@@ -893,7 +891,8 @@ xfs_qm_dqrele_all_inodes(
 	uint		 flags)
 {
 	ASSERT(mp->m_quotainfo);
-	xfs_inode_ag_iterator(mp, xfs_dqrele_inode, flags, XFS_ICI_NO_TAG);
+	xfs_inode_ag_iterator(mp, xfs_dqrele_inode, flags,
+				XFS_ICI_NO_TAG, 0, NULL);
 }
 
 /*------------------------------------------------------------------------*/
@@ -1113,10 +1112,7 @@ xfs_qm_internalqcheck_adjust(
 	xfs_ino_t	ino,		/* inode number to get data for */
 	void		__user *buffer,	/* not used */
 	int		ubsize,		/* not used */
-	void		*private_data,	/* not used */
-	xfs_daddr_t	bno,		/* starting block of inode cluster */
 	int		*ubused,	/* not used */
-	void		*dip,		/* not used */
 	int		*res)		/* bulkstat result code */
 {
 	xfs_inode_t		*ip;
@@ -1138,7 +1134,7 @@ xfs_qm_internalqcheck_adjust(
 	ipreleased = B_FALSE;
  again:
 	lock_flags = XFS_ILOCK_SHARED;
-	if ((error = xfs_iget(mp, NULL, ino, 0, lock_flags, &ip, bno))) {
+	if ((error = xfs_iget(mp, NULL, ino, 0, lock_flags, &ip))) {
 		*res = BULKSTAT_RV_NOTHING;
 		return (error);
 	}
@@ -1194,9 +1190,9 @@ xfs_qm_internalqcheck(
 	if (! XFS_IS_QUOTA_ON(mp))
 		return XFS_ERROR(ESRCH);
 
-	xfs_log_force(mp, (xfs_lsn_t)0, XFS_LOG_FORCE | XFS_LOG_SYNC);
+	xfs_log_force(mp, XFS_LOG_SYNC);
 	XFS_bflush(mp->m_ddev_targp);
-	xfs_log_force(mp, (xfs_lsn_t)0, XFS_LOG_FORCE | XFS_LOG_SYNC);
+	xfs_log_force(mp, XFS_LOG_SYNC);
 	XFS_bflush(mp->m_ddev_targp);
 
 	mutex_lock(&qcheck_lock);
@@ -1211,15 +1207,15 @@ xfs_qm_internalqcheck(
 		 * Iterate thru all the inodes in the file system,
 		 * adjusting the corresponding dquot counters
 		 */
-		if ((error = xfs_bulkstat(mp, &lastino, &count,
-				 xfs_qm_internalqcheck_adjust, NULL,
-				 0, NULL, BULKSTAT_FG_IGET, &done))) {
+		error = xfs_bulkstat(mp, &lastino, &count,
+				 xfs_qm_internalqcheck_adjust,
+				 0, NULL, &done);
+		if (error) {
+			cmn_err(CE_DEBUG, "Bulkstat returned error 0x%x", error);
 			break;
 		}
-	} while (! done);
-	if (error) {
-		cmn_err(CE_DEBUG, "Bulkstat returned error 0x%x", error);
-	}
+	} while (!done);
+
 	cmn_err(CE_DEBUG, "Checking results against system dquots");
 	for (i = 0; i < qmtest_hashmask; i++) {
 		h1 = &qmtest_udqtab[i];

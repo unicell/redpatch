@@ -22,7 +22,11 @@
 #include "pci.h"
 #include "msi.h"
 
+#ifdef CONFIG_PCI_MSI_DEFAULT_ON
 static int pci_msi_enable = 1;
+#else
+static int pci_msi_enable = 0;
+#endif /*CONFIG_PCI_MSI_DEFAULT_ON*/
 
 /* Arch hooks */
 
@@ -434,7 +438,7 @@ static int msi_capability_init(struct pci_dev *dev, int nvec)
 static void __iomem *msix_map_region(struct pci_dev *dev, unsigned pos,
 							unsigned nr_entries)
 {
-	unsigned long phys_addr;
+	resource_size_t phys_addr;
 	u32 table_offset;
 	u8 bir;
 
@@ -835,6 +839,11 @@ int pci_msi_enabled(void)
 	return pci_msi_enable;
 }
 EXPORT_SYMBOL(pci_msi_enabled);
+
+void pci_yes_msi(void)
+{
+	pci_msi_enable = 1;
+}
 
 void pci_msi_init_pci_dev(struct pci_dev *dev)
 {

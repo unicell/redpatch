@@ -1494,8 +1494,15 @@ int iwl_init_drv(struct iwl_priv *priv)
 	priv->band = IEEE80211_BAND_2GHZ;
 
 	priv->iw_mode = NL80211_IFTYPE_STATION;
+	priv->_agn.agg_tids_count = 0;
 
 	priv->current_ht_config.sm_ps = WLAN_HT_CAP_SM_PS_DISABLED;
+
+	/* initialize force reset */
+	priv->force_reset[IWL_RF_RESET].reset_duration =
+		IWL_DELAY_NEXT_FORCE_RF_RESET;
+	priv->force_reset[IWL_FW_RESET].reset_duration =
+		IWL_DELAY_NEXT_FORCE_FW_RELOAD;
 
 	/* Choose which receivers/antennas to use */
 	if (priv->cfg->ops->hcmd->set_rxon_chain)
@@ -1598,9 +1605,9 @@ EXPORT_SYMBOL(iwl_uninit_drv);
 void iwl_free_isr_ict(struct iwl_priv *priv)
 {
 	if (priv->ict_tbl_vir) {
-		pci_free_consistent(priv->pci_dev, (sizeof(u32) * ICT_COUNT) +
-					PAGE_SIZE, priv->ict_tbl_vir,
-					priv->ict_tbl_dma);
+		dma_free_coherent(&priv->pci_dev->dev,
+				  (sizeof(u32) * ICT_COUNT) + PAGE_SIZE,
+				  priv->ict_tbl_vir, priv->ict_tbl_dma);
 		priv->ict_tbl_vir = NULL;
 	}
 }
@@ -1616,9 +1623,9 @@ int iwl_alloc_isr_ict(struct iwl_priv *priv)
 	if (priv->cfg->use_isr_legacy)
 		return 0;
 	/* allocate shrared data table */
-	priv->ict_tbl_vir = pci_alloc_consistent(priv->pci_dev, (sizeof(u32) *
-						  ICT_COUNT) + PAGE_SIZE,
-						  &priv->ict_tbl_dma);
+	priv->ict_tbl_vir = dma_alloc_coherent(&priv->pci_dev->dev,
+					(sizeof(u32) * ICT_COUNT) + PAGE_SIZE,
+					&priv->ict_tbl_dma, GFP_KERNEL);
 	if (!priv->ict_tbl_vir)
 		return -ENOMEM;
 
@@ -2646,6 +2653,7 @@ int iwl_mac_config(struct ieee80211_hw *hw, u32 changed)
 			priv->staging_rxon.flags = 0;
 
 		iwl_set_rxon_channel(priv, conf->channel);
+		iwl_set_rxon_ht(priv, ht_conf);
 
 		iwl_set_flags_for_band(priv, conf->channel->band);
 		spin_unlock_irqrestore(&priv->lock, flags);
@@ -3033,6 +3041,165 @@ void iwl_update_stats(struct iwl_priv *priv, bool is_tx, __le16 fc, u16 len)
 }
 EXPORT_SYMBOL(iwl_update_stats);
 #endif
+
+static void iwl_force_rf_reset(struct iwl_priv *priv)
+{
+	if (test_bit(STATUS_EXIT_PENDING, &priv->status))
+		return;
+
+	if (!iwl_is_associated(priv)) {
+		IWL_DEBUG_SCAN(priv, "force reset rejected: not associated\n");
+		return;
+	}
+	/*
+	 * There is no easy and better way to force reset the radio,
+	 * the only known method is switching channel which will force to
+	 * reset and tune the radio.
+	 * Use internal short scan (single channel) operation to should
+	 * achieve this objective.
+	 * Driver should reset the radio when number of consecutive missed
+	 * beacon, or any other uCode error condition detected.
+	 */
+	IWL_DEBUG_INFO(priv, "perform radio reset.\n");
+	iwl_internal_short_hw_scan(priv);
+}
+
+
+int iwl_force_reset(struct iwl_priv *priv, int mode)
+{
+	struct iwl_force_reset *force_reset;
+
+	if (test_bit(STATUS_EXIT_PENDING, &priv->status))
+		return -EINVAL;
+
+	if (mode >= IWL_MAX_FORCE_RESET) {
+		IWL_DEBUG_INFO(priv, "invalid reset request.\n");
+		return -EINVAL;
+	}
+	force_reset = &priv->force_reset[mode];
+	force_reset->reset_request_count++;
+	if (force_reset->last_force_reset_jiffies &&
+	    time_after(force_reset->last_force_reset_jiffies +
+	    force_reset->reset_duration, jiffies)) {
+		IWL_DEBUG_INFO(priv, "force reset rejected\n");
+		force_reset->reset_reject_count++;
+		return -EAGAIN;
+	}
+	force_reset->reset_success_count++;
+	force_reset->last_force_reset_jiffies = jiffies;
+	IWL_DEBUG_INFO(priv, "perform force reset (%d)\n", mode);
+	switch (mode) {
+	case IWL_RF_RESET:
+		iwl_force_rf_reset(priv);
+		break;
+	case IWL_FW_RESET:
+		IWL_ERR(priv, "On demand firmware reload\n");
+		/* Set the FW error flag -- cleared on iwl_down */
+		set_bit(STATUS_FW_ERROR, &priv->status);
+		wake_up_interruptible(&priv->wait_command_queue);
+		/*
+		 * Keep the restart process from trying to send host
+		 * commands by clearing the INIT status bit
+		 */
+		clear_bit(STATUS_READY, &priv->status);
+		queue_work(priv->workqueue, &priv->restart);
+		break;
+	}
+	return 0;
+}
+EXPORT_SYMBOL(iwl_force_reset);
+
+/**
+ * iwl_bg_monitor_recover - Timer callback to check for stuck queue and recover
+ *
+ * During normal condition (no queue is stuck), the timer is continually set to
+ * execute every monitor_recover_period milliseconds after the last timer
+ * expired.  When the queue read_ptr is at the same place, the timer is
+ * shorten to 100mSecs.  This is
+ *      1) to reduce the chance that the read_ptr may wrap around (not stuck)
+ *      2) to detect the stuck queues quicker before the station and AP can
+ *      disassociate each other.
+ *
+ * This function monitors all the tx queues and recover from it if any
+ * of the queues are stuck.
+ * 1. It first check the cmd queue for stuck conditions.  If it is stuck,
+ *      it will recover by resetting the firmware and return.
+ * 2. Then, it checks for station association.  If it associates it will check
+ *      other queues.  If any queue is stuck, it will recover by resetting
+ *      the firmware.
+ * Note: It the number of times the queue read_ptr to be at the same place to
+ *      be MAX_REPEAT+1 in order to consider to be stuck.
+ */
+/*
+ * The maximum number of times the read pointer of the tx queue at the
+ * same place without considering to be stuck.
+ */
+#define MAX_REPEAT      (2)
+static int iwl_check_stuck_queue(struct iwl_priv *priv, int cnt)
+{
+	struct iwl_tx_queue *txq;
+	struct iwl_queue *q;
+
+	txq = &priv->txq[cnt];
+	q = &txq->q;
+	/* queue is empty, skip */
+	if (q->read_ptr != q->write_ptr) {
+		if (q->read_ptr == q->last_read_ptr) {
+			/* a queue has not been read from last time */
+			if (q->repeat_same_read_ptr > MAX_REPEAT) {
+				IWL_ERR(priv,
+					"queue %d stuck %d time. Fw reload.\n",
+					q->id, q->repeat_same_read_ptr);
+				q->repeat_same_read_ptr = 0;
+				iwl_force_reset(priv, IWL_FW_RESET);
+			} else {
+				q->repeat_same_read_ptr++;
+				IWL_DEBUG_RADIO(priv,
+						"queue %d, not read %d time\n",
+						q->id,
+						q->repeat_same_read_ptr);
+				mod_timer(&priv->monitor_recover, jiffies +
+					msecs_to_jiffies(IWL_ONE_HUNDRED_MSECS));
+			}
+			return 1;
+		} else {
+			q->last_read_ptr = q->read_ptr;
+			q->repeat_same_read_ptr = 0;
+		}
+	}
+	return 0;
+}
+
+void iwl_bg_monitor_recover(unsigned long data)
+{
+	struct iwl_priv *priv = (struct iwl_priv *)data;
+	int cnt;
+
+	if (test_bit(STATUS_EXIT_PENDING, &priv->status))
+		return;
+
+	/* monitor and check for stuck cmd queue */
+	if (iwl_check_stuck_queue(priv, IWL_CMD_QUEUE_NUM))
+		return;
+
+	/* monitor and check for other stuck queues */
+	if (iwl_is_associated(priv)) {
+		for (cnt = 0; cnt < priv->hw_params.max_txq_num; cnt++) {
+			/* skip as we already checked the command queue */
+			if (cnt == IWL_CMD_QUEUE_NUM)
+				continue;
+			if (iwl_check_stuck_queue(priv, cnt))
+				return;
+		}
+	}
+	/*
+	 * Reschedule the timer to occur in
+	 * priv->cfg->monitor_recover_period
+	 */
+	mod_timer(&priv->monitor_recover,
+		jiffies + msecs_to_jiffies(priv->cfg->monitor_recover_period));
+}
+EXPORT_SYMBOL(iwl_bg_monitor_recover);
 
 #ifdef CONFIG_PM
 

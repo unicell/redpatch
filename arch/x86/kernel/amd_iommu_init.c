@@ -29,6 +29,7 @@
 #include <asm/amd_iommu.h>
 #include <asm/iommu.h>
 #include <asm/gart.h>
+#include <asm/dma.h>
 
 /*
  * definitions for the ACPI scanning code
@@ -119,6 +120,10 @@ bool amd_iommu_dump;
 
 static int __initdata amd_iommu_detected;
 
+/* original values for gart fallback on initialization failure */
+static int __initdata __gart_iommu_aperture_disabled;
+static int __initdata __gart_iommu_aperture;
+
 u16 amd_iommu_last_bdf;			/* largest PCI device id we have
 					   to handle */
 LIST_HEAD(amd_iommu_unity_map);		/* a list of required unity mappings
@@ -130,10 +135,20 @@ bool amd_iommu_isolate = true;		/* if true, device isolation is
 					   enabled */
 #endif
 
+static bool amd_iommu_force_nopt;       /* force isolation (no-pt) mode
+					   of iommu */
+
+static bool amd_iommu_enable;		/* enable AMD iommu */
+
 bool amd_iommu_unmap_flush;		/* if true, flush on every unmap */
 
 LIST_HEAD(amd_iommu_list);		/* list of all AMD IOMMUs in the
 					   system */
+
+/*
+ * Set to true if ACPI table parsing and hardware intialization went properly
+ */
+static bool amd_iommu_initialized;
 
 /*
  * Pointer to the device table which is shared by all AMD IOMMUs
@@ -279,8 +294,12 @@ static u8 * __init iommu_map_mmio_space(u64 address)
 {
 	u8 *ret;
 
-	if (!request_mem_region(address, MMIO_REGION_LENGTH, "amd_iommu"))
+	if (!request_mem_region(address, MMIO_REGION_LENGTH, "amd_iommu")) {
+		pr_err("AMD-Vi: Can not reserve memory region %llx for mmio\n",
+			address);
+		pr_err("AMD-Vi: This is a BIOS bug. Please complain to your hardware vendor\n");
 		return NULL;
+	}
 
 	ret = ioremap_nocache(address, MMIO_REGION_LENGTH);
 	if (ret != NULL)
@@ -429,7 +448,7 @@ static u8 * __init alloc_command_buffer(struct amd_iommu *iommu)
 	if (cmd_buf == NULL)
 		return NULL;
 
-	iommu->cmd_buf_size = CMD_BUFFER_SIZE;
+	iommu->cmd_buf_size = CMD_BUFFER_SIZE | CMD_BUFFER_UNINITIALIZED;
 
 	return cmd_buf;
 }
@@ -465,12 +484,13 @@ static void iommu_enable_command_buffer(struct amd_iommu *iommu)
 		    &entry, sizeof(entry));
 
 	amd_iommu_reset_cmd_buffer(iommu);
+	iommu->cmd_buf_size &= ~(CMD_BUFFER_UNINITIALIZED);
 }
 
 static void __init free_command_buffer(struct amd_iommu *iommu)
 {
 	free_pages((unsigned long)iommu->cmd_buf,
-		   get_order(iommu->cmd_buf_size));
+		   get_order(iommu->cmd_buf_size & ~(CMD_BUFFER_UNINITIALIZED)));
 }
 
 /* allocates the memory where the IOMMU will log its events to */
@@ -913,6 +933,8 @@ static int __init init_iommu_all(struct acpi_table_header *table)
 	}
 	WARN_ON(p != end);
 
+	amd_iommu_initialized = true;
+
 	return 0;
 }
 
@@ -925,7 +947,7 @@ static int __init init_iommu_all(struct acpi_table_header *table)
  *
  ****************************************************************************/
 
-static int __init iommu_setup_msi(struct amd_iommu *iommu)
+static int iommu_setup_msi(struct amd_iommu *iommu)
 {
 	int r;
 
@@ -1263,6 +1285,9 @@ int __init amd_iommu_init(void)
 	if (acpi_table_parse("IVRS", init_iommu_all) != 0)
 		goto free;
 
+	if (!amd_iommu_initialized)
+		goto free;
+
 	if (acpi_table_parse("IVRS", init_memory_definitions) != 0)
 		goto free;
 
@@ -1274,12 +1299,19 @@ int __init amd_iommu_init(void)
 	if (ret)
 		goto free;
 
+	enable_iommus();
+
 	if (iommu_pass_through)
 		ret = amd_iommu_init_passthrough();
 	else
 		ret = amd_iommu_init_dma_ops();
+
 	if (ret)
-		goto free;
+		goto disable;
+
+	amd_iommu_init_api();
+
+	amd_iommu_init_notifier();
 
 	enable_iommus();
 
@@ -1300,6 +1332,8 @@ int __init amd_iommu_init(void)
 out:
 	return ret;
 
+disable:
+	disable_iommus();
 free:
 	free_pages((unsigned long)amd_iommu_pd_alloc_bitmap,
 		   get_order(MAX_DOMAIN_ID/8));
@@ -1319,6 +1353,15 @@ free:
 	free_iommu_all();
 
 	free_unity_maps();
+
+#ifdef CONFIG_GART_IOMMU
+	/*
+	 * We failed to initialize the AMD IOMMU - try fallback to GART
+	 * if possible.
+	 */
+	gart_iommu_aperture_disabled = __gart_iommu_aperture_disabled;
+	gart_iommu_aperture = __gart_iommu_aperture;
+#endif
 
 	goto out;
 }
@@ -1345,13 +1388,33 @@ void __init amd_iommu_detect(void)
 	if (swiotlb || no_iommu || (iommu_detected && !gart_iommu_aperture))
 		return;
 
+	if (!amd_iommu_enable) {
+		printk(KERN_INFO "AMD-Vi disabled by default: pass amd_iommu=on to enable\n");
+		return;
+	}
+
 	if (acpi_table_parse("IVRS", early_amd_iommu_detect) == 0) {
 		iommu_detected = 1;
 		amd_iommu_detected = 1;
 #ifdef CONFIG_GART_IOMMU
+		__gart_iommu_aperture_disabled = gart_iommu_aperture_disabled;
+		__gart_iommu_aperture = gart_iommu_aperture;
 		gart_iommu_aperture_disabled = 1;
 		gart_iommu_aperture = 0;
 #endif
+		/* Make sure ACS will be enabled */
+		pci_request_acs();
+	
+		/*
+		 * The AMD IOMMU driver forces the passthrough mode by default
+		 * for performance reasons. Since we need a way to switch back
+		 * to the isolation mode we reuse amd_iommu={isolate|share} for
+		 * that.
+		 */
+		iommu_pass_through = amd_iommu_force_nopt ? 0 : 1;
+	
+		if (iommu_pass_through && max_pfn > MAX_DMA32_PFN)
+			swiotlb = 1;
 	}
 }
 
@@ -1372,12 +1435,18 @@ static int __init parse_amd_iommu_dump(char *str)
 static int __init parse_amd_iommu_options(char *str)
 {
 	for (; *str; ++str) {
-		if (strncmp(str, "isolate", 7) == 0)
+		if (strncmp(str, "isolate", 7) == 0) {
 			amd_iommu_isolate = true;
-		if (strncmp(str, "share", 5) == 0)
+			amd_iommu_force_nopt = true;
+		}
+		if (strncmp(str, "share", 5) == 0) {
 			amd_iommu_isolate = false;
+			amd_iommu_force_nopt = true;
+		}
 		if (strncmp(str, "fullflush", 9) == 0)
 			amd_iommu_unmap_flush = true;
+		if (strncmp(str, "on", 2) == 0)
+			amd_iommu_enable = true;
 	}
 
 	return 1;

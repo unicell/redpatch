@@ -89,10 +89,20 @@ struct usb_hcd {
 	 */
 	const struct hc_driver	*driver;	/* hw-specific hooks */
 
-	/* Flags that need to be manipulated atomically */
+	/* Flags that need to be manipulated atomically.  Always use
+	 * set_bit() or clear_bit() to change their values.
+	 */
 	unsigned long		flags;
-#define HCD_FLAG_HW_ACCESSIBLE	0x00000001
-#define HCD_FLAG_SAW_IRQ	0x00000002
+#define HCD_FLAG_HW_ACCESSIBLE	1
+#define HCD_FLAG_SAW_IRQ	2
+#define HCD_FLAG_RH_POLLABLE	3
+
+	/* The flags can be tested using these macros; they are likely to
+	 * be slightly faster than test_bit().
+	 */
+#define HCD_HW_ACCESSIBLE(hcd)	((hcd)->flags & (1U << HCD_FLAG_HW_ACCESSIBLE))
+#define HCD_SAW_IRQ(hcd)	((hcd)->flags & (1U << HCD_FLAG_SAW_IRQ))
+#define HCD_RH_POLLABLE(hcd)	((hcd)->flags & (1U << HCD_FLAG_RH_POLLABLE))
 
 	unsigned		rh_registered:1;/* is root hub registered? */
 
@@ -110,6 +120,20 @@ struct usb_hcd {
 	u64			rsrc_start;	/* memory/io resource start */
 	u64			rsrc_len;	/* memory/io resource length */
 	unsigned		power_budget;	/* in mA, 0 = no limit */
+
+	/* bandwidth_mutex should be taken before adding or removing
+	 * any new bus bandwidth constraints:
+	 *   1. Before adding a configuration for a new device.
+	 *   2. Before removing the configuration to put the device into
+	 *      the addressed state.
+	 *   3. Before selecting a different configuration.
+	 *   4. Before selecting an alternate interface setting.
+	 *
+	 * bandwidth_mutex should be dropped after a successful control message
+	 * to the device, or resetting the bandwidth after a failed attempt.
+	 */
+	struct mutex		bandwidth_mutex;
+
 
 #define HCD_BUFFER_POOLS	4
 	struct dma_pool		*pool [HCD_BUFFER_POOLS];
@@ -234,7 +258,7 @@ struct hc_driver {
 	/* xHCI specific functions */
 		/* Called by usb_alloc_dev to alloc HC device structures */
 	int	(*alloc_dev)(struct usb_hcd *, struct usb_device *);
-		/* Called by usb_release_dev to free HC device structures */
+		/* Called by usb_disconnect to free HC device structures */
 	void	(*free_dev)(struct usb_hcd *, struct usb_device *);
 
 	/* Bandwidth computation functions */
@@ -272,6 +296,7 @@ struct hc_driver {
 		 */
 	int	(*update_hub_device)(struct usb_hcd *, struct usb_device *hdev,
 			struct usb_tt *tt, gfp_t mem_flags);
+	int	(*reset_device)(struct usb_hcd *, struct usb_device *);
 };
 
 extern int usb_hcd_link_urb_to_ep(struct usb_hcd *hcd, struct urb *urb);

@@ -265,6 +265,9 @@ static int rds_setsockopt(struct socket *sock, int level, int optname,
 	case RDS_GET_MR:
 		ret = rds_get_mr(rs, optval, optlen);
 		break;
+	case RDS_GET_MR_FOR_DEST:
+		ret = rds_get_mr_for_dest(rs, optval, optlen);
+		break;
 	case RDS_FREE_MR:
 		ret = rds_free_mr(rs, optval, optlen);
 		break;
@@ -407,7 +410,8 @@ static int __rds_create(struct socket *sock, struct sock *sk, int protocol)
 	return 0;
 }
 
-static int rds_create(struct net *net, struct socket *sock, int protocol)
+static int rds_create(struct net *net, struct socket *sock, int protocol,
+		      int kern)
 {
 	struct sock *sk;
 

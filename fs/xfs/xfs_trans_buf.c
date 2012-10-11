@@ -38,6 +38,7 @@
 #include "xfs_trans_priv.h"
 #include "xfs_error.h"
 #include "xfs_rw.h"
+#include "xfs_trace.h"
 
 
 STATIC xfs_buf_t *xfs_trans_buf_item_match(xfs_trans_t *, xfs_buftarg_t *,
@@ -74,16 +75,14 @@ xfs_trans_get_buf(xfs_trans_t	*tp,
 	xfs_buf_log_item_t	*bip;
 
 	if (flags == 0)
-		flags = XFS_BUF_LOCK | XFS_BUF_MAPPED;
+		flags = XBF_LOCK | XBF_MAPPED;
 
 	/*
 	 * Default to a normal get_buf() call if the tp is NULL.
 	 */
-	if (tp == NULL) {
-		bp = xfs_buf_get_flags(target_dev, blkno, len,
-							flags | BUF_BUSY);
-		return(bp);
-	}
+	if (tp == NULL)
+		return xfs_buf_get(target_dev, blkno, len,
+				   flags | XBF_DONT_BLOCK);
 
 	/*
 	 * If we find the buffer in the cache with this transaction
@@ -98,38 +97,35 @@ xfs_trans_get_buf(xfs_trans_t	*tp,
 	}
 	if (bp != NULL) {
 		ASSERT(XFS_BUF_VALUSEMA(bp) <= 0);
-		if (XFS_FORCED_SHUTDOWN(tp->t_mountp)) {
-			xfs_buftrace("TRANS GET RECUR SHUT", bp);
+		if (XFS_FORCED_SHUTDOWN(tp->t_mountp))
 			XFS_BUF_SUPER_STALE(bp);
-		}
+
 		/*
 		 * If the buffer is stale then it was binval'ed
 		 * since last read.  This doesn't matter since the
 		 * caller isn't allowed to use the data anyway.
 		 */
-		else if (XFS_BUF_ISSTALE(bp)) {
-			xfs_buftrace("TRANS GET RECUR STALE", bp);
+		else if (XFS_BUF_ISSTALE(bp))
 			ASSERT(!XFS_BUF_ISDELAYWRITE(bp));
-		}
+
 		ASSERT(XFS_BUF_FSPRIVATE2(bp, xfs_trans_t *) == tp);
 		bip = XFS_BUF_FSPRIVATE(bp, xfs_buf_log_item_t *);
 		ASSERT(bip != NULL);
 		ASSERT(atomic_read(&bip->bli_refcount) > 0);
 		bip->bli_recur++;
-		xfs_buftrace("TRANS GET RECUR", bp);
-		xfs_buf_item_trace("GET RECUR", bip);
+		trace_xfs_trans_get_buf_recur(bip);
 		return (bp);
 	}
 
 	/*
-	 * We always specify the BUF_BUSY flag within a transaction so
-	 * that get_buf does not try to push out a delayed write buffer
+	 * We always specify the XBF_DONT_BLOCK flag within a transaction
+	 * so that get_buf does not try to push out a delayed write buffer
 	 * which might cause another transaction to take place (if the
 	 * buffer was delayed alloc).  Such recursive transactions can
 	 * easily deadlock with our current transaction as well as cause
 	 * us to run out of stack space.
 	 */
-	bp = xfs_buf_get_flags(target_dev, blkno, len, flags | BUF_BUSY);
+	bp = xfs_buf_get(target_dev, blkno, len, flags | XBF_DONT_BLOCK);
 	if (bp == NULL) {
 		return NULL;
 	}
@@ -169,8 +165,7 @@ xfs_trans_get_buf(xfs_trans_t	*tp,
 	 */
 	XFS_BUF_SET_FSPRIVATE2(bp, tp);
 
-	xfs_buftrace("TRANS GET", bp);
-	xfs_buf_item_trace("GET", bip);
+	trace_xfs_trans_get_buf(bip);
 	return (bp);
 }
 
@@ -210,7 +205,7 @@ xfs_trans_getsb(xfs_trans_t	*tp,
 		ASSERT(bip != NULL);
 		ASSERT(atomic_read(&bip->bli_refcount) > 0);
 		bip->bli_recur++;
-		xfs_buf_item_trace("GETSB RECUR", bip);
+		trace_xfs_trans_getsb_recur(bip);
 		return (bp);
 	}
 
@@ -252,7 +247,7 @@ xfs_trans_getsb(xfs_trans_t	*tp,
 	 */
 	XFS_BUF_SET_FSPRIVATE2(bp, tp);
 
-	xfs_buf_item_trace("GETSB", bip);
+	trace_xfs_trans_getsb(bip);
 	return (bp);
 }
 
@@ -296,15 +291,15 @@ xfs_trans_read_buf(
 	int			error;
 
 	if (flags == 0)
-		flags = XFS_BUF_LOCK | XFS_BUF_MAPPED;
+		flags = XBF_LOCK | XBF_MAPPED;
 
 	/*
 	 * Default to a normal get_buf() call if the tp is NULL.
 	 */
 	if (tp == NULL) {
-		bp = xfs_buf_read_flags(target, blkno, len, flags | BUF_BUSY);
+		bp = xfs_buf_read(target, blkno, len, flags | XBF_DONT_BLOCK);
 		if (!bp)
-			return (flags & XFS_BUF_TRYLOCK) ?
+			return (flags & XBF_TRYLOCK) ?
 					EAGAIN : XFS_ERROR(ENOMEM);
 
 		if (XFS_BUF_GETERROR(bp) != 0) {
@@ -350,7 +345,7 @@ xfs_trans_read_buf(
 		ASSERT(XFS_BUF_FSPRIVATE(bp, void *) != NULL);
 		ASSERT((XFS_BUF_ISERROR(bp)) == 0);
 		if (!(XFS_BUF_ISDONE(bp))) {
-			xfs_buftrace("READ_BUF_INCORE !DONE", bp);
+			trace_xfs_trans_read_buf_io(bp, _RET_IP_);
 			ASSERT(!XFS_BUF_ISASYNC(bp));
 			XFS_BUF_READ(bp);
 			xfsbdstrat(tp->t_mountp, bp);
@@ -375,7 +370,7 @@ xfs_trans_read_buf(
 		 * brelse it either. Just get out.
 		 */
 		if (XFS_FORCED_SHUTDOWN(mp)) {
-			xfs_buftrace("READ_BUF_INCORE XFSSHUTDN", bp);
+			trace_xfs_trans_read_buf_shut(bp, _RET_IP_);
 			*bpp = NULL;
 			return XFS_ERROR(EIO);
 		}
@@ -385,27 +380,26 @@ xfs_trans_read_buf(
 		bip->bli_recur++;
 
 		ASSERT(atomic_read(&bip->bli_refcount) > 0);
-		xfs_buf_item_trace("READ RECUR", bip);
+		trace_xfs_trans_read_buf_recur(bip);
 		*bpp = bp;
 		return 0;
 	}
 
 	/*
-	 * We always specify the BUF_BUSY flag within a transaction so
-	 * that get_buf does not try to push out a delayed write buffer
+	 * We always specify the XBF_DONT_BLOCK flag within a transaction
+	 * so that get_buf does not try to push out a delayed write buffer
 	 * which might cause another transaction to take place (if the
 	 * buffer was delayed alloc).  Such recursive transactions can
 	 * easily deadlock with our current transaction as well as cause
 	 * us to run out of stack space.
 	 */
-	bp = xfs_buf_read_flags(target, blkno, len, flags | BUF_BUSY);
+	bp = xfs_buf_read(target, blkno, len, flags | XBF_DONT_BLOCK);
 	if (bp == NULL) {
 		*bpp = NULL;
 		return 0;
 	}
 	if (XFS_BUF_GETERROR(bp) != 0) {
 	    XFS_BUF_SUPER_STALE(bp);
-		xfs_buftrace("READ ERROR", bp);
 		error = XFS_BUF_GETERROR(bp);
 
 		xfs_ioerror_alert("xfs_trans_read_buf", mp,
@@ -464,8 +458,7 @@ xfs_trans_read_buf(
 	 */
 	XFS_BUF_SET_FSPRIVATE2(bp, tp);
 
-	xfs_buftrace("TRANS READ", bp);
-	xfs_buf_item_trace("READ", bip);
+	trace_xfs_trans_read_buf(bip);
 	*bpp = bp;
 	return 0;
 
@@ -480,10 +473,10 @@ shutdown_abort:
 	if (XFS_BUF_ISSTALE(bp) && XFS_BUF_ISDELAYWRITE(bp))
 		cmn_err(CE_NOTE, "about to pop assert, bp == 0x%p", bp);
 #endif
-	ASSERT((XFS_BUF_BFLAGS(bp) & (XFS_B_STALE|XFS_B_DELWRI)) !=
-						(XFS_B_STALE|XFS_B_DELWRI));
+	ASSERT((XFS_BUF_BFLAGS(bp) & (XBF_STALE|XBF_DELWRI)) !=
+				     (XBF_STALE|XBF_DELWRI));
 
-	xfs_buftrace("READ_BUF XFSSHUTDN", bp);
+	trace_xfs_trans_read_buf_shut(bp, _RET_IP_);
 	xfs_buf_relse(bp);
 	*bpp = NULL;
 	return XFS_ERROR(EIO);
@@ -549,13 +542,14 @@ xfs_trans_brelse(xfs_trans_t	*tp,
 	lidp = xfs_trans_find_item(tp, (xfs_log_item_t*)bip);
 	ASSERT(lidp != NULL);
 
+	trace_xfs_trans_brelse(bip);
+
 	/*
 	 * If the release is just for a recursive lock,
 	 * then decrement the count and return.
 	 */
 	if (bip->bli_recur > 0) {
 		bip->bli_recur--;
-		xfs_buf_item_trace("RELSE RECUR", bip);
 		return;
 	}
 
@@ -563,10 +557,8 @@ xfs_trans_brelse(xfs_trans_t	*tp,
 	 * If the buffer is dirty within this transaction, we can't
 	 * release it until we commit.
 	 */
-	if (lidp->lid_flags & XFS_LID_DIRTY) {
-		xfs_buf_item_trace("RELSE DIRTY", bip);
+	if (lidp->lid_flags & XFS_LID_DIRTY)
 		return;
-	}
 
 	/*
 	 * If the buffer has been invalidated, then we can't release
@@ -574,13 +566,10 @@ xfs_trans_brelse(xfs_trans_t	*tp,
 	 * as part of this transaction.  This prevents us from pulling
 	 * the item from the AIL before we should.
 	 */
-	if (bip->bli_flags & XFS_BLI_STALE) {
-		xfs_buf_item_trace("RELSE STALE", bip);
+	if (bip->bli_flags & XFS_BLI_STALE)
 		return;
-	}
 
 	ASSERT(!(bip->bli_flags & XFS_BLI_LOGGED));
-	xfs_buf_item_trace("RELSE", bip);
 
 	/*
 	 * Free up the log item descriptor tracking the released item.
@@ -677,7 +666,7 @@ xfs_trans_bjoin(xfs_trans_t	*tp,
 	 */
 	XFS_BUF_SET_FSPRIVATE2(bp, tp);
 
-	xfs_buf_item_trace("BJOIN", bip);
+	trace_xfs_trans_bjoin(bip);
 }
 
 /*
@@ -701,7 +690,7 @@ xfs_trans_bhold(xfs_trans_t	*tp,
 	ASSERT(!(bip->bli_format.blf_flags & XFS_BLI_CANCEL));
 	ASSERT(atomic_read(&bip->bli_refcount) > 0);
 	bip->bli_flags |= XFS_BLI_HOLD;
-	xfs_buf_item_trace("BHOLD", bip);
+	trace_xfs_trans_bhold(bip);
 }
 
 /*
@@ -724,7 +713,8 @@ xfs_trans_bhold_release(xfs_trans_t	*tp,
 	ASSERT(atomic_read(&bip->bli_refcount) > 0);
 	ASSERT(bip->bli_flags & XFS_BLI_HOLD);
 	bip->bli_flags &= ~XFS_BLI_HOLD;
-	xfs_buf_item_trace("BHOLD RELEASE", bip);
+
+	trace_xfs_trans_bhold_release(bip);
 }
 
 /*
@@ -770,6 +760,8 @@ xfs_trans_log_buf(xfs_trans_t	*tp,
 	XFS_BUF_SET_IODONE_FUNC(bp, xfs_buf_iodone_callbacks);
 	bip->bli_item.li_cb = (void(*)(xfs_buf_t*,xfs_log_item_t*))xfs_buf_iodone;
 
+	trace_xfs_trans_log_buf(bip);
+
 	/*
 	 * If we invalidated the buffer within this transaction, then
 	 * cancel the invalidation now that we're dirtying the buffer
@@ -777,7 +769,6 @@ xfs_trans_log_buf(xfs_trans_t	*tp,
 	 * because we have a reference to the buffer this entire time.
 	 */
 	if (bip->bli_flags & XFS_BLI_STALE) {
-		xfs_buf_item_trace("BLOG UNSTALE", bip);
 		bip->bli_flags &= ~XFS_BLI_STALE;
 		ASSERT(XFS_BUF_ISSTALE(bp));
 		XFS_BUF_UNSTALE(bp);
@@ -792,7 +783,6 @@ xfs_trans_log_buf(xfs_trans_t	*tp,
 	lidp->lid_flags &= ~XFS_LID_BUF_STALE;
 	bip->bli_flags |= XFS_BLI_LOGGED;
 	xfs_buf_item_log(bip, first, last);
-	xfs_buf_item_trace("BLOG", bip);
 }
 
 
@@ -831,6 +821,8 @@ xfs_trans_binval(
 	ASSERT(lidp != NULL);
 	ASSERT(atomic_read(&bip->bli_refcount) > 0);
 
+	trace_xfs_trans_binval(bip);
+
 	if (bip->bli_flags & XFS_BLI_STALE) {
 		/*
 		 * If the buffer is already invalidated, then
@@ -843,8 +835,6 @@ xfs_trans_binval(
 		ASSERT(bip->bli_format.blf_flags & XFS_BLI_CANCEL);
 		ASSERT(lidp->lid_flags & XFS_LID_DIRTY);
 		ASSERT(tp->t_flags & XFS_TRANS_DIRTY);
-		xfs_buftrace("XFS_BINVAL RECUR", bp);
-		xfs_buf_item_trace("BINVAL RECUR", bip);
 		return;
 	}
 
@@ -878,8 +868,6 @@ xfs_trans_binval(
 	      (bip->bli_format.blf_map_size * sizeof(uint)));
 	lidp->lid_flags |= XFS_LID_DIRTY|XFS_LID_BUF_STALE;
 	tp->t_flags |= XFS_TRANS_DIRTY;
-	xfs_buftrace("XFS_BINVAL", bp);
-	xfs_buf_item_trace("BINVAL", bip);
 }
 
 /*

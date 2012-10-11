@@ -1,7 +1,7 @@
 /*******************************************************************************
 
   Intel 10 Gigabit PCI Express Linux driver
-  Copyright(c) 1999 - 2009 Intel Corporation.
+  Copyright(c) 1999 - 2010 Intel Corporation.
 
   This program is free software; you can redistribute it and/or modify it
   under the terms and conditions of the GNU General Public License,
@@ -31,6 +31,7 @@
 
 #include "ixgbe.h"
 #include "ixgbe_phy.h"
+#include "ixgbe_mbx.h"
 
 #define IXGBE_82599_MAX_TX_QUEUES 128
 #define IXGBE_82599_MAX_RX_QUEUES 128
@@ -38,10 +39,15 @@
 #define IXGBE_82599_MC_TBL_SIZE   128
 #define IXGBE_82599_VFT_TBL_SIZE  128
 
+void ixgbe_flap_tx_laser_multispeed_fiber(struct ixgbe_hw *hw);
 s32 ixgbe_setup_mac_link_multispeed_fiber(struct ixgbe_hw *hw,
                                           ixgbe_link_speed speed,
                                           bool autoneg,
                                           bool autoneg_wait_to_complete);
+static s32 ixgbe_setup_mac_link_smartspeed(struct ixgbe_hw *hw,
+                                           ixgbe_link_speed speed,
+                                           bool autoneg,
+                                           bool autoneg_wait_to_complete);
 s32 ixgbe_start_mac_link_82599(struct ixgbe_hw *hw,
                                bool autoneg_wait_to_complete);
 s32 ixgbe_setup_mac_link_82599(struct ixgbe_hw *hw,
@@ -63,8 +69,16 @@ static void ixgbe_init_mac_link_ops_82599(struct ixgbe_hw *hw)
 	if (hw->phy.multispeed_fiber) {
 		/* Set up dual speed SFP+ support */
 		mac->ops.setup_link = &ixgbe_setup_mac_link_multispeed_fiber;
+		mac->ops.flap_tx_laser = &ixgbe_flap_tx_laser_multispeed_fiber;
 	} else {
-		mac->ops.setup_link = &ixgbe_setup_mac_link_82599;
+		mac->ops.flap_tx_laser = NULL;
+		if ((mac->ops.get_media_type(hw) ==
+		     ixgbe_media_type_backplane) &&
+		    (hw->phy.smart_speed == ixgbe_smart_speed_auto ||
+		     hw->phy.smart_speed == ixgbe_smart_speed_on))
+			mac->ops.setup_link = &ixgbe_setup_mac_link_smartspeed;
+		else
+			mac->ops.setup_link = &ixgbe_setup_mac_link_82599;
 	}
 }
 
@@ -332,11 +346,13 @@ static enum ixgbe_media_type ixgbe_get_media_type_82599(struct ixgbe_hw *hw)
 	case IXGBE_DEV_ID_82599_KX4:
 	case IXGBE_DEV_ID_82599_KX4_MEZZ:
 	case IXGBE_DEV_ID_82599_COMBO_BACKPLANE:
+	case IXGBE_DEV_ID_82599_KR:
 	case IXGBE_DEV_ID_82599_XAUI_LOM:
 		/* Default device ID is mezzanine card KX/KX4 */
 		media_type = ixgbe_media_type_backplane;
 		break;
 	case IXGBE_DEV_ID_82599_SFP:
+	case IXGBE_DEV_ID_82599_SFP_EM:
 		media_type = ixgbe_media_type_fiber;
 		break;
 	case IXGBE_DEV_ID_82599_CX4:
@@ -400,6 +416,41 @@ s32 ixgbe_start_mac_link_82599(struct ixgbe_hw *hw,
 }
 
 /**
+ *  ixgbe_flap_tx_laser_multispeed_fiber - Flap Tx laser
+ *  @hw: pointer to hardware structure
+ *
+ *  When the driver changes the link speeds that it can support,
+ *  it sets autotry_restart to true to indicate that we need to
+ *  initiate a new autotry session with the link partner.  To do
+ *  so, we set the speed then disable and re-enable the tx laser, to
+ *  alert the link partner that it also needs to restart autotry on its
+ *  end.  This is consistent with true clause 37 autoneg, which also
+ *  involves a loss of signal.
+ **/
+void ixgbe_flap_tx_laser_multispeed_fiber(struct ixgbe_hw *hw)
+{
+	u32 esdp_reg = IXGBE_READ_REG(hw, IXGBE_ESDP);
+
+	hw_dbg(hw, "ixgbe_flap_tx_laser_multispeed_fiber\n");
+
+	if (hw->mac.autotry_restart) {
+		/* Disable tx laser; allow 100us to go dark per spec */
+		esdp_reg |= IXGBE_ESDP_SDP3;
+		IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
+		IXGBE_WRITE_FLUSH(hw);
+		udelay(100);
+
+		/* Enable tx laser; allow 100ms to light up */
+		esdp_reg &= ~IXGBE_ESDP_SDP3;
+		IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
+		IXGBE_WRITE_FLUSH(hw);
+		msleep(100);
+
+		hw->mac.autotry_restart = false;
+	}
+}
+
+/**
  *  ixgbe_setup_mac_link_multispeed_fiber - Set MAC link speed
  *  @hw: pointer to hardware structure
  *  @speed: new link speed
@@ -427,16 +478,6 @@ s32 ixgbe_setup_mac_link_multispeed_fiber(struct ixgbe_hw *hw,
 	speed &= phy_link_speed;
 
 	/*
-	 * When the driver changes the link speeds that it can support,
-	 * it sets autotry_restart to true to indicate that we need to
-	 * initiate a new autotry session with the link partner.  To do
-	 * so, we set the speed then disable and re-enable the tx laser, to
-	 * alert the link partner that it also needs to restart autotry on its
-	 * end.  This is consistent with true clause 37 autoneg, which also
-	 * involves a loss of signal.
-	 */
-
-	/*
 	 * Try each speed one by one, highest priority first.  We do this in
 	 * software because 10gb fiber doesn't support speed autonegotiation.
 	 */
@@ -453,6 +494,7 @@ s32 ixgbe_setup_mac_link_multispeed_fiber(struct ixgbe_hw *hw,
 		/* Set the module link speed */
 		esdp_reg |= (IXGBE_ESDP_SDP5_DIR | IXGBE_ESDP_SDP5);
 		IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
+		IXGBE_WRITE_FLUSH(hw);
 
 		/* Allow module to change analog characteristics (1G->10G) */
 		msleep(40);
@@ -465,21 +507,14 @@ s32 ixgbe_setup_mac_link_multispeed_fiber(struct ixgbe_hw *hw,
 			return status;
 
 		/* Flap the tx laser if it has not already been done */
-		if (hw->mac.autotry_restart) {
-			/* Disable tx laser; allow 100us to go dark per spec */
-			esdp_reg |= IXGBE_ESDP_SDP3;
-			IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
-			udelay(100);
+		hw->mac.ops.flap_tx_laser(hw);
 
-			/* Enable tx laser; allow 2ms to light up per spec */
-			esdp_reg &= ~IXGBE_ESDP_SDP3;
-			IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
-			msleep(2);
+		/*
+		 * Wait for the controller to acquire link.  Per IEEE 802.3ap,
+		 * Section 73.10.2, we may have to wait up to 500ms if KR is
+		 * attempted.  82599 uses the same timing for 10g SFI.
+		 */
 
-			hw->mac.autotry_restart = false;
-		}
-
-		/* The controller may take up to 500ms at 10g to acquire link */
 		for (i = 0; i < 5; i++) {
 			/* Wait for the link partner to also set speed */
 			msleep(100);
@@ -507,6 +542,7 @@ s32 ixgbe_setup_mac_link_multispeed_fiber(struct ixgbe_hw *hw,
 		esdp_reg &= ~IXGBE_ESDP_SDP5;
 		esdp_reg |= IXGBE_ESDP_SDP5_DIR;
 		IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
+		IXGBE_WRITE_FLUSH(hw);
 
 		/* Allow module to change analog characteristics (10G->1G) */
 		msleep(40);
@@ -519,19 +555,7 @@ s32 ixgbe_setup_mac_link_multispeed_fiber(struct ixgbe_hw *hw,
 			return status;
 
 		/* Flap the tx laser if it has not already been done */
-		if (hw->mac.autotry_restart) {
-			/* Disable tx laser; allow 100us to go dark per spec */
-			esdp_reg |= IXGBE_ESDP_SDP3;
-			IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
-			udelay(100);
-
-			/* Enable tx laser; allow 2ms to light up per spec */
-			esdp_reg &= ~IXGBE_ESDP_SDP3;
-			IXGBE_WRITE_REG(hw, IXGBE_ESDP, esdp_reg);
-			msleep(2);
-
-			hw->mac.autotry_restart = false;
-		}
+		hw->mac.ops.flap_tx_laser(hw);
 
 		/* Wait for the link partner to also set speed */
 		msleep(100);
@@ -563,6 +587,111 @@ out:
 	if (speed & IXGBE_LINK_SPEED_1GB_FULL)
 		hw->phy.autoneg_advertised |= IXGBE_LINK_SPEED_1GB_FULL;
 
+	return status;
+}
+
+/**
+ *  ixgbe_setup_mac_link_smartspeed - Set MAC link speed using SmartSpeed
+ *  @hw: pointer to hardware structure
+ *  @speed: new link speed
+ *  @autoneg: true if autonegotiation enabled
+ *  @autoneg_wait_to_complete: true when waiting for completion is needed
+ *
+ *  Implements the Intel SmartSpeed algorithm.
+ **/
+static s32 ixgbe_setup_mac_link_smartspeed(struct ixgbe_hw *hw,
+				     ixgbe_link_speed speed, bool autoneg,
+				     bool autoneg_wait_to_complete)
+{
+	s32 status = 0;
+	ixgbe_link_speed link_speed;
+	s32 i, j;
+	bool link_up = false;
+	u32 autoc_reg = IXGBE_READ_REG(hw, IXGBE_AUTOC);
+
+	hw_dbg(hw, "ixgbe_setup_mac_link_smartspeed.\n");
+
+	 /* Set autoneg_advertised value based on input link speed */
+	hw->phy.autoneg_advertised = 0;
+
+	if (speed & IXGBE_LINK_SPEED_10GB_FULL)
+		hw->phy.autoneg_advertised |= IXGBE_LINK_SPEED_10GB_FULL;
+
+	if (speed & IXGBE_LINK_SPEED_1GB_FULL)
+		hw->phy.autoneg_advertised |= IXGBE_LINK_SPEED_1GB_FULL;
+
+	if (speed & IXGBE_LINK_SPEED_100_FULL)
+		hw->phy.autoneg_advertised |= IXGBE_LINK_SPEED_100_FULL;
+
+	/*
+	 * Implement Intel SmartSpeed algorithm.  SmartSpeed will reduce the
+	 * autoneg advertisement if link is unable to be established at the
+	 * highest negotiated rate.  This can sometimes happen due to integrity
+	 * issues with the physical media connection.
+	 */
+
+	/* First, try to get link with full advertisement */
+	hw->phy.smart_speed_active = false;
+	for (j = 0; j < IXGBE_SMARTSPEED_MAX_RETRIES; j++) {
+		status = ixgbe_setup_mac_link_82599(hw, speed, autoneg,
+						    autoneg_wait_to_complete);
+		if (status)
+			goto out;
+
+		/*
+		 * Wait for the controller to acquire link.  Per IEEE 802.3ap,
+		 * Section 73.10.2, we may have to wait up to 500ms if KR is
+		 * attempted, or 200ms if KX/KX4/BX/BX4 is attempted, per
+		 * Table 9 in the AN MAS.
+		 */
+		for (i = 0; i < 5; i++) {
+			mdelay(100);
+
+			/* If we have link, just jump out */
+			hw->mac.ops.check_link(hw, &link_speed,
+			                       &link_up, false);
+			if (link_up)
+				goto out;
+		}
+	}
+
+	/*
+	 * We didn't get link.  If we advertised KR plus one of KX4/KX
+	 * (or BX4/BX), then disable KR and try again.
+	 */
+	if (((autoc_reg & IXGBE_AUTOC_KR_SUPP) == 0) ||
+	    ((autoc_reg & IXGBE_AUTOC_KX4_KX_SUPP_MASK) == 0))
+		goto out;
+
+	/* Turn SmartSpeed on to disable KR support */
+	hw->phy.smart_speed_active = true;
+	status = ixgbe_setup_mac_link_82599(hw, speed, autoneg,
+					    autoneg_wait_to_complete);
+	if (status)
+		goto out;
+
+	/*
+	 * Wait for the controller to acquire link.  600ms will allow for
+	 * the AN link_fail_inhibit_timer as well for multiple cycles of
+	 * parallel detect, both 10g and 1g. This allows for the maximum
+	 * connect attempts as defined in the AN MAS table 73-7.
+	 */
+	for (i = 0; i < 6; i++) {
+		mdelay(100);
+
+		/* If we have link, just jump out */
+		hw->mac.ops.check_link(hw, &link_speed,
+		                       &link_up, false);
+		if (link_up)
+			goto out;
+	}
+
+	/* We didn't get link.  Turn SmartSpeed back off. */
+	hw->phy.smart_speed_active = false;
+	status = ixgbe_setup_mac_link_82599(hw, speed, autoneg,
+					    autoneg_wait_to_complete);
+
+out:
 	return status;
 }
 
@@ -669,7 +798,8 @@ s32 ixgbe_setup_mac_link_82599(struct ixgbe_hw *hw,
 		if (speed & IXGBE_LINK_SPEED_10GB_FULL)
 			if (orig_autoc & IXGBE_AUTOC_KX4_SUPP)
 				autoc |= IXGBE_AUTOC_KX4_SUPP;
-			if (orig_autoc & IXGBE_AUTOC_KR_SUPP)
+			if ((orig_autoc & IXGBE_AUTOC_KR_SUPP) &&
+			    (hw->phy.smart_speed_active == false))
 				autoc |= IXGBE_AUTOC_KR_SUPP;
 		if (speed & IXGBE_LINK_SPEED_1GB_FULL)
 			autoc |= IXGBE_AUTOC_KX_SUPP;
@@ -766,7 +896,7 @@ static s32 ixgbe_setup_copper_link_82599(struct ixgbe_hw *hw,
 static s32 ixgbe_reset_hw_82599(struct ixgbe_hw *hw)
 {
 	s32 status = 0;
-	u32 ctrl, ctrl_ext;
+	u32 ctrl;
 	u32 i;
 	u32 autoc;
 	u32 autoc2;
@@ -821,14 +951,8 @@ static s32 ixgbe_reset_hw_82599(struct ixgbe_hw *hw)
 		status = IXGBE_ERR_RESET_FAILED;
 		hw_dbg(hw, "Reset polling failed to complete.\n");
 	}
-	/* Clear PF Reset Done bit so PF/VF Mail Ops can work */
-	ctrl_ext = IXGBE_READ_REG(hw, IXGBE_CTRL_EXT);
-	ctrl_ext |= IXGBE_CTRL_EXT_PFRSTD;
-	IXGBE_WRITE_REG(hw, IXGBE_CTRL_EXT, ctrl_ext);
 
 	msleep(50);
-
-
 
 	/*
 	 * Store the original AUTOC/AUTOC2 values if they have not been
@@ -877,6 +1001,10 @@ static s32 ixgbe_reset_hw_82599(struct ixgbe_hw *hw)
 		/* Reserve the last RAR for the SAN MAC address */
 		hw->mac.num_rar_entries--;
 	}
+
+	/* Store the alternative WWNN/WWPN prefix */
+	hw->mac.ops.get_wwn_prefix(hw, &hw->mac.wwnn_prefix,
+	                               &hw->mac.wwpn_prefix);
 
 reset_hw_out:
 	return status;
@@ -968,9 +1096,11 @@ static s32 ixgbe_set_vfta_82599(struct ixgbe_hw *hw, u32 vlan, u32 vind,
                                 bool vlan_on)
 {
 	u32 regindex;
+	u32 vlvf_index;
 	u32 bitindex;
 	u32 bits;
 	u32 first_empty_slot;
+	u32 vt_ctl;
 
 	if (vlan > 4095)
 		return IXGBE_ERR_PARAM;
@@ -997,76 +1127,84 @@ static s32 ixgbe_set_vfta_82599(struct ixgbe_hw *hw, u32 vlan, u32 vind,
 
 
 	/* Part 2
-	 * If the vind is set
+	 * If VT mode is set
 	 *   Either vlan_on
 	 *     make sure the vlan is in VLVF
 	 *     set the vind bit in the matching VLVFB
 	 *   Or !vlan_on
 	 *     clear the pool bit and possibly the vind
 	 */
-	if (vind) {
-		/* find the vlanid or the first empty slot */
-		first_empty_slot = 0;
+	vt_ctl = IXGBE_READ_REG(hw, IXGBE_VT_CTL);
+	if (!(vt_ctl & IXGBE_VT_CTL_VT_ENABLE))
+		goto out;
 
-		for (regindex = 1; regindex < IXGBE_VLVF_ENTRIES; regindex++) {
-			bits = IXGBE_READ_REG(hw, IXGBE_VLVF(regindex));
-			if (!bits && !first_empty_slot)
-				first_empty_slot = regindex;
-			else if ((bits & 0x0FFF) == vlan)
-				break;
-		}
+	/* find the vlanid or the first empty slot */
+	first_empty_slot = 0;
 
-		if (regindex >= IXGBE_VLVF_ENTRIES) {
-			if (first_empty_slot)
-				regindex = first_empty_slot;
-			else {
-				hw_dbg(hw, "No space in VLVF.\n");
-				goto out;
-			}
-		}
-
-		if (vlan_on) {
-			/* set the pool bit */
-			if (vind < 32) {
-				bits = IXGBE_READ_REG(hw,
-				                    IXGBE_VLVFB(regindex * 2));
-				bits |= (1 << vind);
-				IXGBE_WRITE_REG(hw,
-				              IXGBE_VLVFB(regindex * 2), bits);
-			} else {
-				bits = IXGBE_READ_REG(hw,
-				              IXGBE_VLVFB((regindex * 2) + 1));
-				bits |= (1 << vind);
-				IXGBE_WRITE_REG(hw,
-				        IXGBE_VLVFB((regindex * 2) + 1), bits);
-			}
-		} else {
-			/* clear the pool bit */
-			if (vind < 32) {
-				bits = IXGBE_READ_REG(hw,
-				     IXGBE_VLVFB(regindex * 2));
-			bits &= ~(1 << vind);
-				IXGBE_WRITE_REG(hw,
-				              IXGBE_VLVFB(regindex * 2), bits);
-				bits |= IXGBE_READ_REG(hw,
-				              IXGBE_VLVFB((regindex * 2) + 1));
-			} else {
-				bits = IXGBE_READ_REG(hw,
-				              IXGBE_VLVFB((regindex * 2) + 1));
-				bits &= ~(1 << vind);
-				IXGBE_WRITE_REG(hw,
-				        IXGBE_VLVFB((regindex * 2) + 1), bits);
-				bits |= IXGBE_READ_REG(hw,
-				                    IXGBE_VLVFB(regindex * 2));
-			}
-		}
-
-		if (bits)
-			IXGBE_WRITE_REG(hw, IXGBE_VLVF(regindex),
-			                (IXGBE_VLVF_VIEN | vlan));
-		else
-			IXGBE_WRITE_REG(hw, IXGBE_VLVF(regindex), 0);
+	for (vlvf_index = 1; vlvf_index < IXGBE_VLVF_ENTRIES; vlvf_index++) {
+		bits = IXGBE_READ_REG(hw, IXGBE_VLVF(vlvf_index));
+		if (!bits && !first_empty_slot)
+			first_empty_slot = vlvf_index;
+		else if ((bits & 0x0FFF) == vlan)
+			break;
 	}
+
+	if (vlvf_index >= IXGBE_VLVF_ENTRIES) {
+		if (first_empty_slot)
+			vlvf_index = first_empty_slot;
+		else {
+			hw_dbg(hw, "No space in VLVF.\n");
+			goto out;
+		}
+	}
+
+	if (vlan_on) {
+		/* set the pool bit */
+		if (vind < 32) {
+			bits = IXGBE_READ_REG(hw,
+					      IXGBE_VLVFB(vlvf_index * 2));
+			bits |= (1 << vind);
+			IXGBE_WRITE_REG(hw,
+					IXGBE_VLVFB(vlvf_index * 2), bits);
+		} else {
+			bits = IXGBE_READ_REG(hw,
+				IXGBE_VLVFB((vlvf_index * 2) + 1));
+			bits |= (1 << (vind - 32));
+			IXGBE_WRITE_REG(hw,
+				IXGBE_VLVFB((vlvf_index * 2) + 1), bits);
+		}
+	} else {
+		/* clear the pool bit */
+		if (vind < 32) {
+			bits = IXGBE_READ_REG(hw,
+					      IXGBE_VLVFB(vlvf_index * 2));
+			bits &= ~(1 << vind);
+			IXGBE_WRITE_REG(hw,
+					IXGBE_VLVFB(vlvf_index * 2), bits);
+			bits |= IXGBE_READ_REG(hw,
+					IXGBE_VLVFB((vlvf_index * 2) + 1));
+		} else {
+			bits = IXGBE_READ_REG(hw,
+				IXGBE_VLVFB((vlvf_index * 2) + 1));
+			bits &= ~(1 << (vind - 32));
+			IXGBE_WRITE_REG(hw,
+				IXGBE_VLVFB((vlvf_index * 2) + 1), bits);
+			bits |= IXGBE_READ_REG(hw,
+					       IXGBE_VLVFB(vlvf_index * 2));
+		}
+	}
+
+	if (bits) {
+		IXGBE_WRITE_REG(hw, IXGBE_VLVF(vlvf_index),
+				(IXGBE_VLVF_VIEN | vlan));
+		/* if bits is non-zero then some pools/VFs are still
+		 * using this VLAN ID.  Force the VFTA entry to on */
+		bits = IXGBE_READ_REG(hw, IXGBE_VFTA(regindex));
+		bits |= (1 << bitindex);
+		IXGBE_WRITE_REG(hw, IXGBE_VFTA(regindex), bits);
+	}
+	else
+		IXGBE_WRITE_REG(hw, IXGBE_VLVF(vlvf_index), 0);
 
 out:
 	return 0;
@@ -2414,6 +2552,51 @@ fw_version_out:
 	return status;
 }
 
+/**
+ *  ixgbe_get_wwn_prefix_82599 - Get alternative WWNN/WWPN prefix from
+ *  the EEPROM
+ *  @hw: pointer to hardware structure
+ *  @wwnn_prefix: the alternative WWNN prefix
+ *  @wwpn_prefix: the alternative WWPN prefix
+ *
+ *  This function will read the EEPROM from the alternative SAN MAC address
+ *  block to check the support for the alternative WWNN/WWPN prefix support.
+ **/
+static s32 ixgbe_get_wwn_prefix_82599(struct ixgbe_hw *hw, u16 *wwnn_prefix,
+                                      u16 *wwpn_prefix)
+{
+	u16 offset, caps;
+	u16 alt_san_mac_blk_offset;
+
+	/* clear output first */
+	*wwnn_prefix = 0xFFFF;
+	*wwpn_prefix = 0xFFFF;
+
+	/* check if alternative SAN MAC is supported */
+	hw->eeprom.ops.read(hw, IXGBE_ALT_SAN_MAC_ADDR_BLK_PTR,
+	                    &alt_san_mac_blk_offset);
+
+	if ((alt_san_mac_blk_offset == 0) ||
+	    (alt_san_mac_blk_offset == 0xFFFF))
+		goto wwn_prefix_out;
+
+	/* check capability in alternative san mac address block */
+	offset = alt_san_mac_blk_offset + IXGBE_ALT_SAN_MAC_ADDR_CAPS_OFFSET;
+	hw->eeprom.ops.read(hw, offset, &caps);
+	if (!(caps & IXGBE_ALT_SAN_MAC_ADDR_CAPS_ALTWWN))
+		goto wwn_prefix_out;
+
+	/* get the corresponding prefix for WWNN/WWPN */
+	offset = alt_san_mac_blk_offset + IXGBE_ALT_SAN_MAC_ADDR_WWNN_OFFSET;
+	hw->eeprom.ops.read(hw, offset, wwnn_prefix);
+
+	offset = alt_san_mac_blk_offset + IXGBE_ALT_SAN_MAC_ADDR_WWPN_OFFSET;
+	hw->eeprom.ops.read(hw, offset, wwpn_prefix);
+
+wwn_prefix_out:
+	return 0;
+}
+
 static struct ixgbe_mac_operations mac_ops_82599 = {
 	.init_hw                = &ixgbe_init_hw_generic,
 	.reset_hw               = &ixgbe_reset_hw_82599,
@@ -2425,6 +2608,7 @@ static struct ixgbe_mac_operations mac_ops_82599 = {
 	.get_mac_addr           = &ixgbe_get_mac_addr_generic,
 	.get_san_mac_addr       = &ixgbe_get_san_mac_addr_82599,
 	.get_device_caps        = &ixgbe_get_device_caps_82599,
+	.get_wwn_prefix         = &ixgbe_get_wwn_prefix_82599,
 	.stop_adapter           = &ixgbe_stop_adapter_generic,
 	.get_bus_info           = &ixgbe_get_bus_info_generic,
 	.set_lan_id             = &ixgbe_set_lan_id_multi_port_pcie,
@@ -2482,4 +2666,5 @@ struct ixgbe_info ixgbe_82599_info = {
 	.mac_ops                = &mac_ops_82599,
 	.eeprom_ops             = &eeprom_ops_82599,
 	.phy_ops                = &phy_ops_82599,
+	.mbx_ops                = &mbx_ops_82599,
 };

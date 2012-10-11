@@ -172,12 +172,14 @@ static linear_conf_t *linear_conf(mddev_t *mddev, int raid_disks)
 		disk_stack_limits(mddev->gendisk, rdev->bdev,
 				  rdev->data_offset << 9);
 		/* as we don't honour merge_bvec_fn, we must never risk
-		 * violating it, so limit ->max_sector to one PAGE, as
-		 * a one page request is never in violation.
+		 * violating it, so limit max_segments to 1 lying within
+		 * a single page.
 		 */
-		if (rdev->bdev->bd_disk->queue->merge_bvec_fn &&
-		    queue_max_sectors(mddev->queue) > (PAGE_SIZE>>9))
-			blk_queue_max_sectors(mddev->queue, PAGE_SIZE>>9);
+		if (rdev->bdev->bd_disk->queue->merge_bvec_fn) {
+			blk_queue_max_segments(mddev->queue, 1);
+			blk_queue_segment_boundary(mddev->queue,
+						   PAGE_CACHE_SIZE - 1);
+		}
 
 		conf->array_sectors += rdev->sectors;
 		cnt++;
@@ -283,24 +285,15 @@ static int linear_stop (mddev_t *mddev)
 	return 0;
 }
 
-static int linear_make_request (struct request_queue *q, struct bio *bio)
+static int linear_make_request (mddev_t *mddev, struct bio *bio)
 {
-	const int rw = bio_data_dir(bio);
-	mddev_t *mddev = q->queuedata;
 	dev_info_t *tmp_dev;
 	sector_t start_sector;
-	int cpu;
 
 	if (unlikely(bio_rw_flagged(bio, BIO_RW_BARRIER))) {
-		bio_endio(bio, -EOPNOTSUPP);
+		md_barrier_request(mddev, bio);
 		return 0;
 	}
-
-	cpu = part_stat_lock();
-	part_stat_inc(cpu, &mddev->gendisk->part0, ios[rw]);
-	part_stat_add(cpu, &mddev->gendisk->part0, sectors[rw],
-		      bio_sectors(bio));
-	part_stat_unlock();
 
 	rcu_read_lock();
 	tmp_dev = which_dev(mddev, bio->bi_sector);
@@ -333,9 +326,9 @@ static int linear_make_request (struct request_queue *q, struct bio *bio)
 
 		bp = bio_split(bio, end_sector - bio->bi_sector);
 
-		if (linear_make_request(q, &bp->bio1))
+		if (linear_make_request(mddev, &bp->bio1))
 			generic_make_request(&bp->bio1);
-		if (linear_make_request(q, &bp->bio2))
+		if (linear_make_request(mddev, &bp->bio2))
 			generic_make_request(&bp->bio2);
 		bio_pair_release(bp);
 		return 0;
@@ -383,6 +376,7 @@ static void linear_exit (void)
 module_init(linear_init);
 module_exit(linear_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Linear device concatenation personality for MD");
 MODULE_ALIAS("md-personality-1"); /* LINEAR - deprecated*/
 MODULE_ALIAS("md-linear");
 MODULE_ALIAS("md-level--1");

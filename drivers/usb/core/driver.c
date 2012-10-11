@@ -625,9 +625,6 @@ static int usb_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
 	struct usb_device *usb_dev;
 
-	/* driver is often null here; dev_dbg() would oops */
-	pr_debug("usb %s: uevent\n", dev_name(dev));
-
 	if (is_usb_device(dev)) {
 		usb_dev = to_usb_device(dev);
 	} else if (is_usb_interface(dev)) {
@@ -639,6 +636,7 @@ static int usb_uevent(struct device *dev, struct kobj_uevent_env *env)
 	}
 
 	if (usb_dev->devnum < 0) {
+		/* driver is often null here; dev_dbg() would oops */
 		pr_debug("usb %s: already deleted?\n", dev_name(dev));
 		return -ENODEV;
 	}
@@ -1177,9 +1175,8 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 			udev->state == USB_STATE_SUSPENDED)
 		goto done;
 
-	udev->do_remote_wakeup = device_may_wakeup(&udev->dev);
-
 	if (msg.event & PM_EVENT_AUTO) {
+		udev->do_remote_wakeup = device_may_wakeup(&udev->dev);
 		status = autosuspend_check(udev, 0);
 		if (status < 0)
 			goto done;
@@ -1575,6 +1572,21 @@ void usb_autopm_put_interface_async(struct usb_interface *intf)
 EXPORT_SYMBOL_GPL(usb_autopm_put_interface_async);
 
 /**
+ * usb_device_autosuspend_enable - enable autosuspend on a device
+ * @udev: the usb_device to be autosuspended
+ *
+ * This routine should be called by an interface driver when it knows that
+ * the device in question supports USB autosuspend.
+ *
+ */
+void usb_device_autosuspend_enable(struct usb_device *udev)
+{
+	udev->autosuspend_disabled = 0;
+	udev->autoresume_disabled = 0;
+}
+EXPORT_SYMBOL_GPL(usb_device_autosuspend_enable);
+
+/**
  * usb_autopm_get_interface - increment a USB interface's PM-usage counter
  * @intf: the usb_interface whose counter should be incremented
  *
@@ -1744,6 +1756,34 @@ int usb_external_resume_device(struct usb_device *udev, pm_message_t msg)
 	return status;
 }
 
+static void choose_wakeup(struct usb_device *udev, pm_message_t msg)
+{
+	int			w, i;
+	struct usb_interface	*intf;
+
+	/* Remote wakeup is needed only when we actually go to sleep.
+	 * For things like FREEZE and QUIESCE, if the device is already
+	 * autosuspended then its current wakeup setting is okay.
+	 */
+	if (msg.event == PM_EVENT_FREEZE || msg.event == PM_EVENT_QUIESCE) {
+		udev->do_remote_wakeup = 0;
+		return;
+	}
+
+	/* If remote wakeup is permitted, see whether any interface drivers
+	 * actually want it.
+	 */
+	w = 0;
+	if (device_may_wakeup(&udev->dev) && udev->actconfig) {
+		for (i = 0; i < udev->actconfig->desc.bNumInterfaces; i++) {
+			intf = udev->actconfig->interface[i];
+			w |= intf->needs_remote_wakeup;
+		}
+	}
+
+	udev->do_remote_wakeup = w;
+}
+
 int usb_suspend(struct device *dev, pm_message_t msg)
 {
 	struct usb_device	*udev;
@@ -1763,6 +1803,7 @@ int usb_suspend(struct device *dev, pm_message_t msg)
 	}
 
 	udev->skip_sys_resume = 0;
+	choose_wakeup(udev, msg);
 	return usb_external_suspend_device(udev, msg);
 }
 

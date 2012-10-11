@@ -24,6 +24,8 @@
 #ifndef _SS_POLICYDB_H_
 #define _SS_POLICYDB_H_
 
+#include <linux/flex_array.h>
+
 #include "symtab.h"
 #include "avtab.h"
 #include "sidtab.h"
@@ -113,8 +115,6 @@ struct range_trans {
 	u32 source_type;
 	u32 target_type;
 	u32 target_class;
-	struct mls_range target_range;
-	struct range_trans *next;
 };
 
 /* Boolean data type */
@@ -240,11 +240,11 @@ struct policydb {
 	   fixed labeling behavior. */
 	struct genfs *genfs;
 
-	/* range transitions */
-	struct range_trans *range_tr;
+	/* range transitions table (range_trans_key -> mls_range) */
+	struct hashtab *range_tr;
 
 	/* type -> attribute reverse mapping */
-	struct ebitmap *type_attr_map;
+	struct flex_array *type_attr_map_array;
 
 	struct ebitmap policycaps;
 
@@ -254,7 +254,9 @@ struct policydb {
 
 	unsigned int reject_unknown : 1;
 	unsigned int allow_unknown : 1;
-	u32 *undefined_perms;
+
+	u16 process_class;
+	u32 process_trans_perms;
 };
 
 extern void policydb_destroy(struct policydb *p);
@@ -294,6 +296,9 @@ static inline int next_entry(void *buf, struct policy_file *fp, size_t bytes)
 	fp->len -= bytes;
 	return 0;
 }
+
+extern u16 string_to_security_class(struct policydb *p, const char *name);
+extern u32 string_to_av_perm(struct policydb *p, u16 tclass, const char *name);
 
 #endif	/* _SS_POLICYDB_H_ */
 

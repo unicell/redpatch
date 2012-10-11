@@ -12,8 +12,9 @@ int __vlan_hwaccel_rx(struct sk_buff *skb, struct vlan_group *grp,
 		return NET_RX_DROP;
 
 	if (skb_bond_should_drop(skb))
-		goto drop;
+		skb->deliver_no_wcard = 1;
 
+	skb->iif = skb->dev->ifindex;
 	skb->vlan_tci = vlan_tci;
 	skb->dev = vlan_group_get_device(grp, vlan_tci & VLAN_VID_MASK);
 
@@ -31,7 +32,7 @@ EXPORT_SYMBOL(__vlan_hwaccel_rx);
 int vlan_hwaccel_do_receive(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
-	struct net_device_stats *stats;
+	struct vlan_rx_stats     *rx_stats;
 
 	skb->dev = vlan_dev_info(dev)->real_dev;
 	netif_nit_deliver(skb);
@@ -40,15 +41,17 @@ int vlan_hwaccel_do_receive(struct sk_buff *skb)
 	skb->priority = vlan_get_ingress_priority(dev, skb->vlan_tci);
 	skb->vlan_tci = 0;
 
-	stats = &dev->stats;
-	stats->rx_packets++;
-	stats->rx_bytes += skb->len;
+	rx_stats = per_cpu_ptr(vlan_dev_info(dev)->vlan_rx_stats,
+			       smp_processor_id());
+
+	rx_stats->rx_packets++;
+	rx_stats->rx_bytes += skb->len;
 
 	switch (skb->pkt_type) {
 	case PACKET_BROADCAST:
 		break;
 	case PACKET_MULTICAST:
-		stats->multicast++;
+		rx_stats->multicast++;
 		break;
 	case PACKET_OTHERHOST:
 		/* Our lower layer thinks this is not local, let's make sure.
@@ -80,8 +83,9 @@ static int vlan_gro_common(struct napi_struct *napi, struct vlan_group *grp,
 	struct sk_buff *p;
 
 	if (skb_bond_should_drop(skb))
-		goto drop;
+		skb->deliver_no_wcard = 1;
 
+	skb->iif = skb->dev->ifindex;
 	skb->vlan_tci = vlan_tci;
 	skb->dev = vlan_group_get_device(grp, vlan_tci & VLAN_VID_MASK);
 

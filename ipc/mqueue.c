@@ -32,7 +32,6 @@
 #include <linux/nsproxy.h>
 #include <linux/pid.h>
 #include <linux/ipc_namespace.h>
-#include <linux/ima.h>
 
 #include <net/sock.h>
 #include "util.h"
@@ -706,7 +705,7 @@ SYSCALL_DEFINE4(mq_open, const char __user *, u_name, int, oflag, mode_t, mode,
 	dentry = lookup_one_len(name, ipc_ns->mq_mnt->mnt_root, strlen(name));
 	if (IS_ERR(dentry)) {
 		error = PTR_ERR(dentry);
-		goto out_err;
+		goto out_putfd;
 	}
 	mntget(ipc_ns->mq_mnt);
 
@@ -734,7 +733,6 @@ SYSCALL_DEFINE4(mq_open, const char __user *, u_name, int, oflag, mode_t, mode,
 		error = PTR_ERR(filp);
 		goto out_putfd;
 	}
-	ima_counts_get(filp);
 
 	fd_install(fd, filp);
 	goto out_upsem;
@@ -744,7 +742,6 @@ out:
 	mntput(ipc_ns->mq_mnt);
 out_putfd:
 	put_unused_fd(fd);
-out_err:
 	fd = error;
 out_upsem:
 	mutex_unlock(&ipc_ns->mq_mnt->mnt_root->d_inode->i_mutex);

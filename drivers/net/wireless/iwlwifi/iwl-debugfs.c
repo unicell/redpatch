@@ -248,13 +248,21 @@ static ssize_t iwl_dbgfs_sram_read(struct file *file,
 					size_t count, loff_t *ppos)
 {
 	u32 val;
-	char buf[1024];
+	char *buf;
 	ssize_t ret;
 	int i;
 	int pos = 0;
 	struct iwl_priv *priv = (struct iwl_priv *)file->private_data;
-	const size_t bufsz = sizeof(buf);
+	size_t bufsz;
 
+	bufsz =  30 + priv->dbgfs->sram_len * sizeof(char) * 12;
+	buf = kmalloc(bufsz, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	pos += scnprintf(buf + pos, bufsz - pos, "sram_len: %d\n",
+			priv->dbgfs->sram_len);
+	pos += scnprintf(buf + pos, bufsz - pos, "sram_offset: %d\n",
+			priv->dbgfs->sram_offset);
 	for (i = priv->dbgfs->sram_len; i > 0; i -= 4) {
 		val = iwl_read_targ_mem(priv, priv->dbgfs->sram_offset + \
 					priv->dbgfs->sram_len - i);
@@ -271,11 +279,14 @@ static ssize_t iwl_dbgfs_sram_read(struct file *file,
 				break;
 			}
 		}
+		if (!(i % 16))
+			pos += scnprintf(buf + pos, bufsz - pos, "\n");
 		pos += scnprintf(buf + pos, bufsz - pos, "0x%08x ", val);
 	}
 	pos += scnprintf(buf + pos, bufsz - pos, "\n");
 
 	ret = simple_read_from_buffer(user_buf, count, ppos, buf, pos);
+	kfree(buf);
 	return ret;
 }
 
@@ -851,6 +862,47 @@ static ssize_t iwl_dbgfs_current_sleep_command_read(struct file *file,
 				 le32_to_cpu(cmd->sleep_interval[i]));
 
 	return simple_read_from_buffer(user_buf, count, ppos, buf, pos);
+}
+
+static ssize_t iwl_dbgfs_plcp_delta_read(struct file *file,
+					char __user *user_buf,
+					size_t count, loff_t *ppos) {
+
+	struct iwl_priv *priv = (struct iwl_priv *)file->private_data;
+	int pos = 0;
+	char buf[12];
+	const size_t bufsz = sizeof(buf);
+	ssize_t ret;
+
+	pos += scnprintf(buf + pos, bufsz - pos, "%u\n",
+			priv->cfg->plcp_delta_threshold);
+
+	ret = simple_read_from_buffer(user_buf, count, ppos, buf, pos);
+	return ret;
+}
+
+static ssize_t iwl_dbgfs_plcp_delta_write(struct file *file,
+					const char __user *user_buf,
+					size_t count, loff_t *ppos) {
+
+	struct iwl_priv *priv = file->private_data;
+	char buf[8];
+	int buf_size;
+	int plcp;
+
+	memset(buf, 0, sizeof(buf));
+	buf_size = min(count, sizeof(buf) -  1);
+	if (copy_from_user(buf, user_buf, buf_size))
+		return -EFAULT;
+	if (sscanf(buf, "%d", &plcp) != 1)
+		return -EINVAL;
+	if ((plcp <= IWL_MAX_PLCP_ERR_THRESHOLD_MIN) ||
+		(plcp > IWL_MAX_PLCP_ERR_THRESHOLD_MAX))
+		priv->cfg->plcp_delta_threshold =
+			IWL_MAX_PLCP_ERR_THRESHOLD_DEF;
+	else
+		priv->cfg->plcp_delta_threshold = plcp;
+	return count;
 }
 
 DEBUGFS_READ_WRITE_FILE_OPS(sram);
@@ -1614,6 +1666,27 @@ static ssize_t iwl_dbgfs_tx_power_read(struct file *file,
 	return simple_read_from_buffer(user_buf, count, ppos, buf, pos);
 }
 
+static ssize_t iwl_dbgfs_internal_scan_write(struct file *file,
+					const char __user *user_buf,
+					size_t count, loff_t *ppos)
+{
+	struct iwl_priv *priv = file->private_data;
+	char buf[8];
+	int buf_size;
+	int scan;
+
+	memset(buf, 0, sizeof(buf));
+	buf_size = min(count, sizeof(buf) -  1);
+	if (copy_from_user(buf, user_buf, buf_size))
+		return -EFAULT;
+	if (sscanf(buf, "%d", &scan) != 1)
+		return -EINVAL;
+
+	iwl_internal_short_hw_scan(priv);
+
+	return count;
+}
+
 DEBUGFS_READ_WRITE_FILE_OPS(rx_statistics);
 DEBUGFS_READ_WRITE_FILE_OPS(tx_statistics);
 DEBUGFS_READ_WRITE_FILE_OPS(traffic_log);
@@ -1625,6 +1698,8 @@ DEBUGFS_READ_FILE_OPS(ucode_general_stats);
 DEBUGFS_READ_FILE_OPS(sensitivity);
 DEBUGFS_READ_FILE_OPS(chain_noise);
 DEBUGFS_READ_FILE_OPS(tx_power);
+DEBUGFS_WRITE_FILE_OPS(internal_scan);
+DEBUGFS_READ_WRITE_FILE_OPS(plcp_delta);
 
 /*
  * Create the debugfs files and directories
@@ -1674,6 +1749,8 @@ int iwl_dbgfs_register(struct iwl_priv *priv, const char *name)
 	DEBUGFS_ADD_FILE(rx_queue, debug);
 	DEBUGFS_ADD_FILE(tx_queue, debug);
 	DEBUGFS_ADD_FILE(tx_power, debug);
+	DEBUGFS_ADD_FILE(internal_scan, debug);
+	DEBUGFS_ADD_FILE(plcp_delta, debug);
 	if ((priv->hw_rev & CSR_HW_REV_TYPE_MSK) != CSR_HW_REV_TYPE_3945) {
 		DEBUGFS_ADD_FILE(ucode_rx_stats, debug);
 		DEBUGFS_ADD_FILE(ucode_tx_stats, debug);
@@ -1728,6 +1805,8 @@ void iwl_dbgfs_unregister(struct iwl_priv *priv)
 	DEBUGFS_REMOVE(priv->dbgfs->dbgfs_debug_files.file_rx_queue);
 	DEBUGFS_REMOVE(priv->dbgfs->dbgfs_debug_files.file_tx_queue);
 	DEBUGFS_REMOVE(priv->dbgfs->dbgfs_debug_files.file_tx_power);
+	DEBUGFS_REMOVE(priv->dbgfs->dbgfs_debug_files.file_internal_scan);
+	DEBUGFS_REMOVE(priv->dbgfs->dbgfs_debug_files.file_plcp_delta);
 	if ((priv->hw_rev & CSR_HW_REV_TYPE_MSK) != CSR_HW_REV_TYPE_3945) {
 		DEBUGFS_REMOVE(priv->dbgfs->dbgfs_debug_files.
 			file_ucode_rx_stats);

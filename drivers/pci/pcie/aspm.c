@@ -75,7 +75,7 @@ static LIST_HEAD(link_list);
 #define POLICY_DEFAULT 0	/* BIOS default setting */
 #define POLICY_PERFORMANCE 1	/* high performance */
 #define POLICY_POWERSAVE 2	/* high power saving */
-static int aspm_policy;
+static int aspm_policy = POLICY_POWERSAVE;
 static const char *policy_str[] = {
 	[POLICY_DEFAULT] = "default",
 	[POLICY_PERFORMANCE] = "performance",
@@ -588,11 +588,23 @@ void pcie_aspm_init_link_state(struct pci_dev *pdev)
 	 * update through pcie_aspm_cap_init().
 	 */
 	pcie_aspm_cap_init(link, blacklist);
-	pcie_config_aspm_path(link);
 
 	/* Setup initial Clock PM state */
 	pcie_clkpm_cap_init(link, blacklist);
-	pcie_set_clkpm(link, policy_to_clkpm_state(link));
+
+	/*
+	 * At this stage drivers haven't had an opportunity to change the
+	 * link policy setting. Enabling ASPM on broken hardware can cripple
+	 * it even before the driver has had a chance to disable ASPM, so
+	 * default to a safe level right now. If we're enabling ASPM beyond
+	 * the BIOS's expectation, we'll do so once pci_enable_device() is
+	 * called.
+	 */
+	if (aspm_policy != POLICY_POWERSAVE) {
+		pcie_config_aspm_path(link);
+		pcie_set_clkpm(link, policy_to_clkpm_state(link));
+	}
+
 unlock:
 	mutex_unlock(&aspm_lock);
 out:

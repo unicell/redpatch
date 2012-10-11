@@ -152,7 +152,7 @@ static struct attribute *ttm_mem_zone_attrs[] = {
 	NULL
 };
 
-static struct sysfs_ops ttm_mem_zone_ops = {
+static const struct sysfs_ops ttm_mem_zone_ops = {
 	.show = &ttm_mem_zone_show,
 	.store = &ttm_mem_zone_store
 };
@@ -274,15 +274,16 @@ static int ttm_mem_init_kernel_zone(struct ttm_mem_global *glob,
 static int ttm_mem_init_highmem_zone(struct ttm_mem_global *glob,
 				     const struct sysinfo *si)
 {
-	struct ttm_mem_zone *zone = kzalloc(sizeof(*zone), GFP_KERNEL);
+	struct ttm_mem_zone *zone;
 	uint64_t mem;
 	int ret;
 
-	if (unlikely(!zone))
-		return -ENOMEM;
-
 	if (si->totalhigh == 0)
 		return 0;
+
+	zone = kzalloc(sizeof(*zone), GFP_KERNEL);
+	if (unlikely(!zone))
+		return -ENOMEM;
 
 	mem = si->totalram;
 	mem *= si->mem_unit;
@@ -322,8 +323,10 @@ static int ttm_mem_init_dma32_zone(struct ttm_mem_global *glob,
 	 * No special dma32 zone needed.
 	 */
 
-	if (mem <= ((uint64_t) 1ULL << 32))
+	if (mem <= ((uint64_t) 1ULL << 32)) {
+		kfree(zone);
 		return 0;
+	}
 
 	/*
 	 * Limit max dma32 memory to 4GB for now

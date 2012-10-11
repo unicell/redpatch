@@ -422,7 +422,8 @@ void udelay(unsigned long usecs)
 EXPORT_SYMBOL(udelay);
 
 static inline void update_gtod(u64 new_tb_stamp, u64 new_stamp_xsec,
-			       u64 new_tb_to_xs)
+			       u64 new_tb_to_xs, struct timespec *now,
+			       u32 frac_sec)
 {
 	/*
 	 * tb_update_count is used to allow the userspace gettimeofday code
@@ -440,7 +441,8 @@ static inline void update_gtod(u64 new_tb_stamp, u64 new_stamp_xsec,
 	vdso_data->tb_to_xs = new_tb_to_xs;
 	vdso_data->wtom_clock_sec = wall_to_monotonic.tv_sec;
 	vdso_data->wtom_clock_nsec = wall_to_monotonic.tv_nsec;
-	vdso_data->stamp_xtime = xtime;
+	vdso_data->stamp_xtime = *now;
+	vdso_data->stamp_sec_fraction = frac_sec;
 	smp_wmb();
 	++(vdso_data->tb_update_count);
 }
@@ -530,25 +532,60 @@ void __init iSeries_time_init_early(void)
 }
 #endif /* CONFIG_PPC_ISERIES */
 
-#if defined(CONFIG_PERF_EVENTS) && defined(CONFIG_PPC32)
-DEFINE_PER_CPU(u8, perf_event_pending);
+#ifdef CONFIG_PERF_EVENTS
 
-void set_perf_event_pending(void)
+/*
+ * 64-bit uses a byte in the PACA, 32-bit uses a per-cpu variable...
+ */
+#ifdef CONFIG_PPC64
+static inline unsigned long test_perf_event_pending(void)
 {
-	get_cpu_var(perf_event_pending) = 1;
-	set_dec(1);
-	put_cpu_var(perf_event_pending);
+	unsigned long x;
+
+	asm volatile("lbz %0,%1(13)"
+		: "=r" (x)
+		: "i" (offsetof(struct paca_struct, perf_event_pending)));
+	return x;
 }
 
+static inline void set_perf_event_pending_flag(void)
+{
+	asm volatile("stb %0,%1(13)" : :
+		"r" (1),
+		"i" (offsetof(struct paca_struct, perf_event_pending)));
+}
+
+static inline void clear_perf_event_pending(void)
+{
+	asm volatile("stb %0,%1(13)" : :
+		"r" (0),
+		"i" (offsetof(struct paca_struct, perf_event_pending)));
+}
+
+#else /* 32-bit */
+
+DEFINE_PER_CPU(u8, perf_event_pending);
+
+#define set_perf_event_pending_flag()	__get_cpu_var(perf_event_pending) = 1
 #define test_perf_event_pending()	__get_cpu_var(perf_event_pending)
 #define clear_perf_event_pending()	__get_cpu_var(perf_event_pending) = 0
 
-#else  /* CONFIG_PERF_EVENTS && CONFIG_PPC32 */
+#endif /* 32 vs 64 bit */
+
+void set_perf_event_pending(void)
+{
+	preempt_disable();
+	set_perf_event_pending_flag();
+	set_dec(1);
+	preempt_enable();
+}
+
+#else  /* CONFIG_PERF_EVENTS */
 
 #define test_perf_event_pending()	0
 #define clear_perf_event_pending()
 
-#endif /* CONFIG_PERF_EVENTS && CONFIG_PPC32 */
+#endif /* CONFIG_PERF_EVENTS */
 
 /*
  * For iSeries shared processors, we have to let the hypervisor
@@ -576,10 +613,6 @@ void timer_interrupt(struct pt_regs * regs)
 	set_dec(DECREMENTER_MAX);
 
 #ifdef CONFIG_PPC32
-	if (test_perf_event_pending()) {
-		clear_perf_event_pending();
-		perf_event_do_pending();
-	}
 	if (atomic_read(&ppc_n_lost_interrupts) != 0)
 		do_IRQ(regs);
 #endif
@@ -596,6 +629,11 @@ void timer_interrupt(struct pt_regs * regs)
 	irq_enter();
 
 	calculate_steal_time();
+
+	if (test_perf_event_pending()) {
+		clear_perf_event_pending();
+		perf_event_do_pending();
+	}
 
 #ifdef CONFIG_PPC_ISERIES
 	if (firmware_has_feature(FW_FEATURE_ISERIES))
@@ -828,9 +866,12 @@ static cycle_t timebase_read(struct clocksource *cs)
 	return (cycle_t)get_tb();
 }
 
-void update_vsyscall(struct timespec *wall_time, struct clocksource *clock)
+void update_vsyscall(struct timespec *wall_time, struct clocksource *clock,
+		     u32 mult)
 {
 	u64 t2x, stamp_xsec;
+	u32 frac_sec;
+	struct timespec t;
 
 	if (clock != &clocksource_timebase)
 		return;
@@ -841,11 +882,19 @@ void update_vsyscall(struct timespec *wall_time, struct clocksource *clock)
 
 	/* XXX this assumes clock->shift == 22 */
 	/* 4611686018 ~= 2^(20+64-22) / 1e9 */
-	t2x = (u64) clock->mult * 4611686018ULL;
+	t2x = (u64) mult * 4611686018ULL;
 	stamp_xsec = (u64) xtime.tv_nsec * XSEC_PER_SEC;
 	do_div(stamp_xsec, 1000000000);
 	stamp_xsec += (u64) xtime.tv_sec * XSEC_PER_SEC;
-	update_gtod(clock->cycle_last, stamp_xsec, t2x);
+
+	t = xtime;
+	if (t.tv_nsec >= 1000000000) {
+		++t.tv_sec;
+		t.tv_nsec -= 1000000000;
+	}
+	/* this is tv_nsec / 1e9 as a 0.32 fraction */
+	frac_sec = ((u64) t.tv_nsec * 18446744073ULL) >> 32;
+	update_gtod(clock->cycle_last, stamp_xsec, t2x, &t, frac_sec);
 }
 
 void update_vsyscall_tz(void)

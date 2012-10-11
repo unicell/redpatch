@@ -34,7 +34,6 @@
 
 static int gfs2_aspace_writepage(struct page *page, struct writeback_control *wbc)
 {
-	int err;
 	struct buffer_head *bh, *head;
 	int nr_underway = 0;
 	int write_op = (1 << BIO_RW_META) | ((wbc->sync_mode == WB_SYNC_ALL ?
@@ -86,11 +85,10 @@ static int gfs2_aspace_writepage(struct page *page, struct writeback_control *wb
 	} while (bh != head);
 	unlock_page(page);
 
-	err = 0;
 	if (nr_underway == 0)
 		end_page_writeback(page);
 
-	return err;
+	return 0;
 }
 
 static const struct address_space_operations aspace_aops = {
@@ -121,7 +119,7 @@ struct inode *gfs2_aspace_get(struct gfs2_sbd *sdp)
 	if (aspace) {
 		mapping_set_gfp_mask(aspace->i_mapping, GFP_NOFS);
 		aspace->i_mapping->a_ops = &aspace_aops;
-		aspace->i_size = ~0ULL;
+		aspace->i_size = MAX_LFS_FILESIZE;
 		ip = GFS2_I(aspace);
 		clear_bit(GIF_USER, &ip->i_flags);
 		insert_inode_hash(aspace);

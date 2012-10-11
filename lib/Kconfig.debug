@@ -253,6 +253,14 @@ config SCHEDSTATS
 	  application, you can say N to avoid the very slight overhead
 	  this adds.
 
+config DEBUG_NMI_TIMEOUT
+	int "Number of seconds before NMI timeout"
+	depends on X86
+	default 5
+	help
+	  This value is the number of seconds the NMI watchdog will tick
+	  before it decides the machine has hung.
+
 config TIMER_STATS
 	bool "Collect kernel timers statistics"
 	depends on DEBUG_KERNEL && PROC_FS
@@ -346,7 +354,7 @@ config SLUB_STATS
 
 config DEBUG_KMEMLEAK
 	bool "Kernel memory leak detector"
-	depends on DEBUG_KERNEL && EXPERIMENTAL && !MEMORY_HOTPLUG && \
+	depends on DEBUG_KERNEL && EXPERIMENTAL && \
 		(X86 || ARM || PPC || S390)
 
 	select DEBUG_FS if SYSFS
@@ -389,6 +397,13 @@ config DEBUG_KMEMLEAK_TEST
 	  memory.
 
 	  If unsure, say N.
+
+config DEBUG_KMEMLEAK_DEFAULT_OFF
+	bool "Default kmemleak to off"
+	depends on DEBUG_KMEMLEAK
+	help
+	  Say Y here to disable kmemleak by default. It can then be enabled
+	  on the command line via kmemleak=on.
 
 config DEBUG_PREEMPT
 	bool "Debug preemptible kernel"
@@ -510,6 +525,12 @@ config LOCK_STAT
 	 This feature enables tracking lock contention points
 
 	 For more details, see Documentation/lockstat.txt
+
+	 You can analyze lock events with "perf lock", subcommand of perf.
+	 If you want to use "perf lock", you need to turn on CONFIG_EVENT_TRACING.
+
+	 CONFIG_LOCK_STAT defines "contended" and "acquired" lock events.
+ 	 (CONFIG_LOCKDEP defines "acquire" and "release" events.)
 
 config DEBUG_LOCKDEP
 	bool "Lock dependency engine debugging"
