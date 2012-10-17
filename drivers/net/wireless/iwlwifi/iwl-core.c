@@ -1875,13 +1875,14 @@ void iwl_mac_remove_interface(struct ieee80211_hw *hw,
 
 	mutex_lock(&priv->mutex);
 
-	WARN_ON(ctx->vif != vif);
-	ctx->vif = NULL;
-
 	if (priv->scan_vif == vif) {
 		iwl_scan_cancel_timeout(priv, 200);
 		iwl_force_scan_end(priv);
 	}
+
+	WARN_ON(ctx->vif != vif);
+	ctx->vif = NULL;
+
 	iwl_set_mode(priv, vif);
 
 	if (!ctx->always_active)
