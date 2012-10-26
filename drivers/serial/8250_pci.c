@@ -2484,7 +2484,9 @@ pciserial_init_one(struct pci_dev *dev, const struct pci_device_id *ent)
 	board = &pci_boards[ent->driver_data];
 
 	rc = pci_enable_device(dev);
+#ifdef CONFIG_PPC64
 	pci_save_state(dev);
+#endif
 	if (rc)
 		return rc;
 
@@ -3684,6 +3686,7 @@ static struct pci_device_id serial_pci_tbl[] = {
 	{ 0, }
 };
 
+#ifdef CONFIG_PPC64
 static pci_ers_result_t serial8250_io_error_detected(struct pci_dev *dev,
 						pci_channel_state_t state)
 {
@@ -3728,6 +3731,7 @@ static struct pci_error_handlers serial8250_err_handler = {
 	.slot_reset = serial8250_io_slot_reset,
 	.resume = serial8250_io_resume,
 };
+#endif
 
 static struct pci_driver serial_pci_driver = {
 	.name		= "serial",
@@ -3738,7 +3742,9 @@ static struct pci_driver serial_pci_driver = {
 	.resume		= pciserial_resume_one,
 #endif
 	.id_table	= serial_pci_tbl,
+#ifdef CONFIG_PPC64
 	.err_handler	= &serial8250_err_handler,
+#endif
 };
 
 static int __init serial8250_pci_init(void)
