@@ -1506,6 +1506,8 @@ bfad_init(void)
 {
 	int		error = 0;
 
+	mark_tech_preview("Brocade FCOE/FC Adapter Driver", THIS_MODULE);
+
 	printk(KERN_INFO "Brocade BFA FC/FCOE SCSI driver - version: %s\n",
 			BFAD_DRIVER_VERSION);
 
