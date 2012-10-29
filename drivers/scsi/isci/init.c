@@ -61,10 +61,15 @@
 #include <asm/string.h>
 #include "isci.h"
 #include "task.h"
-#include "sci_controller_constants.h"
-#include "scic_remote_device.h"
-#include "sci_environment.h"
 #include "probe_roms.h"
+
+#define MAJ 1
+#define MIN 0
+#define BUILD 0-rh
+#define DRV_VERSION __stringify(MAJ) "." __stringify(MIN) "." \
+	__stringify(BUILD)
+
+MODULE_VERSION(DRV_VERSION);
 
 static struct scsi_transport_template *isci_transport_template;
 
@@ -75,32 +80,18 @@ static DEFINE_PCI_DEVICE_TABLE(isci_id_table) = {
 	{ PCI_VDEVICE(INTEL, 0x1D67),},
 	{ PCI_VDEVICE(INTEL, 0x1D69),},
 	{ PCI_VDEVICE(INTEL, 0x1D6B),},
-	{ PCI_VDEVICE(INTEL, 0x1D6D),},
-	{ PCI_VDEVICE(INTEL, 0x1D6F),},
 	{ PCI_VDEVICE(INTEL, 0x1D60),},
 	{ PCI_VDEVICE(INTEL, 0x1D62),},
 	{ PCI_VDEVICE(INTEL, 0x1D64),},
 	{ PCI_VDEVICE(INTEL, 0x1D66),},
 	{ PCI_VDEVICE(INTEL, 0x1D68),},
 	{ PCI_VDEVICE(INTEL, 0x1D6A),},
-	{ PCI_VDEVICE(INTEL, 0x1D6C),},
-	{ PCI_VDEVICE(INTEL, 0x1D6E),},
 	{}
 };
 
 MODULE_DEVICE_TABLE(pci, isci_id_table);
 
 /* linux isci specific settings */
-
-#if defined(CONFIG_PBG_HBA_A0)
-int isci_si_rev = ISCI_SI_REVA0;
-#elif defined(CONFIG_PBG_HBA_A2)
-int isci_si_rev = ISCI_SI_REVA2;
-#else
-int isci_si_rev = ISCI_SI_REVB0;
-#endif
-module_param(isci_si_rev, int, 0);
-MODULE_PARM_DESC(isci_si_rev, "override default si rev (0: A0 1: A2 2: B0)");
 
 unsigned char no_outbound_task_to = 20;
 module_param(no_outbound_task_to, byte, 0);
@@ -183,6 +174,9 @@ static struct sas_domain_function_template isci_transport_ops  = {
 
 	/* Phy management */
 	.lldd_control_phy	= isci_phy_control,
+
+	/* GPIO support */
+	.lldd_write_gpio	= isci_gpio_write,
 };
 
 
@@ -232,8 +226,8 @@ static int isci_register_sas_ha(struct isci_host *isci_host)
 
 	/* set the array of phy and port structs.  */
 	for (i = 0; i < SCI_MAX_PHYS; i++) {
-		sas_phys[i] = &(isci_host->phys[i].sas_phy);
-		sas_ports[i] = &(isci_host->sas_ports[i]);
+		sas_phys[i] = &isci_host->phys[i].sas_phy;
+		sas_ports[i] = &isci_host->ports[i].sas_port;
 	}
 
 	sas_ha->sas_phy  = sas_phys;
@@ -279,7 +273,7 @@ static void isci_unregister(struct isci_host *isci_host)
 
 static int __devinit isci_pci_init(struct pci_dev *pdev)
 {
-	int err, bar_num, bar_mask;
+	int err, bar_num, bar_mask = 0;
 	void __iomem * const *iomap;
 
 	err = pcim_enable_device(pdev);
@@ -339,6 +333,7 @@ static int num_controllers(struct pci_dev *pdev)
 static int isci_setup_interrupts(struct pci_dev *pdev)
 {
 	int err, i, num_msix;
+	struct isci_host *ihost;
 	struct isci_pci_info *pci_info = to_pci_info(pdev);
 
 	/*
@@ -357,39 +352,39 @@ static int isci_setup_interrupts(struct pci_dev *pdev)
 	for (i = 0; i < num_msix; i++) {
 		int id = i / SCI_NUM_MSI_X_INT;
 		struct msix_entry *msix = &pci_info->msix_entries[i];
-		struct isci_host *isci_host = pci_info->hosts[id];
 		irq_handler_t isr;
 
+		ihost = pci_info->hosts[id];
 		/* odd numbered vectors are error interrupts */
 		if (i & 1)
 			isr = isci_error_isr;
 		else
 			isr = isci_msix_isr;
 
-		BUG_ON(!isci_host);
-
 		err = devm_request_irq(&pdev->dev, msix->vector, isr, 0,
-				       DRV_NAME"-msix", isci_host);
+				       DRV_NAME"-msix", ihost);
 		if (!err)
 			continue;
 
 		dev_info(&pdev->dev, "msix setup failed falling back to intx\n");
 		while (i--) {
 			id = i / SCI_NUM_MSI_X_INT;
-			isci_host = pci_info->hosts[id];
+			ihost = pci_info->hosts[id];
 			msix = &pci_info->msix_entries[i];
-			devm_free_irq(&pdev->dev, msix->vector, isci_host);
+			devm_free_irq(&pdev->dev, msix->vector, ihost);
 		}
 		pci_disable_msix(pdev);
 		goto intx;
 	}
-
 	return 0;
 
  intx:
-	err = devm_request_irq(&pdev->dev, pdev->irq, isci_intx_isr,
-			       IRQF_SHARED, DRV_NAME"-intx", pdev);
-
+	for_each_isci_host(i, ihost, pdev) {
+		err = devm_request_irq(&pdev->dev, pdev->irq, isci_intx_isr,
+				       IRQF_SHARED, DRV_NAME"-intx", ihost);
+		if (err)
+			break;
+	}
 	return err;
 }
 
@@ -399,10 +394,7 @@ static struct isci_host *isci_host_alloc(struct pci_dev *pdev, int id)
 	struct Scsi_Host *shost;
 	int err;
 
-	isci_host = devm_kzalloc(&pdev->dev, sizeof(*isci_host) +
-				 SCI_MAX_REMOTE_DEVICES *
-				 (sizeof(struct isci_remote_device) +
-				  scic_remote_device_get_object_size()), GFP_KERNEL);
+	isci_host = devm_kzalloc(&pdev->dev, sizeof(*isci_host), GFP_KERNEL);
 	if (!isci_host)
 		return NULL;
 
@@ -450,42 +442,17 @@ static struct isci_host *isci_host_alloc(struct pci_dev *pdev, int id)
 	return NULL;
 }
 
-static void check_si_rev(struct pci_dev *pdev)
-{
-	if (num_controllers(pdev) > 1)
-		isci_si_rev = ISCI_SI_REVB0;
-	else {
-		switch (pdev->revision) {
-		case 0:
-		case 1:
-			/* if the id is ambiguous don't update isci_si_rev */
-			break;
-		case 3:
-			isci_si_rev = ISCI_SI_REVA2;
-			break;
-		default:
-		case 4:
-			isci_si_rev = ISCI_SI_REVB0;
-			break;
-		}
-	}
-
-	dev_info(&pdev->dev, "driver configured for %s silicon (rev: %d)\n",
-		 isci_si_rev == ISCI_SI_REVA0 ? "A0" :
-		 isci_si_rev == ISCI_SI_REVA2 ? "A2" : "B0", pdev->revision);
-
-}
-
 static int __devinit isci_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct isci_pci_info *pci_info;
 	int err, i;
 	struct isci_host *isci_host;
 	const struct firmware *fw = NULL;
-	struct isci_orom *orom;
+	struct isci_orom *orom = NULL;
 	char *source = "(platform)";
 
-	check_si_rev(pdev);
+	dev_info(&pdev->dev, "driver configured for rev: %d silicon\n",
+		 pdev->revision);
 
 	pci_info = devm_kzalloc(&pdev->dev, sizeof(*pci_info), GFP_KERNEL);
 	if (!pci_info)
@@ -494,11 +461,12 @@ static int __devinit isci_pci_probe(struct pci_dev *pdev, const struct pci_devic
 
 	if (efi_enabled)
 		orom = isci_get_efi_var(pdev);
-	else
+
+	if (!orom)
 		orom = isci_request_oprom(pdev);
 
 	for (i = 0; orom && i < ARRAY_SIZE(orom->ctrl); i++) {
-		if (scic_oem_parameters_validate(&orom->ctrl[i])) {
+		if (sci_oem_parameters_validate(&orom->ctrl[i])) {
 			dev_warn(&pdev->dev,
 				 "[%d]: invalid oem parameters detected, falling back to firmware\n", i);
 			devm_kfree(&pdev->dev, orom);
@@ -562,13 +530,13 @@ static int __devinit isci_pci_probe(struct pci_dev *pdev, const struct pci_devic
 
 static void __devexit isci_pci_remove(struct pci_dev *pdev)
 {
-	struct isci_host *isci_host;
+	struct isci_host *ihost;
 	int i;
 
-	for_each_isci_host(i, isci_host, pdev) {
-		isci_unregister(isci_host);
-		isci_host_deinit(isci_host);
-		scic_controller_disable_interrupts(isci_host->core_controller);
+	for_each_isci_host(i, ihost, pdev) {
+		isci_unregister(ihost);
+		isci_host_deinit(ihost);
+		sci_controller_disable_interrupts(ihost);
 	}
 }
 
@@ -583,7 +551,8 @@ static __init int isci_init(void)
 {
 	int err;
 
-	pr_info("%s: Intel(R) C600 SAS Controller Driver\n", DRV_NAME);
+	pr_info("%s: Intel(R) C600 SAS Controller Driver - version %s\n",
+		DRV_NAME, DRV_VERSION);
 
 	isci_transport_template = sas_domain_attach_transport(&isci_transport_ops);
 	if (!isci_transport_template)

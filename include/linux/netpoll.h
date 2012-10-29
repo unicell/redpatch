@@ -46,7 +46,13 @@ int netpoll_trap(void);
 void netpoll_set_trap(int trap);
 void netpoll_cleanup(struct netpoll *np);
 int __netpoll_rx(struct sk_buff *skb);
-void netpoll_send_skb(struct netpoll *np, struct sk_buff *skb);
+void netpoll_send_skb_on_dev(struct netpoll *np, struct sk_buff *skb,
+			     struct net_device *dev);
+static inline void netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
+{
+	netpoll_send_skb_on_dev(np, skb, np->dev);
+}
+
 
 
 #ifdef CONFIG_NETPOLL
@@ -106,6 +112,11 @@ static inline void netpoll_poll_unlock(void *have)
 	rcu_read_unlock();
 }
 
+static inline int netpoll_tx_running(struct net_device *dev)
+{
+	return irqs_disabled();
+}
+
 #else
 static inline int netpoll_rx(struct sk_buff *skb)
 {
@@ -128,6 +139,10 @@ static inline void netpoll_poll_unlock(void *have)
 }
 static inline void netpoll_netdev_init(struct net_device *dev)
 {
+}
+static inline int netpoll_tx_running(struct net_device *dev)
+{
+	return 0;
 }
 #endif
 

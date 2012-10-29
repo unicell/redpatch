@@ -316,9 +316,11 @@ struct sock_extended {
 
 	/*
 	 * Expansion for the sock common structure
+	 *	@skc_tx_queue_mapping: tx queue number for this connection
 	 */
 	struct {
-	} sock_extensions;
+		int			skc_tx_queue_mapping;
+	} __sk_common_extended;
 
 	/*
 	 * Expansion space for proto specific sock types
@@ -336,6 +338,9 @@ struct sock_extended {
 		int len;
 	} sk_backlog;
 };
+
+#define __sk_tx_queue_mapping(sk) \
+	sk_extended(sk)->__sk_common_extended.skc_tx_queue_mapping
 
 #define SOCK_EXTENDED_SIZE ALIGN(sizeof(struct sock_extended), sizeof(long))
 static inline struct sock_extended *sk_extended(const struct sock *sk);
@@ -547,6 +552,7 @@ enum sock_flags {
 	SOCK_TIMESTAMPING_RAW_HARDWARE, /* %SOF_TIMESTAMPING_RAW_HARDWARE */
 	SOCK_TIMESTAMPING_SYS_HARDWARE, /* %SOF_TIMESTAMPING_SYS_HARDWARE */
 	SOCK_RXQ_OVFL,
+	SOCK_ZEROCOPY, /* buffers from userspace */
 };
 
 static inline void sock_copy_flags(struct sock *nsk, struct sock *osk)
@@ -1191,8 +1197,24 @@ static inline void sock_put(struct sock *sk)
 extern int sk_receive_skb(struct sock *sk, struct sk_buff *skb,
 			  const int nested);
 
+static inline void sk_tx_queue_set(struct sock *sk, int tx_queue)
+{
+	__sk_tx_queue_mapping(sk) = tx_queue;
+}
+
+static inline void sk_tx_queue_clear(struct sock *sk)
+{
+	__sk_tx_queue_mapping(sk) = -1;
+}
+
+static inline int sk_tx_queue_get(const struct sock *sk)
+{
+	return sk ? __sk_tx_queue_mapping(sk) : -1;
+}
+
 static inline void sk_set_socket(struct sock *sk, struct socket *sock)
 {
+	sk_tx_queue_clear(sk);
 	sk->sk_socket = sock;
 }
 
@@ -1249,6 +1271,7 @@ __sk_dst_set(struct sock *sk, struct dst_entry *dst)
 {
 	struct dst_entry *old_dst;
 
+	sk_tx_queue_clear(sk);
 	old_dst = sk->sk_dst_cache;
 	sk->sk_dst_cache = dst;
 	dst_release(old_dst);
@@ -1267,6 +1290,7 @@ __sk_dst_reset(struct sock *sk)
 {
 	struct dst_entry *old_dst;
 
+	sk_tx_queue_clear(sk);
 	old_dst = sk->sk_dst_cache;
 	sk->sk_dst_cache = NULL;
 	dst_release(old_dst);

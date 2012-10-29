@@ -146,7 +146,8 @@ static ssize_t queue_discard_granularity_show(struct request_queue *q, char *pag
 
 static ssize_t queue_discard_max_show(struct request_queue *q, char *page)
 {
-	return queue_var_show(q->limits.max_discard_sectors << 9, page);
+	return sprintf(page, "%llu\n",
+		       (unsigned long long)q->limits.max_discard_sectors << 9);
 }
 
 static ssize_t queue_discard_zeroes_data_show(struct request_queue *q, char *page)
@@ -487,8 +488,6 @@ static void blk_release_queue(struct kobject *kobj)
 	struct request_list *rl = &q->rq;
 
 	blk_sync_queue(q);
-
-	blk_throtl_exit(q);
 
 	if (rl->rq_pool)
 		mempool_destroy(rl->rq_pool);

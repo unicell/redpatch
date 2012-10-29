@@ -55,7 +55,6 @@ int cifsFYI = 0;
 int cifsERROR = 1;
 int traceSMB = 0;
 unsigned int oplockEnabled = 1;
-unsigned int experimEnabled = 0;
 unsigned int linuxExtEnabled = 1;
 unsigned int lookupCacheEnabled = 1;
 unsigned int multiuser_mount = 0;
@@ -79,7 +78,11 @@ unsigned int cifs_max_pending = CIFS_MAX_REQ;
 module_param(cifs_max_pending, int, 0);
 MODULE_PARM_DESC(cifs_max_pending, "Simultaneous requests to server. "
 				   "Default: 50 Range: 2 to 256");
-
+unsigned short echo_retries = 5;
+module_param(echo_retries, ushort, 0644);
+MODULE_PARM_DESC(echo_retries, "Number of echo attempts before giving up and "
+			       "reconnecting server. Default: 5. 0 means "
+			       "never reconnect.");
 extern mempool_t *cifs_sm_req_poolp;
 extern mempool_t *cifs_req_poolp;
 extern mempool_t *cifs_mid_poolp;
@@ -170,12 +173,12 @@ cifs_read_super(struct super_block *sb, void *data,
 		goto out_no_root;
 	}
 
-#ifdef CONFIG_CIFS_EXPERIMENTAL
+#ifdef CIFS_NFSD_EXPORT
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_SERVER_INUM) {
 		cFYI(1, "export ops supported");
 		sb->s_export_op = &cifs_export_ops;
 	}
-#endif /* EXPERIMENTAL */
+#endif /* CIFS_NFSD_EXPORT */
 
 	return 0;
 
@@ -347,22 +350,54 @@ cifs_clear_inode(struct inode *inode)
 static void
 cifs_show_address(struct seq_file *s, struct TCP_Server_Info *server)
 {
+	struct sockaddr_in *sa = (struct sockaddr_in *) &server->dstaddr;
+	struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *) &server->dstaddr;
+
 	seq_printf(s, ",addr=");
 
-	switch (server->addr.sockAddr.sin_family) {
+	switch (server->dstaddr.ss_family) {
 	case AF_INET:
-		seq_printf(s, "%pI4", &server->addr.sockAddr.sin_addr.s_addr);
+		seq_printf(s, "%pI4", &sa->sin_addr.s_addr);
 		break;
 	case AF_INET6:
-		seq_printf(s, "%pI6",
-			   &server->addr.sockAddr6.sin6_addr.s6_addr);
-		if (server->addr.sockAddr6.sin6_scope_id)
-			seq_printf(s, "%%%u",
-				   server->addr.sockAddr6.sin6_scope_id);
+		seq_printf(s, "%pI6", &sa6->sin6_addr.s6_addr);
+		if (sa6->sin6_scope_id)
+			seq_printf(s, "%%%u", sa6->sin6_scope_id);
 		break;
 	default:
 		seq_printf(s, "(unknown)");
 	}
+}
+
+static void
+cifs_show_security(struct seq_file *s, struct TCP_Server_Info *server)
+{
+	seq_printf(s, ",sec=");
+
+	switch (server->secType) {
+	case LANMAN:
+		seq_printf(s, "lanman");
+		break;
+	case NTLMv2:
+		seq_printf(s, "ntlmv2");
+		break;
+	case NTLM:
+		seq_printf(s, "ntlm");
+		break;
+	case Kerberos:
+		seq_printf(s, "krb5");
+		break;
+	case RawNTLMSSP:
+		seq_printf(s, "ntlmssp");
+		break;
+	default:
+		/* shouldn't ever happen */
+		seq_printf(s, "unknown");
+		break;
+	}
+
+	if (server->secMode & (SECMODE_SIGN_REQUIRED | SECMODE_SIGN_ENABLED))
+		seq_printf(s, "i");
 }
 
 /*
@@ -378,12 +413,14 @@ cifs_show_options(struct seq_file *s, struct vfsmount *m)
 	struct sockaddr *srcaddr;
 	srcaddr = (struct sockaddr *)&tcon->ses->server->srcaddr;
 
+	cifs_show_security(s, tcon->ses->server);
+
 	seq_printf(s, ",unc=%s", tcon->treeName);
 
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MULTIUSER)
 		seq_printf(s, ",multiuser");
-	else if (tcon->ses->userName)
-		seq_printf(s, ",username=%s", tcon->ses->userName);
+	else if (tcon->ses->user_name)
+		seq_printf(s, ",username=%s", tcon->ses->user_name);
 
 	if (tcon->ses->domainName)
 		seq_printf(s, ",domain=%s", tcon->ses->domainName);
@@ -454,6 +491,8 @@ cifs_show_options(struct seq_file *s, struct vfsmount *m)
 		seq_printf(s, ",acl");
 	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_MF_SYMLINKS)
 		seq_printf(s, ",mfsymlinks");
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_FSCACHE)
+		seq_printf(s, ",fsc");
 
 	seq_printf(s, ",rsize=%d", cifs_sb->rsize);
 	seq_printf(s, ",wsize=%d", cifs_sb->wsize);
@@ -471,16 +510,16 @@ static void cifs_umount_begin(struct super_block *sb)
 
 	tcon = cifs_sb_master_tcon(cifs_sb);
 
-	read_lock(&cifs_tcp_ses_lock);
+	spin_lock(&cifs_tcp_ses_lock);
 	if ((tcon->tc_count > 1) || (tcon->tidStatus == CifsExiting)) {
 		/* we have other mounts to same share or we have
 		   already tried to force umount this and woken up
 		   all waiting network requests, nothing to do */
-		read_unlock(&cifs_tcp_ses_lock);
+		spin_unlock(&cifs_tcp_ses_lock);
 		return;
 	} else if (tcon->tc_count == 1)
 		tcon->tidStatus = CifsExiting;
-	read_unlock(&cifs_tcp_ses_lock);
+	spin_unlock(&cifs_tcp_ses_lock);
 
 	/* cancel_brl_requests(tcon); */ /* BB mark all brl mids as exiting */
 	/* cancel_notify_requests(tcon); */
@@ -594,7 +633,6 @@ static loff_t cifs_llseek(struct file *file, loff_t offset, int origin)
 	return generic_file_llseek_unlocked(file, offset, origin);
 }
 
-#ifdef CONFIG_CIFS_EXPERIMENTAL
 static int cifs_setlease(struct file *file, long arg, struct file_lock **lease)
 {
 	/* note that this is called by vfs setlease with the BKL held
@@ -624,7 +662,6 @@ static int cifs_setlease(struct file *file, long arg, struct file_lock **lease)
 	else
 		return -EAGAIN;
 }
-#endif
 
 struct file_system_type cifs_fs_type = {
 	.owner = THIS_MODULE,
@@ -701,10 +738,7 @@ const struct file_operations cifs_file_ops = {
 #ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl	= cifs_ioctl,
 #endif /* CONFIG_CIFS_POSIX */
-
-#ifdef CONFIG_CIFS_EXPERIMENTAL
 	.setlease = cifs_setlease,
-#endif /* CONFIG_CIFS_EXPERIMENTAL */
 };
 
 const struct file_operations cifs_file_direct_ops = {
@@ -723,9 +757,7 @@ const struct file_operations cifs_file_direct_ops = {
 	.unlocked_ioctl  = cifs_ioctl,
 #endif /* CONFIG_CIFS_POSIX */
 	.llseek = cifs_llseek,
-#ifdef CONFIG_CIFS_EXPERIMENTAL
 	.setlease = cifs_setlease,
-#endif /* CONFIG_CIFS_EXPERIMENTAL */
 };
 const struct file_operations cifs_file_nobrl_ops = {
 	.read = do_sync_read,
@@ -742,10 +774,7 @@ const struct file_operations cifs_file_nobrl_ops = {
 #ifdef CONFIG_CIFS_POSIX
 	.unlocked_ioctl	= cifs_ioctl,
 #endif /* CONFIG_CIFS_POSIX */
-
-#ifdef CONFIG_CIFS_EXPERIMENTAL
 	.setlease = cifs_setlease,
-#endif /* CONFIG_CIFS_EXPERIMENTAL */
 };
 
 const struct file_operations cifs_file_direct_nobrl_ops = {
@@ -762,9 +791,7 @@ const struct file_operations cifs_file_direct_nobrl_ops = {
 	.unlocked_ioctl  = cifs_ioctl,
 #endif /* CONFIG_CIFS_POSIX */
 	.llseek = cifs_llseek,
-#ifdef CONFIG_CIFS_EXPERIMENTAL
 	.setlease = cifs_setlease,
-#endif /* CONFIG_CIFS_EXPERIMENTAL */
 };
 
 const struct file_operations cifs_dir_ops = {
@@ -916,10 +943,10 @@ init_cifs(void)
 	int rc = 0;
 	cifs_proc_init();
 	INIT_LIST_HEAD(&cifs_tcp_ses_list);
-#ifdef CONFIG_CIFS_EXPERIMENTAL
+#ifdef CONFIG_CIFS_DNOTIFY_EXPERIMENTAL /* unused temporarily */
 	INIT_LIST_HEAD(&GlobalDnotifyReqList);
 	INIT_LIST_HEAD(&GlobalDnotifyRsp_Q);
-#endif
+#endif /* was needed for dnotify, and will be needed for inotify when VFS fix */
 /*
  *  Initialize Global counters
  */
@@ -941,7 +968,7 @@ init_cifs(void)
 	GlobalTotalActiveXid = 0;
 	GlobalMaxActiveXid = 0;
 	memset(Local_System_Name, 0, 15);
-	rwlock_init(&cifs_tcp_ses_lock);
+	spin_lock_init(&cifs_tcp_ses_lock);
 	spin_lock_init(&cifs_file_list_lock);
 	spin_lock_init(&GlobalMid_Lock);
 

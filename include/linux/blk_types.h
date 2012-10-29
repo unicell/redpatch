@@ -24,6 +24,7 @@
 #define BIO_NULL_MAPPED 9	/* contains invalid user pages */
 #define BIO_FS_INTEGRITY 10	/* fs owns integrity data, not block layer */
 #define BIO_QUIET	11	/* Make BIO Quiet */
+#define BIO_MAPPED_INTEGRITY 12	/* integrity metadata has been remapped */
 #define bio_flagged(bio, flag)	((bio)->bi_flags & (1 << (flag)))
 
 /*
@@ -92,6 +93,7 @@ enum bio_rw_flags {
 
 #define BIO_FLUSH		(1 << BIO_RW_FLUSH)
 #define BIO_FUA			(1 << BIO_RW_FUA)
+#define BIO_DISCARD		(1 << BIO_RW_DISCARD)
 
 /*
  * request type modified bits. first four bits match BIO_RW* bits, important
@@ -120,11 +122,12 @@ enum rq_flag_bits {
 	__REQ_ALLOCED,		/* request came from our alloc pool */
 	__REQ_META,		/* was __REQ_RW_META, metadata io request */
 	__REQ_COPY_USER,	/* contains copies of user pages */
-	__REQ_INTEGRITY,	/* integrity metadata has been remapped */
+	__REQ_INTEGRITY,	/* DEPRECATED: integrity metadata has been remapped */
 	__REQ_NOIDLE,		/* don't anticipate more IO after this one */
 	__REQ_IO_STAT,		/* account I/O stat */
 	__REQ_MIXED_MERGE,	/* merge of different types, fail separately */
 	__REQ_FLUSH,		/* request for cache flush */
+	__REQ_FLUSH_SEQ,	/* request for flush sequence */
 	__REQ_NR_BITS,		/* stops here */
 };
 
@@ -168,6 +171,7 @@ enum rq_flag_bits {
 #define REQ_COPY_USER		(1 << __REQ_COPY_USER)
 #define REQ_INTEGRITY		(1 << __REQ_INTEGRITY)
 #define REQ_FLUSH		(1 << __REQ_FLUSH)
+#define REQ_FLUSH_SEQ		(1 << __REQ_FLUSH_SEQ)
 #define REQ_IO_STAT		(1 << __REQ_IO_STAT)
 #define REQ_MIXED_MERGE		(1 << __REQ_MIXED_MERGE)
 

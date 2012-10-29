@@ -351,6 +351,9 @@ void mddev_resume(mddev_t *mddev)
 	mddev->suspended = 0;
 	wake_up(&mddev->sb_wait);
 	mddev->pers->quiesce(mddev, 0);
+
+	md_wakeup_thread(mddev->thread);
+	md_wakeup_thread(mddev->sync_thread); /* possibly kick off a reshape */
 }
 EXPORT_SYMBOL_GPL(mddev_resume);
 
@@ -1738,6 +1741,18 @@ static struct super_type super_types[] = {
 	},
 };
 
+static void sync_super(mddev_t *mddev, mdk_rdev_t *rdev)
+{
+	if (mddev->sync_super) {
+		mddev->sync_super(mddev, rdev);
+		return;
+	}
+
+	BUG_ON(mddev->major_version >= ARRAY_SIZE(super_types));
+
+	super_types[mddev->major_version].sync_super(mddev, rdev);
+}
+
 static int match_mddev_units(mddev_t *mddev1, mddev_t *mddev2)
 {
 	mdk_rdev_t *rdev, *rdev2;
@@ -1769,20 +1784,14 @@ int md_integrity_register(mddev_t *mddev)
 
 	if (list_empty(&mddev->disks))
 		return 0; /* nothing to do */
-	if (blk_get_integrity(mddev->gendisk))
-		return 0; /* already registered */
+	if (!mddev->gendisk || blk_get_integrity(mddev->gendisk))
+		return 0; /* shouldn't register, or already is */
 	list_for_each_entry(rdev, &mddev->disks, same_set) {
 		/* skip spares and non-functional disks */
 		if (test_bit(Faulty, &rdev->flags))
 			continue;
 		if (rdev->raid_disk < 0)
 			continue;
-		/*
-		 * If at least one rdev is not integrity capable, we can not
-		 * enable data integrity for the md device.
-		 */
-		if (!bdev_get_integrity(rdev->bdev))
-			return -EINVAL;
 		if (!reference) {
 			/* Use the first rdev as the reference */
 			reference = rdev;
@@ -1793,6 +1802,8 @@ int md_integrity_register(mddev_t *mddev)
 				rdev->bdev->bd_disk) < 0)
 			return -EINVAL;
 	}
+	if (!reference || !bdev_get_integrity(reference->bdev))
+		return 0;
 	/*
 	 * All component devices are integrity capable and have matching
 	 * profiles, register the common profile for the md device.
@@ -1803,8 +1814,12 @@ int md_integrity_register(mddev_t *mddev)
 			mdname(mddev));
 		return -EINVAL;
 	}
-	printk(KERN_NOTICE "md: data integrity on %s enabled\n",
-		mdname(mddev));
+	printk(KERN_NOTICE "md: data integrity enabled on %s\n", mdname(mddev));
+	if (bioset_integrity_create(mddev->bio_set, BIO_POOL_SIZE)) {
+		printk(KERN_ERR "md: failed to create integrity pool for %s\n",
+		       mdname(mddev));
+		return -EINVAL;
+	}
 	return 0;
 }
 EXPORT_SYMBOL(md_integrity_register);
@@ -2163,8 +2178,7 @@ static void sync_sbs(mddev_t * mddev, int nospares)
 			/* Don't update this superblock */
 			rdev->sb_loaded = 2;
 		} else {
-			super_types[mddev->major_version].
-				sync_super(mddev, rdev);
+			sync_super(mddev, rdev);
 			rdev->sb_loaded = 1;
 		}
 	}
@@ -2457,7 +2471,7 @@ slot_store(mdk_rdev_t *rdev, const char *buf, size_t len)
 		if (rdev->raid_disk == -1)
 			return -EEXIST;
 		/* personality does all needed checks */
-		if (rdev->mddev->pers->hot_add_disk == NULL)
+		if (rdev->mddev->pers->hot_remove_disk == NULL)
 			return -EINVAL;
 		err = rdev->mddev->pers->
 			hot_remove_disk(rdev->mddev, rdev->raid_disk);
@@ -3319,7 +3333,7 @@ resync_start_store(mddev_t *mddev, const char *buf, size_t len)
 	char *e;
 	unsigned long long n = simple_strtoull(buf, &e, 10);
 
-	if (mddev->pers)
+	if (mddev->pers && !test_bit(MD_RECOVERY_FROZEN, &mddev->recovery))
 		return -EBUSY;
 	if (cmd_match(buf, "none"))
 		n = MaxSector;
@@ -4345,13 +4359,19 @@ static int md_alloc(dev_t dev, char *name)
 	disk->fops = &md_fops;
 	disk->private_data = mddev;
 	disk->queue = mddev->queue;
+	blk_queue_flush(mddev->queue, REQ_FLUSH | REQ_FUA);
 	/* Allow extended partitions.  This makes the
 	 * 'mdp' device redundant, but we can't really
 	 * remove it now.
 	 */
 	disk->flags |= GENHD_FL_EXT_DEVT;
-	add_disk(disk);
 	mddev->gendisk = disk;
+	/* As soon as we call add_disk(), another thread could get
+	 * through to md_open, so make sure it doesn't get too far
+	 */
+	mutex_lock(&mddev->open_mutex);
+	add_disk(disk);
+
 	error = kobject_init_and_add(&mddev->kobj, &md_ktype,
 				     &disk_to_dev(disk)->kobj, "%s", "md");
 	if (error) {
@@ -4365,8 +4385,7 @@ static int md_alloc(dev_t dev, char *name)
 	if (mddev->kobj.sd &&
 	    sysfs_create_group(&mddev->kobj, &md_bitmap_group))
 		printk(KERN_DEBUG "pointless warning\n");
-
-	blk_queue_flush(mddev->queue, REQ_FLUSH | REQ_FUA);
+	mutex_unlock(&mddev->open_mutex);
  abort:
 	mutex_unlock(&disks_mutex);
 	if (!error && mddev->kobj.sd) {
@@ -4612,9 +4631,6 @@ int md_run(mddev_t *mddev)
 	if (mddev->flags)
 		md_update_sb(mddev, 0);
 
-	md_wakeup_thread(mddev->thread);
-	md_wakeup_thread(mddev->sync_thread); /* possibly kick off a reshape */
-
 	md_new_event(mddev);
 	sysfs_notify_dirent_safe(mddev->sysfs_state);
 	sysfs_notify_dirent_safe(mddev->sysfs_action);
@@ -4635,6 +4651,10 @@ static int do_md_run(mddev_t *mddev)
 		bitmap_destroy(mddev);
 		goto out;
 	}
+
+	md_wakeup_thread(mddev->thread);
+	md_wakeup_thread(mddev->sync_thread); /* possibly kick off a reshape */
+
 	set_capacity(mddev->gendisk, mddev->array_sectors);
 	revalidate_disk(mddev->gendisk);
 	mddev->changed = 1;
@@ -5211,6 +5231,16 @@ static int add_new_disk(mddev_t * mddev, mdu_disk_info_t *info)
 		} else
 			super_types[mddev->major_version].
 				validate_super(mddev, rdev);
+		if ((info->state & (1<<MD_DISK_SYNC)) &&
+		    (!test_bit(In_sync, &rdev->flags) ||
+		     rdev->raid_disk != info->raid_disk)) {
+			/* This was a hot-add request, but events doesn't
+			 * match, so reject it.
+			 */
+			export_rdev(rdev);
+			return -EINVAL;
+		}
+
 		if (test_bit(In_sync, &rdev->flags))
 			rdev->saved_raid_disk = rdev->raid_disk;
 		else
@@ -5244,6 +5274,8 @@ static int add_new_disk(mddev_t * mddev, mdu_disk_info_t *info)
 		if (mddev->degraded)
 			set_bit(MD_RECOVERY_RECOVER, &mddev->recovery);
 		set_bit(MD_RECOVERY_NEEDED, &mddev->recovery);
+		if (!err)
+			md_new_event(mddev);
 		md_wakeup_thread(mddev->thread);
 		return err;
 	}
@@ -6859,8 +6891,8 @@ void md_do_sync(mddev_t *mddev)
 	 * Tune reconstruction:
 	 */
 	window = 32*(PAGE_SIZE/512);
-	printk(KERN_INFO "md: using %dk window, over a total of %llu blocks.\n",
-		window/2,(unsigned long long) max_sectors/2);
+	printk(KERN_INFO "md: using %dk window, over a total of %lluk.\n",
+		window/2, (unsigned long long)max_sectors/2);
 
 	atomic_set(&mddev->recovery_active, 0);
 	last_check = 0;
@@ -7042,7 +7074,6 @@ void md_do_sync(mddev_t *mddev)
 }
 EXPORT_SYMBOL_GPL(md_do_sync);
 
-
 static int remove_and_add_spares(mddev_t *mddev)
 {
 	mdk_rdev_t *rdev;
@@ -7129,6 +7160,8 @@ static void reap_sync_thread(mddev_t *mddev)
 	set_bit(MD_RECOVERY_NEEDED, &mddev->recovery);
 	sysfs_notify_dirent_safe(mddev->sysfs_action);
 	md_new_event(mddev);
+	if (mddev->event_work.func)
+		queue_work(md_misc_wq, &mddev->event_work);
 }
 
 /*
@@ -7155,6 +7188,9 @@ static void reap_sync_thread(mddev_t *mddev)
  */
 void md_check_recovery(mddev_t *mddev)
 {
+	if (mddev->suspended)
+		return;
+
 	if (mddev->bitmap)
 		bitmap_daemon_work(mddev);
 

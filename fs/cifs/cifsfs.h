@@ -93,6 +93,12 @@ extern int cifs_readdir(struct file *file, void *direntry, filldir_t filldir);
 extern const struct dentry_operations cifs_dentry_ops;
 extern const struct dentry_operations cifs_ci_dentry_ops;
 
+#ifdef CONFIG_CIFS_DFS_UPCALL
+extern struct vfsmount *cifs_dfs_d_automount(struct path *path);
+#else
+#define cifs_dfs_d_automount NULL
+#endif
+
 /* Functions related to symlinks */
 extern void *cifs_follow_link(struct dentry *direntry, struct nameidata *nd);
 extern void cifs_put_link(struct dentry *direntry,
@@ -108,9 +114,9 @@ extern ssize_t	cifs_getxattr(struct dentry *, const char *, void *, size_t);
 extern ssize_t	cifs_listxattr(struct dentry *, char *, size_t);
 extern long cifs_ioctl(struct file *filep, unsigned int cmd, unsigned long arg);
 
-#ifdef CONFIG_CIFS_EXPERIMENTAL
+#ifdef CIFS_NFSD_EXPORT
 extern const struct export_operations cifs_export_ops;
-#endif /* EXPERIMENTAL */
+#endif /* CIFS_NFSD_EXPORT */
 
 #define CIFS_VERSION   "1.68"
 #endif				/* _CIFSFS_H */

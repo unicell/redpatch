@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2004-2010 Emulex.  All rights reserved.           *
+ * Copyright (C) 2004-2011 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  * Portions Copyright (C) 2004-2005 Christoph Hellwig              *
@@ -89,7 +89,8 @@ lpfc_els_chk_latt(struct lpfc_vport *vport)
 		return 0;
 
 	/* Read the HBA Host Attention Register */
-	ha_copy = readl(phba->HAregaddr);
+	if (lpfc_readl(phba->HAregaddr, &ha_copy))
+		return 1;
 
 	if (!(ha_copy & HA_LATT))
 		return 0;
@@ -249,7 +250,7 @@ lpfc_prep_els_iocb(struct lpfc_vport *vport, uint8_t expectRsp,
 		icmd->un.elsreq64.myID = vport->fc_myDID;
 
 		/* For ELS_REQUEST64_CR, use the VPI by default */
-		icmd->ulpContext = vport->vpi + phba->vpi_base;
+		icmd->ulpContext = phba->vpi_ids[vport->vpi];
 		icmd->ulpCt_h = 0;
 		/* The CT field must be 0=INVALID_RPI for the ECHO cmd */
 		if (elscmd == ELS_CMD_ECHO)
@@ -453,6 +454,7 @@ lpfc_issue_reg_vfi(struct lpfc_vport *vport)
 		rc = -ENOMEM;
 		goto fail_free_dmabuf;
 	}
+
 	mboxq = mempool_alloc(phba->mbox_mem_pool, GFP_KERNEL);
 	if (!mboxq) {
 		rc = -ENOMEM;
@@ -485,6 +487,59 @@ fail:
 }
 
 /**
+ * lpfc_check_clean_addr_bit - Check whether assigned FCID is clean.
+ * @vport: pointer to a host virtual N_Port data structure.
+ * @sp: pointer to service parameter data structure.
+ *
+ * This routine is called from FLOGI/FDISC completion handler functions.
+ * lpfc_check_clean_addr_bit return 1 when FCID/Fabric portname/ Fabric
+ * node nodename is changed in the completion service parameter else return
+ * 0. This function also set flag in the vport data structure to delay
+ * NP_Port discovery after the FLOGI/FDISC completion if Clean address bit
+ * in FLOGI/FDISC response is cleared and FCID/Fabric portname/ Fabric
+ * node nodename is changed in the completion service parameter.
+ *
+ * Return code
+ *   0 - FCID and Fabric Nodename and Fabric portname is not changed.
+ *   1 - FCID or Fabric Nodename or Fabric portname is changed.
+ *
+ **/
+static uint8_t
+lpfc_check_clean_addr_bit(struct lpfc_vport *vport,
+		struct serv_parm *sp)
+{
+	uint8_t fabric_param_changed = 0;
+	struct Scsi_Host *shost = lpfc_shost_from_vport(vport);
+
+	if ((vport->fc_prevDID != vport->fc_myDID) ||
+		memcmp(&vport->fabric_portname, &sp->portName,
+			sizeof(struct lpfc_name)) ||
+		memcmp(&vport->fabric_nodename, &sp->nodeName,
+			sizeof(struct lpfc_name)))
+		fabric_param_changed = 1;
+
+	/*
+	 * Word 1 Bit 31 in common service parameter is overloaded.
+	 * Word 1 Bit 31 in FLOGI request is multiple NPort request
+	 * Word 1 Bit 31 in FLOGI response is clean address bit
+	 *
+	 * If fabric parameter is changed and clean address bit is
+	 * cleared delay nport discovery if
+	 * - vport->fc_prevDID != 0 (not initial discovery) OR
+	 * - lpfc_delay_discovery module parameter is set.
+	 */
+	if (fabric_param_changed && !sp->cmn.clean_address_bit &&
+	    (vport->fc_prevDID || lpfc_delay_discovery)) {
+		spin_lock_irq(shost->host_lock);
+		vport->fc_flag |= FC_DISC_DELAYED;
+		spin_unlock_irq(shost->host_lock);
+	}
+
+	return fabric_param_changed;
+}
+
+
+/**
  * lpfc_cmpl_els_flogi_fabric - Completion function for flogi to a fabric port
  * @vport: pointer to a host virtual N_Port data structure.
  * @ndlp: pointer to a node-list data structure.
@@ -512,6 +567,7 @@ lpfc_cmpl_els_flogi_fabric(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 	struct lpfc_hba  *phba = vport->phba;
 	struct lpfc_nodelist *np;
 	struct lpfc_nodelist *next_np;
+	uint8_t fabric_param_changed;
 
 	spin_lock_irq(shost->host_lock);
 	vport->fc_flag |= FC_FABRIC;
@@ -544,6 +600,12 @@ lpfc_cmpl_els_flogi_fabric(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 		ndlp->nlp_class_sup |= FC_COS_CLASS4;
 	ndlp->nlp_maxframe = ((sp->cmn.bbRcvSizeMsb & 0x0F) << 8) |
 				sp->cmn.bbRcvSizeLsb;
+
+	fabric_param_changed = lpfc_check_clean_addr_bit(vport, sp);
+	memcpy(&vport->fabric_portname, &sp->portName,
+			sizeof(struct lpfc_name));
+	memcpy(&vport->fabric_nodename, &sp->nodeName,
+			sizeof(struct lpfc_name));
 	memcpy(&phba->fc_fabparam, sp, sizeof(struct serv_parm));
 
 	if (phba->sli3_options & LPFC_SLI3_NPIV_ENABLED) {
@@ -565,7 +627,7 @@ lpfc_cmpl_els_flogi_fabric(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 		}
 	}
 
-	if ((vport->fc_prevDID != vport->fc_myDID) &&
+	if (fabric_param_changed &&
 		!(vport->fc_flag & FC_VPORT_NEEDS_REG_VPI)) {
 
 		/* If our NportID changed, we need to ensure all
@@ -585,21 +647,15 @@ lpfc_cmpl_els_flogi_fabric(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 		}
 		lpfc_cleanup_pending_mbox(vport);
 
-		if (phba->sli_rev == LPFC_SLI_REV4)
+		if (phba->sli_rev == LPFC_SLI_REV4) {
 			lpfc_sli4_unreg_all_rpis(vport);
-
-		if (phba->sli3_options & LPFC_SLI3_NPIV_ENABLED) {
 			lpfc_mbx_unreg_vpi(vport);
 			spin_lock_irq(shost->host_lock);
 			vport->fc_flag |= FC_VPORT_NEEDS_REG_VPI;
-			spin_unlock_irq(shost->host_lock);
-		}
-		/*
-		 * If VPI is unreged, driver need to do INIT_VPI
-		 * before re-registering
-		 */
-		if (phba->sli_rev == LPFC_SLI_REV4) {
-			spin_lock_irq(shost->host_lock);
+			/*
+			* If VPI is unreged, driver need to do INIT_VPI
+			* before re-registering
+			*/
 			vport->fc_flag |= FC_VPORT_NEEDS_INIT_VPI;
 			spin_unlock_irq(shost->host_lock);
 		}
@@ -609,6 +665,7 @@ lpfc_cmpl_els_flogi_fabric(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 			 * Driver needs to re-reg VPI in order for f/w
 			 * to update the MAC address.
 			 */
+			lpfc_nlp_set_state(vport, ndlp, NLP_STE_UNMAPPED_NODE);
 			lpfc_register_new_vport(phba, vport, ndlp);
 			return 0;
 	}
@@ -1024,19 +1081,23 @@ lpfc_issue_els_flogi(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 	if (sp->cmn.fcphHigh < FC_PH3)
 		sp->cmn.fcphHigh = FC_PH3;
 
-	if  ((phba->sli_rev == LPFC_SLI_REV4) &&
-	     (bf_get(lpfc_sli_intf_if_type, &phba->sli4_hba.sli_intf) ==
-	      LPFC_SLI_INTF_IF_TYPE_0)) {
-		elsiocb->iocb.ulpCt_h = ((SLI4_CT_FCFI >> 1) & 1);
-		elsiocb->iocb.ulpCt_l = (SLI4_CT_FCFI & 1);
-		/* FLOGI needs to be 3 for WQE FCFI */
-		/* Set the fcfi to the fcfi we registered with */
-		elsiocb->iocb.ulpContext = phba->fcf.fcfi;
-	} else if (phba->sli3_options & LPFC_SLI3_NPIV_ENABLED) {
-		sp->cmn.request_multiple_Nport = 1;
-		/* For FLOGI, Let FLOGI rsp set the NPortID for VPI 0 */
-		icmd->ulpCt_h = 1;
-		icmd->ulpCt_l = 0;
+	if  (phba->sli_rev == LPFC_SLI_REV4) {
+		if (bf_get(lpfc_sli_intf_if_type, &phba->sli4_hba.sli_intf) ==
+		    LPFC_SLI_INTF_IF_TYPE_0) {
+			elsiocb->iocb.ulpCt_h = ((SLI4_CT_FCFI >> 1) & 1);
+			elsiocb->iocb.ulpCt_l = (SLI4_CT_FCFI & 1);
+			/* FLOGI needs to be 3 for WQE FCFI */
+			/* Set the fcfi to the fcfi we registered with */
+			elsiocb->iocb.ulpContext = phba->fcf.fcfi;
+		}
+	} else {
+		if (phba->sli3_options & LPFC_SLI3_NPIV_ENABLED) {
+			sp->cmn.request_multiple_Nport = 1;
+			/* For FLOGI, Let FLOGI rsp set the NPortID for VPI 0 */
+			icmd->ulpCt_h = 1;
+			icmd->ulpCt_l = 0;
+		} else
+			sp->cmn.request_multiple_Nport = 0;
 	}
 
 	if (phba->fc_topology != LPFC_TOPOLOGY_LOOP) {
@@ -4010,9 +4071,6 @@ lpfc_els_rsp_rnid_acc(struct lpfc_vport *vport, uint8_t format,
 
 	phba->fc_stat.elsXmitACC++;
 	elsiocb->iocb_cmpl = lpfc_cmpl_els_rsp;
-	lpfc_nlp_put(ndlp);
-	elsiocb->context1 = NULL;  /* Don't need ndlp for cmpl,
-				    * it could be freed */
 
 	rc = lpfc_sli_issue_iocb(phba, LPFC_ELS_RING, elsiocb, 0);
 	if (rc == IOCB_ERROR) {
@@ -4046,13 +4104,13 @@ lpfc_els_clear_rrq(struct lpfc_vport *vport,
 	pcmd += sizeof(uint32_t);
 	rrq = (struct RRQ *)pcmd;
 	rrq->rrq_exchg = be32_to_cpu(rrq->rrq_exchg);
-	rxid = be16_to_cpu(bf_get(rrq_rxid, rrq));
+	rxid = bf_get(rrq_rxid, rrq);
 
 	lpfc_printf_vlog(vport, KERN_INFO, LOG_ELS,
 			"2883 Clear RRQ for SID:x%x OXID:x%x RXID:x%x"
 			" x%x x%x\n",
 			be32_to_cpu(bf_get(rrq_did, rrq)),
-			be16_to_cpu(bf_get(rrq_oxid, rrq)),
+			bf_get(rrq_oxid, rrq),
 			rxid,
 			iocb->iotag, iocb->iocb.ulpContext);
 
@@ -4060,7 +4118,7 @@ lpfc_els_clear_rrq(struct lpfc_vport *vport,
 		"Clear RRQ:  did:x%x flg:x%x exchg:x%.08x",
 		ndlp->nlp_DID, ndlp->nlp_flag, rrq->rrq_exchg);
 	if (vport->fc_myDID == be32_to_cpu(bf_get(rrq_did, rrq)))
-		xri = be16_to_cpu(bf_get(rrq_oxid, rrq));
+		xri = bf_get(rrq_oxid, rrq);
 	else
 		xri = rxid;
 	prrq = lpfc_get_active_rrq(vport, xri, ndlp->nlp_DID);
@@ -4094,6 +4152,11 @@ lpfc_els_rsp_echo_acc(struct lpfc_vport *vport, uint8_t *data,
 	psli = &phba->sli;
 	cmdsize = oldiocb->iocb.unsli3.rcvsli3.acc_len;
 
+	/* The accumulated length can exceed the BPL_SIZE.  For
+	 * now, use this as the limit
+	 */
+	if (cmdsize > LPFC_BPL_SIZE)
+		cmdsize = LPFC_BPL_SIZE;
 	elsiocb = lpfc_prep_els_iocb(vport, 0, cmdsize, oldiocb->retry, ndlp,
 				     ndlp->nlp_DID, ELS_CMD_ACC);
 	if (!elsiocb)
@@ -4115,9 +4178,6 @@ lpfc_els_rsp_echo_acc(struct lpfc_vport *vport, uint8_t *data,
 
 	phba->fc_stat.elsXmitACC++;
 	elsiocb->iocb_cmpl = lpfc_cmpl_els_rsp;
-	lpfc_nlp_put(ndlp);
-	elsiocb->context1 = NULL;  /* Don't need ndlp for cmpl,
-				    * it could be freed */
 
 	rc = lpfc_sli_issue_iocb(phba, LPFC_ELS_RING, elsiocb, 0);
 	if (rc == IOCB_ERROR) {
@@ -6197,6 +6257,11 @@ lpfc_els_unsol_buffer(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 	if (vport->load_flag & FC_UNLOADING)
 		goto dropit;
 
+	/* If NPort discovery is delayed drop incoming ELS */
+	if ((vport->fc_flag & FC_DISC_DELAYED) &&
+			(cmd != ELS_CMD_PLOGI))
+		goto dropit;
+
 	ndlp = lpfc_findnode_did(vport, did);
 	if (!ndlp) {
 		/* Cannot find existing Fabric ndlp, so allocate a new one */
@@ -6249,6 +6314,12 @@ lpfc_els_unsol_buffer(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 		ndlp = lpfc_plogi_confirm_nport(phba, payload, ndlp);
 
 		lpfc_send_els_event(vport, ndlp, payload);
+
+		/* If Nport discovery is delayed, reject PLOGIs */
+		if (vport->fc_flag & FC_DISC_DELAYED) {
+			rjt_err = LSRJT_UNABLE_TPC;
+			break;
+		}
 		if (vport->port_state < LPFC_DISC_AUTH) {
 			if (!(phba->pport->fc_flag & FC_PT2PT) ||
 				(phba->pport->fc_flag & FC_PT2PT_PLOGI)) {
@@ -6511,6 +6582,26 @@ lpfc_find_vport_by_vpid(struct lpfc_hba *phba, uint16_t vpi)
 {
 	struct lpfc_vport *vport;
 	unsigned long flags;
+	int i;
+
+	/* The physical ports are always vpi 0 - translate is unnecessary. */
+	if (vpi > 0) {
+		/*
+		 * Translate the physical vpi to the logical vpi.  The
+		 * vport stores the logical vpi.
+		 */
+		for (i = 0; i < phba->max_vpi; i++) {
+			if (vpi == phba->vpi_ids[i])
+				break;
+		}
+
+		if (i >= phba->max_vpi) {
+			lpfc_printf_log(phba, KERN_ERR, LOG_ELS,
+					 "2936 Could not find Vport mapped "
+					 "to vpi %d\n", vpi);
+			return NULL;
+		}
+	}
 
 	spin_lock_irqsave(&phba->hbalock, flags);
 	list_for_each_entry(vport, &phba->port_list, listentry) {
@@ -6567,8 +6658,9 @@ lpfc_els_unsol_event(struct lpfc_hba *phba, struct lpfc_sli_ring *pring,
 			vport = phba->pport;
 		else
 			vport = lpfc_find_vport_by_vpid(phba,
-				icmd->unsli3.rcvsli3.vpi - phba->vpi_base);
+						icmd->unsli3.rcvsli3.vpi);
 	}
+
 	/* If there are no BDEs associated
 	 * with this IOCB, there is nothing to do.
 	 */
@@ -6627,6 +6719,21 @@ void
 lpfc_do_scr_ns_plogi(struct lpfc_hba *phba, struct lpfc_vport *vport)
 {
 	struct lpfc_nodelist *ndlp, *ndlp_fdmi;
+	struct Scsi_Host *shost = lpfc_shost_from_vport(vport);
+
+	/*
+	 * If lpfc_delay_discovery parameter is set and the clean address
+	 * bit is cleared and fc fabric parameters chenged, delay FC NPort
+	 * discovery.
+	 */
+	spin_lock_irq(shost->host_lock);
+	if (vport->fc_flag & FC_DISC_DELAYED) {
+		spin_unlock_irq(shost->host_lock);
+		mod_timer(&vport->delayed_disc_tmo,
+			jiffies + HZ * phba->fc_ratov);
+		return;
+	}
+	spin_unlock_irq(shost->host_lock);
 
 	ndlp = lpfc_findnode_did(vport, NameServer_DID);
 	if (!ndlp) {
@@ -6969,6 +7076,9 @@ lpfc_cmpl_els_fdisc(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	struct lpfc_nodelist *next_np;
 	IOCB_t *irsp = &rspiocb->iocb;
 	struct lpfc_iocbq *piocb;
+	struct lpfc_dmabuf *pcmd = cmdiocb->context2, *prsp;
+	struct serv_parm *sp;
+	uint8_t fabric_param_changed;
 
 	lpfc_printf_vlog(vport, KERN_INFO, LOG_ELS,
 			 "0123 FDISC completes. x%x/x%x prevDID: x%x\n",
@@ -7012,7 +7122,14 @@ lpfc_cmpl_els_fdisc(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 
 	vport->fc_myDID = irsp->un.ulpWord[4] & Mask_DID;
 	lpfc_vport_set_state(vport, FC_VPORT_ACTIVE);
-	if ((vport->fc_prevDID != vport->fc_myDID) &&
+	prsp = list_get_first(&pcmd->list, struct lpfc_dmabuf, list);
+	sp = prsp->virt + sizeof(uint32_t);
+	fabric_param_changed = lpfc_check_clean_addr_bit(vport, sp);
+	memcpy(&vport->fabric_portname, &sp->portName,
+		sizeof(struct lpfc_name));
+	memcpy(&vport->fabric_nodename, &sp->nodeName,
+		sizeof(struct lpfc_name));
+	if (fabric_param_changed &&
 		!(vport->fc_flag & FC_VPORT_NEEDS_REG_VPI)) {
 		/* If our NportID changed, we need to ensure all
 		 * remaining NPORTs get unreg_login'ed so we can
@@ -7123,7 +7240,7 @@ lpfc_issue_els_fdisc(struct lpfc_vport *vport, struct lpfc_nodelist *ndlp,
 		elsiocb->iocb.ulpCt_h = (SLI4_CT_VPI >> 1) & 1;
 		elsiocb->iocb.ulpCt_l = SLI4_CT_VPI & 1 ;
 		/* Set the ulpContext to the vpi */
-		elsiocb->iocb.ulpContext = vport->vpi + phba->vpi_base;
+		elsiocb->iocb.ulpContext = phba->vpi_ids[vport->vpi];
 	} else {
 		/* For FDISC, Let FDISC rsp set the NPortID for this VPI */
 		icmd->ulpCt_h = 1;
@@ -7193,8 +7310,10 @@ lpfc_cmpl_els_npiv_logo(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 	struct lpfc_vport *vport = cmdiocb->vport;
 	IOCB_t *irsp;
 	struct lpfc_nodelist *ndlp;
-	ndlp = (struct lpfc_nodelist *)cmdiocb->context1;
+	struct Scsi_Host *shost;
 
+	ndlp = (struct lpfc_nodelist *)cmdiocb->context1;
+	shost = lpfc_shost_from_vport(vport);
 	irsp = &rspiocb->iocb;
 	lpfc_debugfs_disc_trc(vport, LPFC_DISC_TRC_ELS_CMD,
 		"LOGO npiv cmpl:  status:x%x/x%x did:x%x",
@@ -7205,6 +7324,19 @@ lpfc_cmpl_els_npiv_logo(struct lpfc_hba *phba, struct lpfc_iocbq *cmdiocb,
 
 	/* Trigger the release of the ndlp after logo */
 	lpfc_nlp_put(ndlp);
+
+	/* NPIV LOGO completes to NPort <nlp_DID> */
+	lpfc_printf_vlog(vport, KERN_INFO, LOG_ELS,
+			 "2928 NPIV LOGO completes to NPort x%x "
+			 "Data: x%x x%x x%x x%x\n",
+			 ndlp->nlp_DID, irsp->ulpStatus, irsp->un.ulpWord[4],
+			 irsp->ulpTimeout, vport->num_disc_nodes);
+
+	if (irsp->ulpStatus == IOSTAT_SUCCESS) {
+		spin_lock_irq(shost->host_lock);
+		vport->fc_flag &= ~FC_FABRIC;
+		spin_unlock_irq(shost->host_lock);
+	}
 }
 
 /**

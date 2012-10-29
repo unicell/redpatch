@@ -25,6 +25,7 @@
 
 #include <linux/netdevice.h>
 #include <linux/delay.h>
+#include <linux/if_vlan.h>
 #include "netxen_nic.h"
 #include "netxen_nic_hw.h"
 
@@ -966,6 +967,35 @@ netxen_need_fw_reset(struct netxen_adapter *adapter)
 	return 0;
 }
 
+#define NETXEN_MIN_P3_FW_SUPP	NETXEN_VERSION_CODE(4, 0, 505)
+
+int
+netxen_check_flash_fw_compatibility(struct netxen_adapter *adapter)
+{
+	u32 flash_fw_ver, min_fw_ver;
+
+	if (NX_IS_REVISION_P2(adapter->ahw.revision_id))
+		return 0;
+
+	if (netxen_rom_fast_read(adapter,
+			NX_FW_VERSION_OFFSET, (int *)&flash_fw_ver)) {
+		dev_err(&adapter->pdev->dev, "Unable to read flash fw"
+			"version\n");
+		return -EIO;
+	}
+
+	flash_fw_ver = NETXEN_DECODE_VERSION(flash_fw_ver);
+	min_fw_ver = NETXEN_MIN_P3_FW_SUPP;
+	if (flash_fw_ver >= min_fw_ver)
+		return 0;
+
+	dev_info(&adapter->pdev->dev, "Flash fw[%d.%d.%d] is < min fw supported"
+		"[4.0.505]. Please update firmware on flash\n",
+		_major(flash_fw_ver), _minor(flash_fw_ver),
+		_build(flash_fw_ver));
+	return -EINVAL;
+}
+
 static char *fw_name[] = {
 	NX_P2_MN_ROMIMAGE_NAME,
 	NX_P3_CT_ROMIMAGE_NAME,
@@ -1073,10 +1103,12 @@ static int
 netxen_validate_firmware(struct netxen_adapter *adapter)
 {
 	__le32 val;
-	u32 ver, min_ver, bios;
+	__le32 flash_fw_ver;
+	u32 file_fw_ver, min_ver, bios;
 	struct pci_dev *pdev = adapter->pdev;
 	const struct firmware *fw = adapter->fw;
 	u8 fw_type = adapter->fw_type;
+	u32 crbinit_fix_fw;
 
 	if (fw_type == NX_UNIFIED_ROMIMAGE) {
 		if (netxen_nic_validate_unified_romimage(adapter))
@@ -1093,16 +1125,18 @@ netxen_validate_firmware(struct netxen_adapter *adapter)
 	val = nx_get_fw_version(adapter);
 
 	if (NX_IS_REVISION_P3(adapter->ahw.revision_id))
-		min_ver = NETXEN_VERSION_CODE(4, 0, 216);
+		min_ver = NETXEN_MIN_P3_FW_SUPP;
 	else
 		min_ver = NETXEN_VERSION_CODE(3, 4, 216);
 
-	ver = NETXEN_DECODE_VERSION(val);
+	file_fw_ver = NETXEN_DECODE_VERSION(val);
 
-	if ((_major(ver) > _NETXEN_NIC_LINUX_MAJOR) || (ver < min_ver)) {
+	if ((_major(file_fw_ver) > _NETXEN_NIC_LINUX_MAJOR) ||
+	    (file_fw_ver < min_ver)) {
 		dev_err(&pdev->dev,
 				"%s: firmware version %d.%d.%d unsupported\n",
-		fw_name[fw_type], _major(ver), _minor(ver), _build(ver));
+		fw_name[fw_type], _major(file_fw_ver), _minor(file_fw_ver),
+		 _build(file_fw_ver));
 		return -EINVAL;
 	}
 
@@ -1114,15 +1148,32 @@ netxen_validate_firmware(struct netxen_adapter *adapter)
 		return -EINVAL;
 	}
 
-	/* check if flashed firmware is newer */
 	if (netxen_rom_fast_read(adapter,
-			NX_FW_VERSION_OFFSET, (int *)&val))
+			NX_FW_VERSION_OFFSET, (int *)&flash_fw_ver)) {
+		dev_err(&pdev->dev, "Unable to read flash fw version\n");
 		return -EIO;
-	val = NETXEN_DECODE_VERSION(val);
-	if (val > ver) {
-		dev_info(&pdev->dev, "%s: firmware is older than flash\n",
-				fw_name[fw_type]);
+	}
+	flash_fw_ver = NETXEN_DECODE_VERSION(flash_fw_ver);
+
+	/* New fw from file is not allowed, if fw on flash is < 4.0.554 */
+	crbinit_fix_fw = NETXEN_VERSION_CODE(4, 0, 554);
+	if (file_fw_ver >= crbinit_fix_fw && flash_fw_ver < crbinit_fix_fw &&
+	    NX_IS_REVISION_P3(adapter->ahw.revision_id)) {
+		dev_err(&pdev->dev, "Incompatibility detected between driver "
+			"and firmware version on flash. This configuration "
+			"is not recommended. Please update the firmware on "
+			"flash immediately\n");
 		return -EINVAL;
+	}
+
+	/* check if flashed firmware is newer only for no-mn and P2 case*/
+	if (!netxen_p3_has_mn(adapter) ||
+	    NX_IS_REVISION_P2(adapter->ahw.revision_id)) {
+		if (flash_fw_ver > file_fw_ver) {
+			dev_info(&pdev->dev, "%s: firmware is older than flash\n",
+				fw_name[fw_type]);
+			return -EINVAL;
+		}
 	}
 
 	NXWR32(adapter, NETXEN_CAM_RAM(0x1fc), NETXEN_BDINFO_MAGIC);
@@ -1281,7 +1332,7 @@ void netxen_free_dummy_dma(struct netxen_adapter *adapter)
 
 			if (--i == 0)
 				break;
-		};
+		}
 	}
 
 	if (i) {
@@ -1509,7 +1560,9 @@ netxen_process_rcv(struct netxen_adapter *adapter,
 	struct netxen_rx_buffer *buffer;
 	struct sk_buff *skb;
 	struct nx_host_rds_ring *rds_ring;
+	struct ethhdr *eth_hdr;
 	int index, length, cksum, pkt_offset;
+	u16 vid = 0xffff;
 
 	if (unlikely(ring >= adapter->max_rds_rings))
 		return NULL;
@@ -1539,9 +1592,20 @@ netxen_process_rcv(struct netxen_adapter *adapter,
 	if (pkt_offset)
 		skb_pull(skb, pkt_offset);
 
+	if (adapter->vlgrp) {
+		if (!__vlan_get_tag(skb, &vid)) {
+			eth_hdr = (struct ethhdr *) skb->data;
+			memmove(skb->data + VLAN_HLEN, eth_hdr, ETH_ALEN * 2);
+			skb_pull(skb, VLAN_HLEN);
+		}
+	}
+
 	skb->protocol = eth_type_trans(skb, netdev);
 
-	napi_gro_receive(&sds_ring->napi, skb);
+	if (vid != 0xffff)
+		vlan_gro_receive(&sds_ring->napi, adapter->vlgrp, vid, skb);
+	else
+		napi_gro_receive(&sds_ring->napi, skb);
 
 	adapter->stats.rx_pkts++;
 	adapter->stats.rxbytes += length;
@@ -1565,11 +1629,14 @@ netxen_process_lro(struct netxen_adapter *adapter,
 	struct nx_host_rds_ring *rds_ring;
 	struct iphdr *iph;
 	struct tcphdr *th;
+	struct ethhdr *eth_hdr;
 	bool push, timestamp;
 	int l2_hdr_offset, l4_hdr_offset;
 	int index;
 	u16 lro_length, length, data_offset;
 	u32 seq_number;
+	u16 vid = 0xffff;
+	u8 vhdr_len = 0;
 
 	if (unlikely(ring > adapter->max_rds_rings))
 		return NULL;
@@ -1601,10 +1668,22 @@ netxen_process_lro(struct netxen_adapter *adapter,
 	skb_put(skb, lro_length + data_offset);
 
 	skb_pull(skb, l2_hdr_offset);
+
+	if (adapter->vlgrp) {
+		if (!__vlan_get_tag(skb, &vid)) {
+			eth_hdr = (struct ethhdr *) skb->data;
+			memmove(skb->data + VLAN_HLEN, eth_hdr, ETH_ALEN * 2);
+			skb_pull(skb, VLAN_HLEN);
+		}
+	} else {
+		if (skb->protocol == htons(ETH_P_8021Q))
+			vhdr_len = VLAN_HLEN;
+	}
+
 	skb->protocol = eth_type_trans(skb, netdev);
 
-	iph = (struct iphdr *)skb->data;
-	th = (struct tcphdr *)(skb->data + (iph->ihl << 2));
+	iph = (struct iphdr *)(skb->data + vhdr_len);
+	th = (struct tcphdr *)((skb->data + vhdr_len) + (iph->ihl << 2));
 
 	length = (iph->ihl << 2) + (th->doff << 2) + lro_length;
 	iph->tot_len = htons(length);
@@ -1615,7 +1694,10 @@ netxen_process_lro(struct netxen_adapter *adapter,
 
 	length = skb->len;
 
-	netif_receive_skb(skb);
+	if ((vid != 0xffff))
+		vlan_hwaccel_receive_skb(skb, adapter->vlgrp, vid);
+	else
+		netif_receive_skb(skb);
 
 	adapter->stats.lro_pkts++;
 	adapter->stats.rxbytes += length;

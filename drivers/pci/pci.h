@@ -136,14 +136,6 @@ static inline void pci_yes_msi(void) { }
 static inline void pci_msi_init_pci_dev(struct pci_dev *dev) { }
 #endif
 
-#ifdef CONFIG_PCIEAER
-void pci_no_aer(void);
-bool pci_aer_available(void);
-#else
-static inline void pci_no_aer(void) { }
-static inline bool pci_aer_available(void) { return false; }
-#endif
-
 static inline int pci_no_d1d2(struct pci_dev *dev)
 {
 	unsigned int parent_dstates = 0;
@@ -227,6 +219,9 @@ extern int pci_is_reassigndev(struct pci_dev *dev);
 resource_size_t pci_specified_resource_alignment(struct pci_dev *dev);
 extern void pci_disable_bridge_window(struct pci_dev *dev);
 #endif
+
+/* Use "pci=[nosriov|sriov]" to disable or enable SRIOV */
+extern unsigned int pci_sriov_enabled;
 
 /* Single Root I/O Virtualization */
 struct pci_sriov {

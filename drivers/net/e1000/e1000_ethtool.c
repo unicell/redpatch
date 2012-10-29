@@ -158,7 +158,7 @@ static int e1000_get_settings(struct net_device *netdev,
 
 		e1000_get_speed_and_duplex(hw, &adapter->link_speed,
 		                                   &adapter->link_duplex);
-		ecmd->speed = adapter->link_speed;
+		ethtool_cmd_speed_set(ecmd, adapter->link_speed);
 
 		/* unfortunatly FULL_DUPLEX != DUPLEX_FULL
 		 *          and HALF_DUPLEX != DUPLEX_HALF */
@@ -168,7 +168,7 @@ static int e1000_get_settings(struct net_device *netdev,
 		else
 			ecmd->duplex = DUPLEX_HALF;
 	} else {
-		ecmd->speed = -1;
+		ethtool_cmd_speed_set(ecmd, -1);
 		ecmd->duplex = -1;
 	}
 
@@ -197,11 +197,13 @@ static int e1000_set_settings(struct net_device *netdev,
 			                         ADVERTISED_TP |
 			                         ADVERTISED_Autoneg;
 		ecmd->advertising = hw->autoneg_advertised;
-	} else
-		if (e1000_set_spd_dplx(adapter, ecmd->speed + ecmd->duplex)) {
+	} else {
+		u32 speed = ethtool_cmd_speed(ecmd);
+		if (e1000_set_spd_dplx(adapter, speed, ecmd->duplex)) {
 			clear_bit(__E1000_RESETTING, &adapter->flags);
 			return -EINVAL;
 		}
+	}
 
 	/* reset the link */
 

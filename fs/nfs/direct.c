@@ -270,6 +270,51 @@ static const struct rpc_call_ops nfs_read_direct_ops = {
 	.rpc_release = nfs_direct_read_release,
 };
 
+static int nfs_direct_check_single_io(struct nfs_direct_req *dreq,
+				      const struct iovec *iov,
+                                      unsigned long nr_segs, int rw)
+{
+	unsigned long seg, tmp = 0;
+	int pages = 0;
+	struct nfs_open_context *ctx = dreq->ctx;
+	struct inode *inode = ctx->path.dentry->d_inode;
+	size_t size;
+
+
+	/* If its a single vector - use old code */
+	if (nr_segs == 1)
+		return pages;
+        /*
+         * Check to see if all IO buffers are page-aligned and
+         * individual IO sizes are page-multiple.
+         * If so, we can submit them in a single IO.
+         * Otherwise, use old code
+         */
+	for (seg = nr_segs; seg > 0; ) {
+		--seg;
+		tmp |= (unsigned long)iov[seg].iov_base | iov[seg].iov_len;
+		pages += iov[seg].iov_len >> PAGE_SHIFT;
+	}
+
+	/* any low-order bits set? Then something wasn't aligned... */
+	if (tmp & ~PAGE_MASK)
+		pages = 0;
+
+	if (rw)
+		size = NFS_SERVER(inode)->wsize;
+	else
+		size = NFS_SERVER(inode)->rsize;
+
+	/*
+         * If IOsize > wsize/rsize, we need to split IOs into r/wsize anyway
+         * - fall back to old code.
+         */
+	if (pages > (size >> PAGE_SHIFT))
+		pages = 0;
+
+	return pages;
+}
+
 /*
  * For each rsize'd chunk of the user's buffer, dispatch an NFS READ
  * operation.  If nfs_readdata_alloc() or get_user_pages() fails,
@@ -384,6 +429,94 @@ static ssize_t nfs_direct_read_schedule_segment(struct nfs_direct_req *dreq,
 	return result < 0 ? (ssize_t) result : -EFAULT;
 }
 
+static ssize_t nfs_direct_read_schedule_single_io(struct nfs_direct_req *dreq,
+						 const struct iovec *iov,
+						 unsigned long nr_segs,
+						 int pages,
+						 loff_t pos)
+{
+	struct nfs_open_context *ctx = dreq->ctx;
+	struct inode *inode = ctx->path.dentry->d_inode;
+	unsigned long user_addr = (unsigned long)iov->iov_base;
+	size_t bytes = pages << PAGE_SHIFT;
+	struct rpc_task *task;
+	struct rpc_message msg = {
+		.rpc_cred = ctx->cred,
+	};
+	struct rpc_task_setup task_setup_data = {
+		.rpc_client = NFS_CLIENT(inode),
+		.rpc_message = &msg,
+		.callback_ops = &nfs_read_direct_ops,
+		.workqueue = nfsiod_workqueue,
+		.flags = RPC_TASK_ASYNC,
+	};
+	unsigned int pgbase;
+	int result;
+	int seg;
+	int mapped = 0;
+	int nr_pages;
+	ssize_t started = 0;
+	struct nfs_read_data *data;
+
+	result = -ENOMEM;
+	data = nfs_readdata_alloc(pages);
+	if (unlikely(!data))
+		return result;
+
+	pgbase = user_addr & ~PAGE_MASK;
+
+	for (seg = 0; seg < nr_segs; seg++) {
+		user_addr = (unsigned long)iov[seg].iov_base;
+		nr_pages = iov[seg].iov_len >> PAGE_SHIFT;
+
+		down_read(&current->mm->mmap_sem);
+		result = get_user_pages(current, current->mm, user_addr,
+					nr_pages, 1, 0, &data->pagevec[mapped], NULL);
+		up_read(&current->mm->mmap_sem);
+		if (result < 0) {
+			/* unmap what is done so far */
+			nfs_direct_release_pages(data->pagevec, mapped);
+			nfs_readdata_free(data);
+			return -ENOMEM;
+		}
+		mapped += result;
+	}
+
+	get_dreq(dreq);
+
+	data->req = (struct nfs_page *) dreq;
+	data->inode = inode;
+	data->cred = msg.rpc_cred;
+	data->args.fh = NFS_FH(inode);
+	data->args.context = ctx;
+	data->args.lock_context = dreq->l_ctx;
+	data->args.offset = pos;
+	data->args.pgbase = pgbase;
+	data->args.pages = data->pagevec;
+	data->args.count = bytes;
+	data->res.fattr = &data->fattr;
+	data->res.eof = 0;
+	data->res.count = bytes;
+	nfs_fattr_init(&data->fattr);
+
+	task_setup_data.task = &data->task;
+	task_setup_data.callback_data = data;
+	msg.rpc_argp = &data->args;
+	msg.rpc_resp = &data->res;
+	NFS_PROTO(inode)->read_setup(data, &msg);
+
+	task = rpc_run_task(&task_setup_data);
+	if (IS_ERR(task))
+		goto out;
+	rpc_put_task(task);
+
+	started += bytes;
+out:
+	if (started)
+		return started;
+	return result < 0 ? (ssize_t) result : -EFAULT;
+}
+
 static ssize_t nfs_direct_read_schedule_iovec(struct nfs_direct_req *dreq,
 					      const struct iovec *iov,
 					      unsigned long nr_segs,
@@ -395,6 +528,19 @@ static ssize_t nfs_direct_read_schedule_iovec(struct nfs_direct_req *dreq,
 
 	get_dreq(dreq);
 
+	result = nfs_direct_check_single_io(dreq, iov, nr_segs, 0);
+	if (result) {
+		result = nfs_direct_read_schedule_single_io(dreq, iov, nr_segs,
+							result, pos);
+		if (result >= 0) {
+			requested_bytes += result;
+			pos += result;
+			goto out;
+		} else if (result != -ENOMEM) {
+			goto out;
+		}
+		/* For ENOMEM fall through to try original code */
+	}
 	for (seg = 0; seg < nr_segs; seg++) {
 		const struct iovec *vec = &iov[seg];
 		result = nfs_direct_read_schedule_segment(dreq, vec, pos);
@@ -406,6 +552,7 @@ static ssize_t nfs_direct_read_schedule_iovec(struct nfs_direct_req *dreq,
 		pos += vec->iov_len;
 	}
 
+out:
 	/*
 	 * If no bytes were started, return the error, and let the
 	 * generic layer handle the completion.
@@ -414,7 +561,6 @@ static ssize_t nfs_direct_read_schedule_iovec(struct nfs_direct_req *dreq,
 		nfs_direct_req_release(dreq);
 		return result < 0 ? result : -EIO;
 	}
-
 	if (put_dreq(dreq))
 		nfs_direct_complete(dreq);
 	return 0;
@@ -648,8 +794,7 @@ static void nfs_direct_write_result(struct rpc_task *task, void *calldata)
 {
 	struct nfs_write_data *data = calldata;
 
-	if (nfs_writeback_done(task, data) != 0)
-		return;
+	nfs_writeback_done(task, data);
 }
 
 /*
@@ -820,6 +965,103 @@ static ssize_t nfs_direct_write_schedule_segment(struct nfs_direct_req *dreq,
 	return result < 0 ? (ssize_t) result : -EFAULT;
 }
 
+/*
+ * Special Case: Efficient writev() support - only if all the IO buffers
+ * in the vector are page-aligned and IO sizes are page-multiple
+ * + total IO size is < wsize. We can map all of the vectors together
+ * and submit them in a single IO instead of operating on single entry
+ * in the vector.
+ */
+static ssize_t nfs_direct_write_schedule_single_io(struct nfs_direct_req *dreq,
+						 const struct iovec *iov,
+						 unsigned long nr_segs,
+						 int pages,
+						 loff_t pos, int sync)
+{
+	struct nfs_open_context *ctx = dreq->ctx;
+	struct inode *inode = ctx->path.dentry->d_inode;
+	unsigned long user_addr = (unsigned long)iov->iov_base;
+	size_t bytes = pages << PAGE_SHIFT;
+	struct rpc_task *task;
+	struct rpc_message msg = {
+		.rpc_cred = ctx->cred,
+	};
+	struct rpc_task_setup task_setup_data = {
+		.rpc_client = NFS_CLIENT(inode),
+		.rpc_message = &msg,
+		.callback_ops = &nfs_write_direct_ops,
+		.workqueue = nfsiod_workqueue,
+		.flags = RPC_TASK_ASYNC,
+	};
+	unsigned int pgbase;
+	int result;
+	int seg;
+	int mapped = 0;
+	int nr_pages;
+	ssize_t started = 0;
+	struct nfs_write_data *data;
+
+	result = -ENOMEM;
+	data = nfs_writedata_alloc(pages);
+	if (unlikely(!data))
+		return result;
+
+	pgbase = user_addr & ~PAGE_MASK;
+
+	for (seg = 0; seg < nr_segs; seg++) {
+		user_addr = (unsigned long)iov[seg].iov_base;
+		nr_pages = iov[seg].iov_len >> PAGE_SHIFT;
+
+		down_read(&current->mm->mmap_sem);
+		result = get_user_pages(current, current->mm, user_addr,
+					nr_pages, 0, 0, &data->pagevec[mapped], NULL);
+		up_read(&current->mm->mmap_sem);
+		if (result < 0) {
+			/* unmap what is done so far */
+			nfs_direct_release_pages(data->pagevec, mapped);
+			nfs_writedata_free(data);
+			return -ENOMEM;
+		}
+		mapped += result;
+	}
+
+	get_dreq(dreq);
+	list_move_tail(&data->pages, &dreq->rewrite_list);
+
+	data->req = (struct nfs_page *) dreq;
+	data->inode = inode;
+	data->cred = msg.rpc_cred;
+	data->args.fh = NFS_FH(inode);
+	data->args.context = ctx;
+	data->args.lock_context = dreq->l_ctx;
+	data->args.offset = pos;
+	data->args.pgbase = pgbase;
+	data->args.pages = data->pagevec;
+	data->args.count = bytes;
+	data->args.stable = sync;
+	data->res.fattr = &data->fattr;
+	data->res.count = bytes;
+	data->res.verf = &data->verf;
+	nfs_fattr_init(&data->fattr);
+
+	task_setup_data.task = &data->task;
+	task_setup_data.callback_data = data;
+	msg.rpc_argp = &data->args;
+	msg.rpc_resp = &data->res;
+	NFS_PROTO(inode)->write_setup(data, &msg);
+
+	task = rpc_run_task(&task_setup_data);
+	if (IS_ERR(task))
+		goto out;
+	rpc_put_task(task);
+
+	started += bytes;
+out:
+	if (started)
+		return started;
+	return result < 0 ? (ssize_t) result : -EFAULT;
+}
+
 static ssize_t nfs_direct_write_schedule_iovec(struct nfs_direct_req *dreq,
 					       const struct iovec *iov,
 					       unsigned long nr_segs,
@@ -831,6 +1073,19 @@ static ssize_t nfs_direct_write_schedule_iovec(struct nfs_direct_req *dreq,
 
 	get_dreq(dreq);
 
+	result = nfs_direct_check_single_io(dreq, iov, nr_segs, 1);
+	if (result) {
+		result = nfs_direct_write_schedule_single_io(dreq, iov, nr_segs,
+							result, pos, sync);
+		if (result >= 0) {
+			requested_bytes += result;
+			pos += result;
+			goto out;
+		} else if (result != -ENOMEM) {
+			goto out;
+		}
+		/* For ENOMEM fall through to try original code */
+	}
 	for (seg = 0; seg < nr_segs; seg++) {
 		const struct iovec *vec = &iov[seg];
 		result = nfs_direct_write_schedule_segment(dreq, vec,
@@ -843,6 +1098,7 @@ static ssize_t nfs_direct_write_schedule_iovec(struct nfs_direct_req *dreq,
 		pos += vec->iov_len;
 	}
 
+out:
 	/*
 	 * If no bytes were started, return the error, and let the
 	 * generic layer handle the completion.
@@ -870,18 +1126,9 @@ static ssize_t nfs_direct_write(struct kiocb *iocb, const struct iovec *iov,
 	dreq = nfs_direct_req_alloc();
 	if (!dreq)
 		goto out;
+	nfs_alloc_commit_data(dreq);
 
-	if (count > wsize || nr_segs > 1)
-		nfs_alloc_commit_data(dreq);
-	else
-		dreq->commit_data = NULL;
-
-	/*
-	 * If we couldn't allocate commit data, or we'll just be doing a
-	 * single write, then make this a NFS_FILE_SYNC write and do away
-	 * with the commit.
-	 */
-	if (dreq->commit_data == NULL)
+	if (dreq->commit_data == NULL || count <= wsize)
 		sync = NFS_FILE_SYNC;
 
 	dreq->inode = inode;

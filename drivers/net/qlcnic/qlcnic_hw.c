@@ -456,7 +456,7 @@ int qlcnic_nic_set_promisc(struct qlcnic_adapter *adapter, u32 mode)
 
 	req.qhdr = cpu_to_le64(QLCNIC_HOST_REQUEST << 23);
 
-	word = QLCNIC_H2C_OPCODE_PROXY_SET_VPORT_MISS_MODE |
+	word = QLCNIC_H2C_OPCODE_SET_MAC_RECEIVE_MODE |
 			((u64)adapter->portnum << 16);
 	req.req_hdr = cpu_to_le64(word);
 
@@ -531,33 +531,31 @@ void qlcnic_delete_lb_filters(struct qlcnic_adapter *adapter)
 	}
 }
 
-#define	QLCNIC_CONFIG_INTR_COALESCE	3
-
 /*
  * Send the interrupt coalescing parameter set by ethtool to the card.
  */
 int qlcnic_config_intr_coalesce(struct qlcnic_adapter *adapter)
 {
 	struct qlcnic_nic_req req;
-	u64 word[6];
-	int rv, i;
+	int rv;
 
 	memset(&req, 0, sizeof(struct qlcnic_nic_req));
 
 	req.qhdr = cpu_to_le64(QLCNIC_HOST_REQUEST << 23);
 
-	word[0] = QLCNIC_CONFIG_INTR_COALESCE | ((u64)adapter->portnum << 16);
-	req.req_hdr = cpu_to_le64(word[0]);
+	req.req_hdr = cpu_to_le64(QLCNIC_CONFIG_INTR_COALESCE |
+		((u64) adapter->portnum << 16));
 
-	memcpy(&word[0], &adapter->coal, sizeof(adapter->coal));
-	for (i = 0; i < 6; i++)
-		req.words[i] = cpu_to_le64(word[i]);
-
+	req.words[0] = cpu_to_le64(((u64) adapter->ahw->coal.flag) << 32);
+	req.words[2] = cpu_to_le64(adapter->ahw->coal.rx_packets |
+			((u64) adapter->ahw->coal.rx_time_us) << 16);
+	req.words[5] = cpu_to_le64(adapter->ahw->coal.timer_out |
+			((u64) adapter->ahw->coal.type) << 32 |
+			((u64) adapter->ahw->coal.sts_ring_mask) << 40);
 	rv = qlcnic_send_cmd_descs(adapter, (struct cmd_desc_type0 *)&req, 1);
 	if (rv != 0)
 		dev_err(&adapter->netdev->dev,
 			"Could not send interrupt coalescing parameters\n");
-
 	return rv;
 }
 
@@ -566,6 +564,9 @@ int qlcnic_config_hw_lro(struct qlcnic_adapter *adapter, int enable)
 	struct qlcnic_nic_req req;
 	u64 word;
 	int rv;
+
+	if (!test_bit(__QLCNIC_FW_ATTACHED, &adapter->state))
+		return 0;
 
 	memset(&req, 0, sizeof(struct qlcnic_nic_req));
 
@@ -712,6 +713,9 @@ int qlcnic_send_lro_cleanup(struct qlcnic_adapter *adapter)
 	u64 word;
 	int rv;
 
+	if (!test_bit(__QLCNIC_FW_ATTACHED, &adapter->state))
+		return 0;
+
 	memset(&req, 0, sizeof(struct qlcnic_nic_req));
 	req.qhdr = cpu_to_le64(QLCNIC_HOST_REQUEST << 23);
 
@@ -779,7 +783,7 @@ qlcnic_pci_get_crb_addr_2M(struct qlcnic_adapter *adapter,
 	m = &crb_128M_2M_map[CRB_BLK(off)].sub_block[CRB_SUBBLK(off)];
 
 	if (m->valid && (m->start_128M <= off) && (m->end_128M > off)) {
-		*addr = adapter->ahw.pci_base0 + m->start_2M +
+		*addr = adapter->ahw->pci_base0 + m->start_2M +
 			(off - m->start_128M);
 		return 0;
 	}
@@ -787,7 +791,7 @@ qlcnic_pci_get_crb_addr_2M(struct qlcnic_adapter *adapter,
 	/*
 	 * Not in direct map, use crb window
 	 */
-	*addr = adapter->ahw.pci_base0 + CRB_INDIRECT_2M + (off & MASK(16));
+	*addr = adapter->ahw->pci_base0 + CRB_INDIRECT_2M + (off & MASK(16));
 	return 1;
 }
 
@@ -800,7 +804,7 @@ static int
 qlcnic_pci_set_crbwindow_2M(struct qlcnic_adapter *adapter, ulong off)
 {
 	u32 window;
-	void __iomem *addr = adapter->ahw.pci_base0 + CRB_WINDOW_2M;
+	void __iomem *addr = adapter->ahw->pci_base0 + CRB_WINDOW_2M;
 
 	off -= QLCNIC_PCI_CRBSPACE;
 
@@ -837,13 +841,13 @@ qlcnic_hw_write_wx_2M(struct qlcnic_adapter *adapter, ulong off, u32 data)
 
 	if (rv > 0) {
 		/* indirect access */
-		write_lock_irqsave(&adapter->ahw.crb_lock, flags);
+		write_lock_irqsave(&adapter->ahw->crb_lock, flags);
 		crb_win_lock(adapter);
 		rv = qlcnic_pci_set_crbwindow_2M(adapter, off);
 		if (!rv)
 			writel(data, addr);
 		crb_win_unlock(adapter);
-		write_unlock_irqrestore(&adapter->ahw.crb_lock, flags);
+		write_unlock_irqrestore(&adapter->ahw->crb_lock, flags);
 		return rv;
 	}
 
@@ -868,12 +872,12 @@ qlcnic_hw_read_wx_2M(struct qlcnic_adapter *adapter, ulong off)
 
 	if (rv > 0) {
 		/* indirect access */
-		write_lock_irqsave(&adapter->ahw.crb_lock, flags);
+		write_lock_irqsave(&adapter->ahw->crb_lock, flags);
 		crb_win_lock(adapter);
 		if (!qlcnic_pci_set_crbwindow_2M(adapter, off))
 			data = readl(addr);
 		crb_win_unlock(adapter);
-		write_unlock_irqrestore(&adapter->ahw.crb_lock, flags);
+		write_unlock_irqrestore(&adapter->ahw->crb_lock, flags);
 		return data;
 	}
 
@@ -903,9 +907,9 @@ qlcnic_pci_set_window_2M(struct qlcnic_adapter *adapter,
 
 	window = OCM_WIN_P3P(addr);
 
-	writel(window, adapter->ahw.ocm_win_crb);
+	writel(window, adapter->ahw->ocm_win_crb);
 	/* read back to flush */
-	readl(adapter->ahw.ocm_win_crb);
+	readl(adapter->ahw->ocm_win_crb);
 
 	*start = QLCNIC_PCI_OCM0_2M + GET_MEM_OFFS_2M(addr);
 	return 0;
@@ -919,13 +923,13 @@ qlcnic_pci_mem_access_direct(struct qlcnic_adapter *adapter, u64 off,
 	int ret;
 	u32 start;
 
-	mutex_lock(&adapter->ahw.mem_lock);
+	mutex_lock(&adapter->ahw->mem_lock);
 
 	ret = qlcnic_pci_set_window_2M(adapter, off, &start);
 	if (ret != 0)
 		goto unlock;
 
-	addr = adapter->ahw.pci_base0 + start;
+	addr = adapter->ahw->pci_base0 + start;
 
 	if (op == 0)	/* read */
 		*data = readq(addr);
@@ -933,7 +937,7 @@ qlcnic_pci_mem_access_direct(struct qlcnic_adapter *adapter, u64 off,
 		writeq(*data, addr);
 
 unlock:
-	mutex_unlock(&adapter->ahw.mem_lock);
+	mutex_unlock(&adapter->ahw->mem_lock);
 
 	return ret;
 }
@@ -941,23 +945,23 @@ unlock:
 void
 qlcnic_pci_camqm_read_2M(struct qlcnic_adapter *adapter, u64 off, u64 *data)
 {
-	void __iomem *addr = adapter->ahw.pci_base0 +
+	void __iomem *addr = adapter->ahw->pci_base0 +
 		QLCNIC_PCI_CAMQM_2M_BASE + (off - QLCNIC_PCI_CAMQM);
 
-	mutex_lock(&adapter->ahw.mem_lock);
+	mutex_lock(&adapter->ahw->mem_lock);
 	*data = readq(addr);
-	mutex_unlock(&adapter->ahw.mem_lock);
+	mutex_unlock(&adapter->ahw->mem_lock);
 }
 
 void
 qlcnic_pci_camqm_write_2M(struct qlcnic_adapter *adapter, u64 off, u64 data)
 {
-	void __iomem *addr = adapter->ahw.pci_base0 +
+	void __iomem *addr = adapter->ahw->pci_base0 +
 		QLCNIC_PCI_CAMQM_2M_BASE + (off - QLCNIC_PCI_CAMQM);
 
-	mutex_lock(&adapter->ahw.mem_lock);
+	mutex_lock(&adapter->ahw->mem_lock);
 	writeq(data, addr);
-	mutex_unlock(&adapter->ahw.mem_lock);
+	mutex_unlock(&adapter->ahw->mem_lock);
 }
 
 #define MAX_CTL_CHECK   1000
@@ -996,7 +1000,7 @@ qlcnic_pci_mem_write_2M(struct qlcnic_adapter *adapter,
 correct:
 	off8 = off & ~0xf;
 
-	mutex_lock(&adapter->ahw.mem_lock);
+	mutex_lock(&adapter->ahw->mem_lock);
 
 	writel(off8, (mem_crb + MIU_TEST_AGT_ADDR_LO));
 	writel(0, (mem_crb + MIU_TEST_AGT_ADDR_HI));
@@ -1048,7 +1052,7 @@ correct:
 		ret = 0;
 
 done:
-	mutex_unlock(&adapter->ahw.mem_lock);
+	mutex_unlock(&adapter->ahw->mem_lock);
 
 	return ret;
 }
@@ -1090,7 +1094,7 @@ qlcnic_pci_mem_read_2M(struct qlcnic_adapter *adapter,
 correct:
 	off8 = off & ~0xf;
 
-	mutex_lock(&adapter->ahw.mem_lock);
+	mutex_lock(&adapter->ahw->mem_lock);
 
 	writel(off8, (mem_crb + MIU_TEST_AGT_ADDR_LO));
 	writel(0, (mem_crb + MIU_TEST_AGT_ADDR_HI));
@@ -1120,7 +1124,7 @@ correct:
 		ret = 0;
 	}
 
-	mutex_unlock(&adapter->ahw.mem_lock);
+	mutex_unlock(&adapter->ahw->mem_lock);
 
 	return ret;
 }
@@ -1144,7 +1148,7 @@ int qlcnic_get_board_info(struct qlcnic_adapter *adapter)
 	if (qlcnic_rom_fast_read(adapter, offset, &board_type))
 		return -EIO;
 
-	adapter->ahw.board_type = board_type;
+	adapter->ahw->board_type = board_type;
 
 	if (board_type == QLCNIC_BRDTYPE_P3P_4_GB_MM) {
 		u32 gpio = QLCRD32(adapter, QLCNIC_ROMUSB_GLB_PAD_GPIO_I);
@@ -1163,20 +1167,20 @@ int qlcnic_get_board_info(struct qlcnic_adapter *adapter)
 	case QLCNIC_BRDTYPE_P3P_10G_SFP_QT:
 	case QLCNIC_BRDTYPE_P3P_10G_XFP:
 	case QLCNIC_BRDTYPE_P3P_10000_BASE_T:
-		adapter->ahw.port_type = QLCNIC_XGBE;
+		adapter->ahw->port_type = QLCNIC_XGBE;
 		break;
 	case QLCNIC_BRDTYPE_P3P_REF_QG:
 	case QLCNIC_BRDTYPE_P3P_4_GB:
 	case QLCNIC_BRDTYPE_P3P_4_GB_MM:
-		adapter->ahw.port_type = QLCNIC_GBE;
+		adapter->ahw->port_type = QLCNIC_GBE;
 		break;
 	case QLCNIC_BRDTYPE_P3P_10G_TP:
-		adapter->ahw.port_type = (adapter->portnum < 2) ?
+		adapter->ahw->port_type = (adapter->portnum < 2) ?
 			QLCNIC_XGBE : QLCNIC_GBE;
 		break;
 	default:
 		dev_err(&pdev->dev, "unknown board type %x\n", board_type);
-		adapter->ahw.port_type = QLCNIC_XGBE;
+		adapter->ahw->port_type = QLCNIC_XGBE;
 		break;
 	}
 

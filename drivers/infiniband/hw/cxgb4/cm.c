@@ -1210,9 +1210,7 @@ static int pass_open_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
 	}
 	PDBG("%s ep %p status %d error %d\n", __func__, ep,
 	     rpl->status, status2errno(rpl->status));
-	ep->com.wr_wait.ret = status2errno(rpl->status);
-	ep->com.wr_wait.done = 1;
-	wake_up(&ep->com.wr_wait.wait);
+	c4iw_wake_up(&ep->com.wr_wait, status2errno(rpl->status));
 
 	return 0;
 }
@@ -1246,9 +1244,7 @@ static int close_listsrv_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
 	struct c4iw_listen_ep *ep = lookup_stid(t, stid);
 
 	PDBG("%s ep %p\n", __func__, ep);
-	ep->com.wr_wait.ret = status2errno(rpl->status);
-	ep->com.wr_wait.done = 1;
-	wake_up(&ep->com.wr_wait.wait);
+	c4iw_wake_up(&ep->com.wr_wait, status2errno(rpl->status));
 	return 0;
 }
 
@@ -1477,9 +1473,9 @@ static int peer_close(struct c4iw_dev *dev, struct sk_buff *skb)
 	struct c4iw_qp_attributes attrs;
 	int disconnect = 1;
 	int release = 0;
-	int abort = 0;
 	struct tid_info *t = dev->rdev.lldi.tids;
 	unsigned int tid = GET_TID(hdr);
+	int ret;
 
 	ep = lookup_tid(t, tid);
 	PDBG("%s ep %p tid %u\n", __func__, ep, ep->hwtid);
@@ -1503,26 +1499,24 @@ static int peer_close(struct c4iw_dev *dev, struct sk_buff *skb)
 		 * in rdma connection migration (see c4iw_accept_cr()).
 		 */
 		__state_set(&ep->com, CLOSING);
-		ep->com.wr_wait.done = 1;
-		ep->com.wr_wait.ret = -ECONNRESET;
 		PDBG("waking up ep %p tid %u\n", ep, ep->hwtid);
-		wake_up(&ep->com.wr_wait.wait);
+		c4iw_wake_up(&ep->com.wr_wait, -ECONNRESET);
 		break;
 	case MPA_REP_SENT:
 		__state_set(&ep->com, CLOSING);
-		ep->com.wr_wait.done = 1;
-		ep->com.wr_wait.ret = -ECONNRESET;
 		PDBG("waking up ep %p tid %u\n", ep, ep->hwtid);
-		wake_up(&ep->com.wr_wait.wait);
+		c4iw_wake_up(&ep->com.wr_wait, -ECONNRESET);
 		break;
 	case FPDU_MODE:
 		start_ep_timer(ep);
 		__state_set(&ep->com, CLOSING);
 		attrs.next_state = C4IW_QP_STATE_CLOSING;
-		abort = c4iw_modify_qp(ep->com.qp->rhp, ep->com.qp,
+		ret = c4iw_modify_qp(ep->com.qp->rhp, ep->com.qp,
 				       C4IW_QP_ATTR_NEXT_STATE, &attrs, 1);
-		peer_close_upcall(ep);
-		disconnect = 1;
+		if (ret != -ECONNRESET) {
+			peer_close_upcall(ep);
+			disconnect = 1;
+		}
 		break;
 	case ABORTING:
 		disconnect = 0;
@@ -1590,9 +1584,7 @@ static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
 	/*
 	 * Wake up any threads in rdma_init() or rdma_fini().
 	 */
-	ep->com.wr_wait.done = 1;
-	ep->com.wr_wait.ret = -ECONNRESET;
-	wake_up(&ep->com.wr_wait.wait);
+	c4iw_wake_up(&ep->com.wr_wait, -ECONNRESET);
 
 	mutex_lock(&ep->com.mutex);
 	switch (ep->com.state) {
@@ -2129,15 +2121,16 @@ int c4iw_ep_disconnect(struct c4iw_ep *ep, int abrupt, gfp_t gfp)
 		break;
 	}
 
-	mutex_unlock(&ep->com.mutex);
 	if (close) {
-		if (abrupt)
-			ret = abort_connection(ep, NULL, gfp);
-		else
+		if (abrupt) {
+			close_complete_upcall(ep);
+			ret = send_abort(ep, NULL, gfp);
+		} else
 			ret = send_halfclose(ep, gfp);
 		if (ret)
 			fatal = 1;
 	}
+	mutex_unlock(&ep->com.mutex);
 	if (fatal)
 		release_ep_resources(ep);
 	return ret;
@@ -2305,14 +2298,8 @@ static int fw6_msg(struct c4iw_dev *dev, struct sk_buff *skb)
 		ret = (int)((be64_to_cpu(rpl->data[0]) >> 8) & 0xff);
 		wr_waitp = (struct c4iw_wr_wait *)(__force unsigned long) rpl->data[1];
 		PDBG("%s wr_waitp %p ret %u\n", __func__, wr_waitp, ret);
-		if (wr_waitp) {
-			if (ret)
-				wr_waitp->ret = -ret;
-			else
-				wr_waitp->ret = 0;
-			wr_waitp->done = 1;
-			wake_up(&wr_waitp->wait);
-		}
+		if (wr_waitp)
+			c4iw_wake_up(wr_waitp, ret ? -ret : 0);
 		kfree_skb(skb);
 		break;
 	case 2:
@@ -2324,6 +2311,31 @@ static int fw6_msg(struct c4iw_dev *dev, struct sk_buff *skb)
 		kfree_skb(skb);
 		break;
 	}
+	return 0;
+}
+
+static int peer_abort_intr(struct c4iw_dev *dev, struct sk_buff *skb)
+{
+	struct cpl_abort_req_rss *req = cplhdr(skb);
+	struct c4iw_ep *ep;
+	struct tid_info *t = dev->rdev.lldi.tids;
+	unsigned int tid = GET_TID(req);
+
+	ep = lookup_tid(t, tid);
+	if (is_neg_adv_abort(req->status)) {
+		PDBG("%s neg_adv_abort ep %p tid %u\n", __func__, ep,
+		     ep->hwtid);
+		kfree_skb(skb);
+		return 0;
+	}
+	PDBG("%s ep %p tid %u state %u\n", __func__, ep, ep->hwtid,
+	     ep->com.state);
+
+	/*
+	 * Wake up any threads in rdma_init() or rdma_fini().
+	 */
+	c4iw_wake_up(&ep->com.wr_wait, -ECONNRESET);
+	sched(dev, skb);
 	return 0;
 }
 
@@ -2343,7 +2355,7 @@ c4iw_handler_func c4iw_handlers[NUM_CPL_CMDS] = {
 	[CPL_PASS_ESTABLISH] = sched,
 	[CPL_PEER_CLOSE] = sched,
 	[CPL_CLOSE_CON_RPL] = sched,
-	[CPL_ABORT_REQ_RSS] = sched,
+	[CPL_ABORT_REQ_RSS] = peer_abort_intr,
 	[CPL_RDMA_TERMINATE] = sched,
 	[CPL_FW4_ACK] = sched,
 	[CPL_SET_TCB_RPL] = set_tcb_rpl,

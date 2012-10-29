@@ -218,6 +218,9 @@ bfad_im_get_host_speed(struct Scsi_Host *shost)
 	case BFA_PORT_SPEED_10GBPS:
 		fc_host_speed(shost) = FC_PORTSPEED_10GBIT;
 		break;
+	case BFA_PORT_SPEED_16GBPS:
+		fc_host_speed(shost) = FC_PORTSPEED_16GBIT;
+		break;
 	case BFA_PORT_SPEED_8GBPS:
 		fc_host_speed(shost) = FC_PORTSPEED_8GBIT;
 		break;
@@ -580,6 +583,8 @@ struct fc_function_template bfad_im_fc_function_template = {
 	.vport_create = bfad_im_vport_create,
 	.vport_delete = bfad_im_vport_delete,
 	.vport_disable = bfad_im_vport_disable,
+	.bsg_request = bfad_im_bsg_request,
+	.bsg_timeout = bfad_im_bsg_timeout,
 };
 
 struct fc_function_template bfad_im_vport_fc_function_template = {

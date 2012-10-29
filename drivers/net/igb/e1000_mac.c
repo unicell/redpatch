@@ -1,7 +1,7 @@
 /*******************************************************************************
 
   Intel(R) Gigabit Ethernet Linux driver
-  Copyright(c) 2007-2009 Intel Corporation.
+  Copyright(c) 2007-2011 Intel Corporation.
 
   This program is free software; you can redistribute it and/or modify it
   under the terms and conditions of the GNU General Public License,
@@ -29,6 +29,7 @@
 #include <linux/delay.h>
 #include <linux/pci.h>
 #include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 #include "e1000_mac.h"
 
@@ -181,7 +182,7 @@ s32 igb_vfta_set(struct e1000_hw *hw, u32 vid, bool add)
  *  address and must override the actual permanent MAC address.  If an
  *  alternate MAC address is fopund it is saved in the hw struct and
  *  prgrammed into RAR0 and the cuntion returns success, otherwise the
- *  fucntion returns an error.
+ *  function returns an error.
  **/
 s32 igb_check_alt_mac_addr(struct e1000_hw *hw)
 {
@@ -189,6 +190,13 @@ s32 igb_check_alt_mac_addr(struct e1000_hw *hw)
 	s32 ret_val = 0;
 	u16 offset, nvm_alt_mac_addr_offset, nvm_data;
 	u8 alt_mac_addr[ETH_ALEN];
+
+	/*
+	 * Alternate MAC address is handled by the option ROM for 82580
+	 * and newer. SW support not required.
+	 */
+	if (hw->mac.type >= e1000_82580)
+		goto out;
 
 	ret_val = hw->nvm.ops.read(hw, NVM_ALT_MAC_ADDR_PTR, 1,
 				 &nvm_alt_mac_addr_offset);
@@ -217,7 +225,7 @@ s32 igb_check_alt_mac_addr(struct e1000_hw *hw)
 	}
 
 	/* if multicast bit is set, the alternate address will not be used */
-	if (alt_mac_addr[0] & 0x01) {
+	if (is_multicast_ether_addr(alt_mac_addr)) {
 		hw_dbg("Ignoring Alternate Mac Address with MC bit set\n");
 		goto out;
 	}
@@ -982,7 +990,7 @@ out:
 }
 
 /**
- *  igb_get_speed_and_duplex_copper - Retreive current speed/duplex
+ *  igb_get_speed_and_duplex_copper - Retrieve current speed/duplex
  *  @hw: pointer to the HW structure
  *  @speed: stores the current speed
  *  @duplex: stores the current duplex

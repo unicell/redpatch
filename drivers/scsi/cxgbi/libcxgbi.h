@@ -712,10 +712,11 @@ int cxgbi_conn_xmit_pdu(struct iscsi_task *);
 
 void cxgbi_cleanup_task(struct iscsi_task *task);
 
+mode_t cxgbi_attr_is_visible(int param_type, int param);
 void cxgbi_get_conn_stats(struct iscsi_cls_conn *, struct iscsi_stats *);
 int cxgbi_set_conn_param(struct iscsi_cls_conn *,
 			enum iscsi_param, char *, int);
-int cxgbi_get_conn_param(struct iscsi_cls_conn *, enum iscsi_param, char *);
+int cxgbi_get_ep_param(struct iscsi_endpoint *ep, enum iscsi_param, char *);
 struct iscsi_cls_conn *cxgbi_create_conn(struct iscsi_cls_session *, u32);
 int cxgbi_bind_conn(struct iscsi_cls_session *,
 			struct iscsi_cls_conn *, u64, int);

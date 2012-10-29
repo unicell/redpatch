@@ -171,7 +171,7 @@ void sas_deform_port(struct asd_sas_phy *phy, int gone)
 
 	if (port->num_phys == 1) {
 		if (dev && gone)
-			sas_device_gone(dev);
+			dev->gone = 1;
 		sas_unregister_domain_devices(port);
 		sas_port_delete(port->port);
 		port->port = NULL;

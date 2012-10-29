@@ -47,7 +47,8 @@
 #define KVM_VM_CR0_ALWAYS_ON						\
 	(KVM_VM_CR0_ALWAYS_ON_UNRESTRICTED_GUEST | X86_CR0_PG | X86_CR0_PE)
 #define KVM_GUEST_CR4_MASK						\
-	(X86_CR4_VME | X86_CR4_PSE | X86_CR4_PAE | X86_CR4_PGE | X86_CR4_VMXE)
+	(X86_CR4_VME | X86_CR4_PSE | X86_CR4_PAE | X86_CR4_PGE | X86_CR4_VMXE \
+		| X86_CR4_OSXSAVE)
 #define KVM_PMODE_VM_CR4_ALWAYS_ON (X86_CR4_PAE | X86_CR4_VMXE)
 #define KVM_RMODE_VM_CR4_ALWAYS_ON (X86_CR4_VME | X86_CR4_PAE | X86_CR4_VMXE)
 
@@ -194,6 +195,7 @@ union kvm_mmu_page_role {
 		unsigned cr4_pge:1;
 		unsigned nxe:1;
 		unsigned cr0_wp:1;
+		unsigned smep_andnot_wp:1;
 	};
 };
 
@@ -320,7 +322,8 @@ struct kvm_vcpu_arch {
 		unsigned long mmu_seq;
 	} update_pte;
 
-	struct i387_fxsave_struct guest_fx_image;
+	struct fpu guest_fpu;
+	u64 xcr0;
 
 	gva_t mmio_fault_cr2;
 	struct kvm_pio_request pio;
@@ -596,8 +599,16 @@ enum emulation_result {
 #define EMULTYPE_NO_DECODE	    (1 << 0)
 #define EMULTYPE_TRAP_UD	    (1 << 1)
 #define EMULTYPE_SKIP		    (1 << 2)
-int emulate_instruction(struct kvm_vcpu *vcpu,
-			unsigned long cr2, u16 error_code, int emulation_type);
+int x86_emulate_instruction(struct kvm_vcpu *vcpu,
+			unsigned long cr2, int emulation_type,
+			void *insn, int insn_len);
+
+static inline int emulate_instruction(struct kvm_vcpu *vcpu,
+				      int emulation_type)
+{
+	return x86_emulate_instruction(vcpu, 0, emulation_type, NULL, 0);
+}
+
 void kvm_report_emulation_failure(struct kvm_vcpu *cvpu, const char *context);
 void realmode_lgdt(struct kvm_vcpu *vcpu, u16 size, unsigned long address);
 void realmode_lidt(struct kvm_vcpu *vcpu, u16 size, unsigned long address);
@@ -636,10 +647,11 @@ int kvm_task_switch(struct kvm_vcpu *vcpu, u16 tss_selector, int reason,
 int kvm_set_cr0(struct kvm_vcpu *vcpu, unsigned long cr0);
 int kvm_set_cr3(struct kvm_vcpu *vcpu, unsigned long cr3);
 int kvm_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4);
-void kvm_set_cr8(struct kvm_vcpu *vcpu, unsigned long cr8);
+int kvm_set_cr8(struct kvm_vcpu *vcpu, unsigned long cr8);
 unsigned long kvm_get_cr8(struct kvm_vcpu *vcpu);
 void kvm_lmsw(struct kvm_vcpu *vcpu, unsigned long msw);
 void kvm_get_cs_db_l_bits(struct kvm_vcpu *vcpu, int *db, int *l);
+int kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr);
 
 int kvm_get_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 *pdata);
 int kvm_set_msr_common(struct kvm_vcpu *vcpu, u32 msr, u64 data);
@@ -681,7 +693,8 @@ int kvm_emulate_hypercall(struct kvm_vcpu *vcpu);
 
 int kvm_fix_hypercall(struct kvm_vcpu *vcpu);
 
-int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gva_t gva, u32 error_code);
+int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gva_t gva, u32 error_code,
+		       void *insn, int insn_len);
 void kvm_mmu_invlpg(struct kvm_vcpu *vcpu, gva_t gva);
 
 void kvm_enable_tdp(void);
@@ -739,21 +752,6 @@ static inline unsigned long read_msr(unsigned long msr)
 }
 #endif
 
-static inline void kvm_fx_save(struct i387_fxsave_struct *image)
-{
-	asm("fxsave (%0)":: "r" (image));
-}
-
-static inline void kvm_fx_restore(struct i387_fxsave_struct *image)
-{
-	asm("fxrstor (%0)":: "r" (image));
-}
-
-static inline void kvm_fx_finit(void)
-{
-	asm("finit");
-}
-
 static inline u32 get_rdx_init_val(void)
 {
 	return 0x600; /* P6 family */
@@ -789,14 +787,18 @@ enum {
  * reboot turns off virtualization while processes are running.
  * Trap the fault and ignore the instruction if that happens.
  */
-asmlinkage void kvm_handle_fault_on_reboot(void);
+asmlinkage void kvm_spurious_fault(void);
+extern bool kvm_rebooting;
 
 #define __kvm_handle_fault_on_reboot(insn) \
 	"666: " insn "\n\t" \
+	"668: \n\t"                           \
 	".pushsection .fixup, \"ax\" \n" \
 	"667: \n\t" \
+	"cmpb $0, kvm_rebooting \n\t"	      \
+	"jne 668b \n\t"      		      \
 	__ASM_SIZE(push) " $666b \n\t"	      \
-	"jmp kvm_handle_fault_on_reboot \n\t" \
+	"call kvm_spurious_fault \n\t"	      \
 	".popsection \n\t" \
 	".pushsection __ex_table, \"a\" \n\t" \
 	_ASM_PTR " 666b, 667b \n\t" \

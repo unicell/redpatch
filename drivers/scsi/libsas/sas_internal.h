@@ -71,7 +71,6 @@ void sas_porte_hard_reset(struct work_struct *work);
 
 int sas_notify_lldd_dev_found(struct domain_device *);
 void sas_notify_lldd_dev_gone(struct domain_device *);
-void sas_device_gone(struct domain_device *dev);
 
 int sas_smp_phy_control(struct domain_device *dev, int phy_id,
 			enum phy_func phy_func, struct sas_phy_linkrates *);

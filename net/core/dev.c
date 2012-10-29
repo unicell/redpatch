@@ -1342,6 +1342,7 @@ int call_netdevice_notifiers(unsigned long val, struct net_device *dev)
 {
 	return raw_notifier_call_chain(&netdev_chain, val, dev);
 }
+EXPORT_SYMBOL(call_netdevice_notifiers);
 
 /* When > 0 there are consumers of rx skb time stamps */
 static atomic_t netstamp_needed = ATOMIC_INIT(0);
@@ -1471,14 +1472,15 @@ static void dev_queue_xmit_nit(struct sk_buff *skb, struct net_device *dev)
 void netif_setup_tc(struct net_device *dev, unsigned int txq)
 {
 	int i;
-	struct netdev_tc_txq *tc = &dev->tc_to_txq[0];
+	struct netdev_qos_info *qos = &netdev_extended(dev)->qos_data;
+	struct netdev_tc_txq *tc = &qos->tc_to_txq[0];
 
 	/* If TC0 is invalidated disable TC mapping */
 	if (tc->offset + tc->count > txq) {
 		pr_warning("Number of in use tx queues changed "
 			   "invalidating tc mappings. Priority "
 			   "traffic classification disabled!\n");
-		dev->num_tc = 0;
+		qos->num_tc = 0;
 		return;
 	}
 
@@ -1486,7 +1488,7 @@ void netif_setup_tc(struct net_device *dev, unsigned int txq)
 	for (i = 1; i < TC_BITMASK + 1; i++) {
 		int q = netdev_get_prio_tc_map(dev, i);
 
-		tc = &dev->tc_to_txq[q];
+		tc = &qos->tc_to_txq[q];
 		if (tc->offset + tc->count > txq) {
 			pr_warning("Number of in use tx queues "
 				   "changed. Priority %i to tc "
@@ -1504,18 +1506,25 @@ void netif_setup_tc(struct net_device *dev, unsigned int txq)
  */
 void netif_set_real_num_tx_queues(struct net_device *dev, unsigned int txq)
 {
-	unsigned int real_num = dev->real_num_tx_queues;
+	int rc;
 
-	if (unlikely(txq > dev->num_tx_queues))
+	if (txq < 1 || txq > dev->num_tx_queues)
 		return;
-	if (dev->num_tc)
-		netif_setup_tc(dev, txq);
-	if (txq > real_num)
-		dev->real_num_tx_queues = txq;
-	else if (txq < real_num) {
-		dev->real_num_tx_queues = txq;
-		qdisc_reset_all_tx_gt(dev, txq);
+
+	if (dev->reg_state == NETREG_REGISTERED ||
+	    dev->reg_state == NETREG_UNREGISTERING) {
+		ASSERT_RTNL();
+
+		rc = netdev_queue_update_kobjects(dev, dev->real_num_tx_queues,
+						  txq);
+		if (netdev_extended(dev)->qos_data.num_tc)
+			netif_setup_tc(dev, txq);
+
+		if (txq < dev->real_num_tx_queues)
+			qdisc_reset_all_tx_gt(dev, txq);
 	}
+
+	dev->real_num_tx_queues = txq;
 }
 EXPORT_SYMBOL(netif_set_real_num_tx_queues);
 
@@ -1816,6 +1825,7 @@ int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 {
 	const struct net_device_ops *ops = dev->netdev_ops;
 	int rc;
+	unsigned int skb_len;
 
 	if (likely(!skb->next)) {
 		if (!list_empty(&ptype_all))
@@ -1835,8 +1845,9 @@ int dev_hard_start_xmit(struct sk_buff *skb, struct net_device *dev,
 		if (dev->priv_flags & IFF_XMIT_DST_RELEASE)
 			skb_dst_drop(skb);
 
+		skb_len = skb->len;
 		rc = ops->ndo_start_xmit(skb, dev);
-		trace_net_dev_xmit(skb, rc);
+		trace_net_dev_xmit(skb, rc, dev, skb_len);
 		if (rc == NETDEV_TX_OK)
 			txq_trans_update(txq);
 		/*
@@ -1862,8 +1873,9 @@ gso:
 
 		skb->next = nskb->next;
 		nskb->next = NULL;
+		skb_len = nskb->len;
 		rc = ops->ndo_start_xmit(nskb, dev);
-		trace_net_dev_xmit(nskb, rc);
+		trace_net_dev_xmit(nskb, rc, dev, skb_len);
 		if (unlikely(rc != NETDEV_TX_OK)) {
 			nskb->next = skb->next;
 			skb->next = nskb;
@@ -1890,6 +1902,7 @@ static u32 hashrnd __read_mostly;
 u16 __skb_tx_hash(const struct net_device *dev, const struct sk_buff *skb,
 		  unsigned int num_tx_queues)
 {
+	struct netdev_qos_info *qos = &netdev_extended(dev)->qos_data;
 	u32 hash;
 	u16 qoffset = 0;
 	u16 qcount = num_tx_queues;
@@ -1901,10 +1914,10 @@ u16 __skb_tx_hash(const struct net_device *dev, const struct sk_buff *skb,
 		return hash;
 	}
 
-	if (dev->num_tc) {
+	if (qos->num_tc) {
 		u8 tc = netdev_get_prio_tc_map(dev, skb->priority);
-		qoffset = dev->tc_to_txq[tc].offset;
-		qcount = dev->tc_to_txq[tc].count;
+		qoffset = qos->tc_to_txq[tc].offset;
+		qcount = qos->tc_to_txq[tc].count;
 	}
 
 	if (skb->sk && skb->sk->sk_hash)
@@ -1928,16 +1941,86 @@ u16 skb_tx_hash(const struct net_device *dev, const struct sk_buff *skb)
 }
 EXPORT_SYMBOL(skb_tx_hash);
 
+static inline u16 dev_cap_txqueue(struct net_device *dev, u16 queue_index)
+{
+	if (unlikely(queue_index >= dev->real_num_tx_queues)) {
+		if (net_ratelimit()) {
+			WARN(1, "%s selects TX queue %d, but "
+			     "real number of TX queues is %d\n",
+			     dev->name, queue_index,
+			     dev->real_num_tx_queues);
+		}
+		return 0;
+	}
+	return queue_index;
+}
+
+static inline int get_xps_queue(struct net_device *dev, struct sk_buff *skb)
+{
+	struct xps_dev_maps *dev_maps;
+	struct xps_map *map;
+	int queue_index = -1;
+
+	rcu_read_lock();
+	dev_maps = rcu_dereference(netdev_extended(dev)->xps_maps);
+	if (dev_maps) {
+		map = rcu_dereference(
+		    dev_maps->cpu_map[raw_smp_processor_id()]);
+		if (map) {
+			if (map->len == 1)
+				queue_index = map->queues[0];
+			else {
+				u32 hash;
+				if (skb->sk && skb->sk->sk_hash)
+					hash = skb->sk->sk_hash;
+				else
+					hash = (__force u16) skb->protocol ^
+					    skb->rxhash;
+				hash = jhash_1word(hash, hashrnd);
+				queue_index = map->queues[
+				    ((u64)hash * map->len) >> 32];
+			}
+			if (unlikely(queue_index >= dev->real_num_tx_queues))
+				queue_index = -1;
+		}
+	}
+	rcu_read_unlock();
+
+	return queue_index;
+}
+
 static struct netdev_queue *dev_pick_tx(struct net_device *dev,
 					struct sk_buff *skb)
 {
+	int queue_index;
 	const struct net_device_ops *ops = dev->netdev_ops;
-	u16 queue_index = 0;
 
-	if (ops->ndo_select_queue)
+	if (dev->real_num_tx_queues == 1)
+		queue_index = 0;
+	else if (ops->ndo_select_queue) {
 		queue_index = ops->ndo_select_queue(dev, skb);
-	else if (dev->real_num_tx_queues > 1)
-		queue_index = skb_tx_hash(dev, skb);
+		queue_index = dev_cap_txqueue(dev, queue_index);
+	} else {
+		struct sock *sk = skb->sk;
+		queue_index = sk_tx_queue_get(sk);
+
+		if (queue_index < 0 || skb->ooo_okay ||
+		    queue_index >= dev->real_num_tx_queues) {
+			int old_index = queue_index;
+
+			queue_index = get_xps_queue(dev, skb);
+			if (queue_index < 0)
+				queue_index = skb_tx_hash(dev, skb);
+
+			if (queue_index != old_index && sk) {
+				struct dst_entry *dst =
+				    rcu_dereference(sk->sk_dst_cache);
+
+				if (dst && skb_dst(skb) == dst)
+					sk_tx_queue_set(sk, queue_index);
+			}
+		}
+	}
 
 	skb_set_queue_mapping(skb, queue_index);
 	return netdev_get_tx_queue(dev, queue_index);
@@ -2144,6 +2227,7 @@ static int get_rps_cpu(struct net_device *dev, struct sk_buff *skb,
 	struct rps_map *map;
 	struct rps_dev_flow_table *flow_table;
 	struct rps_sock_flow_table *sock_flow_table;
+	struct netdev_rps_info *rpinfo = &netdev_extended(dev)->rps_data;
 	int cpu = -1;
 	int tcpu;
 	u8 ip_proto;
@@ -2153,15 +2237,15 @@ static int get_rps_cpu(struct net_device *dev, struct sk_buff *skb,
 
 	if (skb_rx_queue_recorded(skb)) {
 		u16 index = skb_get_rx_queue(skb);
-		if (unlikely(index >= dev->num_rx_queues)) {
-			WARN_ONCE(dev->num_rx_queues > 1, "%s received packet "
+		if (unlikely(index >= rpinfo->num_rx_queues)) {
+			WARN_ONCE(rpinfo->num_rx_queues > 1, "%s received packet "
 				"on queue %u, but number of RX queues is %u\n",
-				dev->name, index, dev->num_rx_queues);
+				dev->name, index, rpinfo->num_rx_queues);
 			goto done;
 		}
-		rxqueue = dev->_rx + index;
+		rxqueue = rpinfo->_rx + index;
 	} else
-		rxqueue = dev->_rx;
+		rxqueue = rpinfo->_rx;
 
 	if (!rxqueue->rps_map && !rxqueue->rps_flow_table)
 		goto done;
@@ -2485,6 +2569,11 @@ static inline struct sk_buff *handle_bridge(struct sk_buff *skb,
 	    (port = rcu_dereference(skb->dev->br_port)) == NULL)
 		return skb;
 
+	/* RHEL only: skbs received on inactive slaves
+	 * due the vlan hwaccel path should not pass along */
+	if (skb->deliver_no_wcard)
+		return skb;
+
 	if (*pt_prev) {
 		*ret = deliver_skb(skb, *pt_prev, orig_dev);
 		*pt_prev = NULL;
@@ -2619,6 +2708,7 @@ int __netif_receive_skb(struct sk_buff *skb)
 	struct net_device *orig_dev;
 	struct net_device *null_or_orig;
 	struct net_device *null_or_bond;
+	struct net_device *exact_dev;
 	int ret = NET_RX_DROP;
 	__be16 type;
 
@@ -2709,12 +2799,14 @@ ncls:
 		null_or_bond = vlan_dev_real_dev(skb->dev);
 	}
 
+	/* either one will determine the exact match */
+	exact_dev = skb->deliver_no_wcard ? null_or_orig : null_or_bond;
 	type = skb->protocol;
 	list_for_each_entry_rcu(ptype,
 			&ptype_base[ntohs(type) & PTYPE_HASH_MASK], list) {
-		if (ptype->type == type && (ptype->dev == null_or_orig ||
-		     ptype->dev == skb->dev || ptype->dev == orig_dev ||
-		     ptype->dev == null_or_bond)) {
+		if (ptype->type == type && (ptype->dev == skb->dev ||
+		    ptype->dev == orig_dev || ptype->dev == exact_dev ||
+		    (!skb->deliver_no_wcard && ptype->dev == NULL))) {
 			if (pt_prev)
 				ret = deliver_skb(skb, pt_prev, orig_dev);
 			pt_prev = ptype;
@@ -3243,6 +3335,7 @@ EXPORT_SYMBOL(netif_napi_del);
  */
 static void net_rps_action(cpumask_t *mask)
 {
+#ifdef CONFIG_SMP
 	int cpu;
 
 	/* Send pending IPI's to kick RPS processing on remote cpus. */
@@ -3251,6 +3344,7 @@ static void net_rps_action(cpumask_t *mask)
 		if (cpu_online(cpu))
 			__smp_call_function_single(cpu, &queue->csd, 0);
 	}
+#endif
 	cpus_clear(*mask);
 }
 
@@ -5202,7 +5296,7 @@ EXPORT_SYMBOL(netdev_fix_features);
 
 static int netif_alloc_rx_queues(struct net_device *dev)
 {
-	unsigned int i, count = dev->num_rx_queues;
+	unsigned int i, count = netdev_extended(dev)->rps_data.num_rx_queues;
 	struct netdev_rx_queue *rx;
 
 	BUG_ON(count < 1);
@@ -5212,7 +5306,7 @@ static int netif_alloc_rx_queues(struct net_device *dev)
 		pr_err("netdev: Unable to allocate %u rx queues.\n", count);
 		return -ENOMEM;
 	}
-	dev->_rx = rx;
+	netdev_extended(dev)->rps_data._rx = rx;
 
 	for (i = 0; i < count; i++)
 		rx[i].dev = dev;
@@ -5258,12 +5352,12 @@ int register_netdevice(struct net_device *dev)
 
 	dev->iflink = -1;
 
-	if (!dev->num_rx_queues) {
+	if (!netdev_extended(dev)->rps_data.num_rx_queues) {
 		/*
 		 * Allocate a single RX queue if driver never called
 		 * alloc_netdev_mq
 		 */
-		dev->num_rx_queues = 1;
+		netdev_extended(dev)->rps_data.num_rx_queues = 1;
 		ret = netif_alloc_rx_queues(dev);
 		if (ret)
 			goto out;
@@ -5319,6 +5413,11 @@ int register_netdevice(struct net_device *dev)
 	/* Enable software GSO if SG is supported. */
 	if (dev->features & NETIF_F_SG)
 		dev->features |= NETIF_F_GSO;
+
+	/* Enable GRO for vlans by default if dev->features has GRO also.
+	 * vlan_dev_init() will do the dev->features check.
+	 */
+	dev->vlan_features |= NETIF_F_GRO;
 
 	netdev_initialize_kobject(dev);
 	ret = netdev_register_kobject(dev);
@@ -5625,19 +5724,93 @@ static void netdev_init_queues(struct net_device *dev)
 struct net_device *alloc_netdev_mq(int sizeof_priv, const char *name,
 		void (*setup)(struct net_device *), unsigned int queue_count)
 {
+	return alloc_netdev_mqs(sizeof_priv, name, setup, queue_count,
+				queue_count);
+}
+EXPORT_SYMBOL(alloc_netdev_mq);
+
+/**
+ *	alloc_netdev_mqs - allocate network device
+ *	@sizeof_priv:	size of private data to allocate space for
+ *	@name:		device name format string
+ *	@setup:		callback to initialize device
+ *	@txqs:		the number of TX subqueues to allocate
+ *	@rxqs:		the number of RX subqueues to allocate
+ *
+ *	Allocates a struct net_device with private data area for driver use
+ *	and performs basic initialization.  Also allocates subquue structs
+ *	for each queue on the device.
+ */
+struct net_device *alloc_netdev_mqs(int sizeof_priv, const char *name,
+		void (*setup)(struct net_device *),
+		unsigned int txqs, unsigned int rxqs)
+{
 	struct netdev_queue *tx;
+	struct netdev_tx_queue_extended *tx_ext;
 	struct net_device *dev;
+	struct net_device_extended_frozen *dev_ext_frozen;
 	size_t alloc_size;
-	struct net_device *p;
+	struct net_device_extended_frozen *p;
+	int i;
 
 	BUG_ON(strlen(name) >= sizeof(dev->name));
 
-	alloc_size = sizeof(struct net_device);
+	if (txqs < 1) {
+		pr_err("alloc_netdev: Unable to allocate device "
+		       "with zero tx queues.\n");
+		return NULL;
+	}
+
+	if (rxqs < 1) {
+		pr_err("alloc_netdev: Unable to allocate device "
+		       "with zero rx queues.\n");
+		return NULL;
+	}
+
+	/*
+	 * allocate memory for extended frozen structure in front of
+	 * net_device structure
+	 */
+	alloc_size = NET_DEVICE_EXTENDED_FROZEN_SIZE;
+	alloc_size += NET_DEVICE_SIZE;
+
 	if (sizeof_priv) {
-		/* ensure 32-byte alignment of private area */
-		alloc_size = ALIGN(alloc_size, NETDEV_ALIGN);
+		/*
+		 * HACK
+		 *
+ 		 * Workaround ABI breakage in 6.1.  RHEL6.1 added the fields
+		 * below to struct net_device. This broke ABI because
+		 * netdev_priv() pointing to the private driver buffer is
+		 * declared inline and uses sizeof(struct net_device) thus
+		 * hardcoding the offset in each driver.
+		 *
+		 * In order to fix ABI breakage the fields have been removed
+		 * again in 6.2. This of course would break all drivers
+		 * compiled against 6.1. Therefore the private data buffer
+		 * space is extended by the size of these fields to avoid a
+		 * buffer overrun for drivers compiled against 6.1
+ 		 */
+		struct {
+			struct kset             *queues_kset;
+			struct netdev_rx_queue  *_rx;
+			unsigned int            num_rx_queues;
+			u8 num_tc;
+			struct netdev_tc_txq tc_to_txq[TC_MAX_QUEUE];
+			u8 prio_tc_map[TC_BITMASK + 1];
+		} padding;
+
+		/*
+		 * Account for the 4 bytes alignment gap which existed between
+		 * the last net_device field and the fields temporarily added.
+		 */
+		sizeof_priv += 4 + sizeof(padding);
+
+		sizeof_priv = ALIGN(sizeof_priv, NETDEV_ALIGN);
 		alloc_size += sizeof_priv;
 	}
+	/* allocate memory for extended strcucture after priv */
+	alloc_size += NET_DEVICE_EXTENDED_SIZE;
+
 	/* ensure 32-byte alignment of whole construct */
 	alloc_size += NETDEV_ALIGN - 1;
 
@@ -5647,22 +5820,34 @@ struct net_device *alloc_netdev_mq(int sizeof_priv, const char *name,
 		return NULL;
 	}
 
-	tx = kcalloc(queue_count, sizeof(struct netdev_queue), GFP_KERNEL);
+	tx = kcalloc(txqs, sizeof(struct netdev_queue), GFP_KERNEL);
 	if (!tx) {
 		printk(KERN_ERR "alloc_netdev: Unable to allocate "
 		       "tx qdiscs.\n");
 		goto free_p;
 	}
 
-	dev = PTR_ALIGN(p, NETDEV_ALIGN);
-	dev->padded = (char *)dev - (char *)p;
+	tx_ext = kcalloc(txqs, sizeof(struct netdev_tx_queue_extended),
+			 GFP_KERNEL);
+	if (!tx_ext) {
+		printk(KERN_ERR "alloc_netdev: Unable to allocate "
+		       "extensions for tx qdiscs.\n");
+		goto free_tx;
+	}
+	for (i = 0; i < txqs; i++)
+		tx_ext[i].q = &tx[i];
 
+	dev_ext_frozen = PTR_ALIGN(p, NETDEV_ALIGN);
+	dev = netdev_extended_frozen_get_dev(dev_ext_frozen);
+	dev->padded = (char *)dev_ext_frozen - (char *)p;
+	dev_ext_frozen->dev_ext = (struct net_device_extended *)
+				  ((char *) dev + NET_DEVICE_SIZE + sizeof_priv);
 
-	dev->num_rx_queues = queue_count;
+	netdev_extended(dev)->rps_data.num_rx_queues = rxqs;
 	if (netif_alloc_rx_queues(dev)) {
 		printk(KERN_ERR "alloc_netdev: Unable to allocate "
 		       "rx queues.\n");
-		goto free_tx;
+		goto free_tx_ext;
 	}
 
 	if (dev_addr_init(dev))
@@ -5673,8 +5858,9 @@ struct net_device *alloc_netdev_mq(int sizeof_priv, const char *name,
 	dev_net_set(dev, &init_net);
 
 	dev->_tx = tx;
-	dev->num_tx_queues = queue_count;
-	dev->real_num_tx_queues = queue_count;
+	netdev_extended(dev)->_tx_ext = tx_ext;
+	dev->num_tx_queues = txqs;
+	dev->real_num_tx_queues = txqs;
 
 
 	dev->gso_max_size = GSO_MAX_SIZE;
@@ -5688,14 +5874,16 @@ struct net_device *alloc_netdev_mq(int sizeof_priv, const char *name,
 	return dev;
 
 free_rx:
-	kfree(dev->_rx);
+	kfree(netdev_extended(dev)->rps_data._rx);
+free_tx_ext:
+	kfree(tx_ext);
 free_tx:
 	kfree(tx);
 free_p:
 	kfree(p);
 	return NULL;
 }
-EXPORT_SYMBOL(alloc_netdev_mq);
+EXPORT_SYMBOL(alloc_netdev_mqs);
 
 /**
  *	free_netdev - free network device
@@ -5711,8 +5899,9 @@ void free_netdev(struct net_device *dev)
 
 	release_net(dev_net(dev));
 
+	kfree(netdev_extended(dev)->_tx_ext);
 	kfree(dev->_tx);
-	kfree(dev->_rx);
+	kfree(netdev_extended(dev)->rps_data._rx);
 
 	/* Flush device addresses */
 	dev_addr_flush(dev);
@@ -5722,7 +5911,10 @@ void free_netdev(struct net_device *dev)
 
 	/*  Compatibility with error handling in drivers */
 	if (dev->reg_state == NETREG_UNINITIALIZED) {
-		kfree((char *)dev - dev->padded);
+		struct net_device_extended_frozen *dev_ext_frozen;
+
+		dev_ext_frozen = netdev_extended_frozen(dev);
+		kfree((char *)dev_ext_frozen - dev->padded);
 		return;
 	}
 

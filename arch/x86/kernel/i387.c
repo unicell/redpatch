@@ -39,6 +39,7 @@
 
 static unsigned int		mxcsr_feature_mask __read_mostly = 0xffffffffu;
 unsigned int xstate_size;
+EXPORT_SYMBOL_GPL(xstate_size);
 unsigned int sig_xstate_ia32_size = sizeof(struct _fpstate_ia32);
 static struct i387_fxsave_struct fx_scratch __cpuinitdata;
 
@@ -106,7 +107,7 @@ void __cpuinit fpu_init(void)
 }
 #endif	/* CONFIG_X86_64 */
 
-static void fpu_finit(struct fpu *fpu)
+void fpu_finit(struct fpu *fpu)
 {
 #ifdef CONFIG_X86_32
 	if (!HAVE_HWFP) {
@@ -131,6 +132,7 @@ static void fpu_finit(struct fpu *fpu)
 		fp->fos = 0xffff0000u;
 	}
 }
+EXPORT_SYMBOL_GPL(fpu_finit);
 
 /*
  * The _current_ task is using the FPU for the first time

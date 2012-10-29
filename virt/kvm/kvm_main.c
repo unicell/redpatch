@@ -93,7 +93,8 @@ static void hardware_disable_all(void);
 
 static void kvm_io_bus_destroy(struct kvm_io_bus *bus);
 
-static bool kvm_rebooting;
+bool kvm_rebooting;
+EXPORT_SYMBOL_GPL(kvm_rebooting);
 
 static bool largepages_enabled = true;
 
@@ -652,6 +653,10 @@ static int kvm_vm_ioctl_assign_device(struct kvm *kvm,
 		r = kvm_assign_device(kvm, match);
 		if (r)
 			goto out_list_del;
+	} else {
+		/* Disable the ability to assign a device without an iommu */
+		r = -EINVAL;
+		goto out_list_del;
 	}
 
 out:
@@ -691,8 +696,7 @@ static int kvm_vm_ioctl_deassign_device(struct kvm *kvm,
 		goto out;
 	}
 
-	if (match->flags & KVM_DEV_ASSIGN_ENABLE_IOMMU)
-		kvm_deassign_device(kvm, match);
+	kvm_deassign_device(kvm, match);
 
 	kvm_free_assigned_device(kvm, match);
 
@@ -738,6 +742,14 @@ void vcpu_load(struct kvm_vcpu *vcpu)
 	int cpu;
 
 	mutex_lock(&vcpu->mutex);
+	if (unlikely(vcpu->pid != current->pids[PIDTYPE_PID].pid)) {
+		/* The thread running this VCPU changed. */
+		struct pid *oldpid = vcpu->pid;
+		struct pid *newpid = get_task_pid(current, PIDTYPE_PID);
+		rcu_assign_pointer(vcpu->pid, newpid);
+		synchronize_rcu();
+		put_pid(oldpid);
+	}
 	cpu = get_cpu();
 	preempt_notifier_register(&vcpu->preempt_notifier);
 	kvm_arch_vcpu_load(vcpu, cpu);
@@ -806,6 +818,7 @@ int kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 	vcpu->cpu = -1;
 	vcpu->kvm = kvm;
 	vcpu->vcpu_id = id;
+	vcpu->pid = NULL;
 	init_waitqueue_head(&vcpu->wq);
 
 	page = alloc_page(GFP_KERNEL | __GFP_ZERO);
@@ -829,6 +842,7 @@ EXPORT_SYMBOL_GPL(kvm_vcpu_init);
 
 void kvm_vcpu_uninit(struct kvm_vcpu *vcpu)
 {
+	put_pid(vcpu->pid);
 	kvm_arch_vcpu_uninit(vcpu);
 	free_page((unsigned long)vcpu->run);
 }
@@ -1571,6 +1585,15 @@ unsigned long gfn_to_hva(struct kvm *kvm, gfn_t gfn)
 }
 EXPORT_SYMBOL_GPL(gfn_to_hva);
 
+static inline int check_user_page_hwpoison(unsigned long addr)
+{
+	int rc, flags = FOLL_TOUCH | FOLL_HWPOISON | FOLL_WRITE;
+
+	rc = __get_user_pages(current, current->mm, addr, 1,
+			      flags, NULL, NULL);
+	return rc == -EHWPOISON;
+}
+
 pfn_t hva_to_pfn(struct kvm *kvm, unsigned long addr)
 {
 	struct page *page[1];
@@ -1585,7 +1608,7 @@ pfn_t hva_to_pfn(struct kvm *kvm, unsigned long addr)
 		struct vm_area_struct *vma;
 
 		down_read(&current->mm->mmap_sem);
-		if (is_hwpoison_address(addr)) {
+		if (check_user_page_hwpoison(addr)) {
 			up_read(&current->mm->mmap_sem);
 			get_page(hwpoison_page);
 			return page_to_pfn(hwpoison_page);
@@ -1883,6 +1906,58 @@ void kvm_resched(struct kvm_vcpu *vcpu)
 	cond_resched();
 }
 EXPORT_SYMBOL_GPL(kvm_resched);
+
+void kvm_vcpu_on_spin(struct kvm_vcpu *me)
+{
+	struct kvm *kvm = me->kvm;
+	struct kvm_vcpu *vcpu;
+	int last_boosted_vcpu = me->kvm->last_boosted_vcpu;
+	int yielded = 0;
+	int pass;
+	int i;
+
+	/*
+	 * We boost the priority of a VCPU that is runnable but not
+	 * currently running, because it got preempted by something
+	 * else and called schedule in __vcpu_run.  Hopefully that
+	 * VCPU is holding the lock that we need and will release it.
+	 * We approximate round-robin by starting at the last boosted VCPU.
+	 */
+	for (pass = 0; pass < 2 && !yielded; pass++) {
+		kvm_for_each_vcpu(i, vcpu, kvm) {
+			struct task_struct *task = NULL;
+			struct pid *pid;
+			if (!pass && i < last_boosted_vcpu) {
+				i = last_boosted_vcpu;
+				continue;
+			} else if (pass && i > last_boosted_vcpu)
+				break;
+			if (vcpu == me)
+				continue;
+			if (waitqueue_active(&vcpu->wq))
+				continue;
+			rcu_read_lock();
+			pid = rcu_dereference(vcpu->pid);
+			if (pid)
+				task = get_pid_task(vcpu->pid, PIDTYPE_PID);
+			rcu_read_unlock();
+			if (!task)
+				continue;
+			if (task->flags & PF_VCPU) {
+				put_task_struct(task);
+				continue;
+			}
+			if (yield_to(task, 1)) {
+				put_task_struct(task);
+				kvm->last_boosted_vcpu = i;
+				yielded = 1;
+				break;
+			}
+			put_task_struct(task);
+		}
+	}
+}
+EXPORT_SYMBOL_GPL(kvm_vcpu_on_spin);
 
 static int kvm_vcpu_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
@@ -2719,18 +2794,12 @@ static int kvm_cpu_hotplug(struct notifier_block *notifier, unsigned long val,
 }
 
 
-asmlinkage void kvm_handle_fault_on_reboot(void)
+asmlinkage void kvm_spurious_fault(void)
 {
-	if (kvm_rebooting) {
-		/* spin while reset goes on */
-		local_irq_enable();
-		while (true)
-			;
-	}
 	/* Fault while not rebooting.  We want the trace. */
 	BUG();
 }
-EXPORT_SYMBOL_GPL(kvm_handle_fault_on_reboot);
+EXPORT_SYMBOL_GPL(kvm_spurious_fault);
 
 static int kvm_reboot(struct notifier_block *notifier, unsigned long val,
 		      void *v)

@@ -32,19 +32,11 @@
 
 #include "isci.h"
 #include "task.h"
-#include "sci_controller_constants.h"
-#include "scic_remote_device.h"
-#include "sci_environment.h"
 #include "probe_roms.h"
 
-struct efi_variable {
-	efi_char16_t  VariableName[1024/sizeof(efi_char16_t)];
-	efi_guid_t    VendorGuid;
-	unsigned long DataSize;
-	__u8          Data[1024];
-	efi_status_t  Status;
-	__u32         Attributes;
-} __attribute__((packed));
+static efi_char16_t isci_efivar_name[] = {
+	'R', 's', 't', 'S', 'c', 'u', 'O'
+};
 
 struct isci_orom *isci_request_oprom(struct pci_dev *pdev)
 {
@@ -120,31 +112,22 @@ struct isci_orom *isci_request_oprom(struct pci_dev *pdev)
 	return rom;
 }
 
-/**
- * isci_parse_oem_parameters() - This method will take OEM parameters
- *    from the module init parameters and copy them to oem_params. This will
- *    only copy values that are not set to the module parameter default values
- * @oem_parameters: This parameter specifies the controller default OEM
- *    parameters. It is expected that this has been initialized to the default
- *    parameters for the controller
- *
- *
- */
-enum sci_status isci_parse_oem_parameters(union scic_oem_parameters *oem_params,
+enum sci_status isci_parse_oem_parameters(struct sci_oem_params *oem,
 					  struct isci_orom *orom, int scu_index)
 {
 	/* check for valid inputs */
-	if (scu_index < 0 || scu_index > SCI_MAX_CONTROLLERS ||
-	    scu_index > orom->hdr.num_elements || !oem_params)
+	if (scu_index < 0 || scu_index >= SCI_MAX_CONTROLLERS ||
+	    scu_index > orom->hdr.num_elements || !oem)
 		return -EINVAL;
 
-	oem_params->sds1 = orom->ctrl[scu_index];
+	*oem = orom->ctrl[scu_index];
 	return 0;
 }
 
 struct isci_orom *isci_request_firmware(struct pci_dev *pdev, const struct firmware *fw)
 {
 	struct isci_orom *orom = NULL, *data;
+	int i, j;
 
 	if (request_firmware(&fw, ISCI_FW_NAME, &pdev->dev) != 0)
 		return NULL;
@@ -164,58 +147,72 @@ struct isci_orom *isci_request_firmware(struct pci_dev *pdev, const struct firmw
 
 	memcpy(orom, fw->data, fw->size);
 
+	if (is_c0(pdev))
+		goto out;
+
+	/*
+	 * deprecated: override default amp_control for pre-preproduction
+	 * silicon revisions
+	 */
+	for (i = 0; i < ARRAY_SIZE(orom->ctrl); i++)
+		for (j = 0; j < ARRAY_SIZE(orom->ctrl[i].phys); j++) {
+			orom->ctrl[i].phys[j].afe_tx_amp_control0 = 0xe7c03;
+			orom->ctrl[i].phys[j].afe_tx_amp_control1 = 0xe7c03;
+			orom->ctrl[i].phys[j].afe_tx_amp_control2 = 0xe7c03;
+			orom->ctrl[i].phys[j].afe_tx_amp_control3 = 0xe7c03;
+		}
  out:
 	release_firmware(fw);
 
 	return orom;
 }
 
+static struct efi *get_efi(void)
+{
+#ifdef CONFIG_EFI
+	return &efi;
+#else
+	return NULL;
+#endif
+}
+
 struct isci_orom *isci_get_efi_var(struct pci_dev *pdev)
 {
-	struct efi_variable *evar;
 	efi_status_t status;
-	struct isci_orom *rom = NULL;
+	struct isci_orom *rom;
 	struct isci_oem_hdr *oem_hdr;
 	u8 *tmp, sum;
 	int j;
-	size_t copy_len;
+	unsigned long data_len;
+	u8 *efi_data;
+	u32 efi_attrib = 0;
 
-	evar = devm_kzalloc(&pdev->dev,
-			    sizeof(struct efi_variable),
-			    GFP_KERNEL);
-	if (!evar) {
+	data_len = 1024;
+	efi_data = devm_kzalloc(&pdev->dev, data_len, GFP_KERNEL);
+	if (!efi_data) {
 		dev_warn(&pdev->dev,
-			 "Unable to allocate memory for EFI var\n");
+			 "Unable to allocate memory for EFI data\n");
 		return NULL;
 	}
 
-	rom = devm_kzalloc(&pdev->dev, sizeof(*rom), GFP_KERNEL);
-	if (!rom) {
-		dev_warn(&pdev->dev,
-			 "Unable to allocate memory for orom\n");
-		return NULL;
-	}
+	rom = (struct isci_orom *)(efi_data + sizeof(struct isci_oem_hdr));
 
-	for (j = 0; j < strlen(ISCI_EFI_VAR_NAME) + 1; j++)
-		evar->VariableName[j] = ISCI_EFI_VAR_NAME[j];
-
-	evar->DataSize = 1024;
-	evar->VendorGuid = ISCI_EFI_VENDOR_GUID;
-	evar->Attributes = ISCI_EFI_ATTRIBUTES;
-
-	status =  efi.get_variable(evar->VariableName,
-				   &evar->VendorGuid,
-				   &evar->Attributes,
-				   &evar->DataSize,
-				   evar->Data);
+	if (get_efi())
+		status = get_efi()->get_variable(isci_efivar_name,
+						 &ISCI_EFI_VENDOR_GUID,
+						 &efi_attrib,
+						 &data_len,
+						 efi_data);
+	else
+		status = EFI_NOT_FOUND;
 
 	if (status != EFI_SUCCESS) {
 		dev_warn(&pdev->dev,
-			 "Unable to obtain EFI variable for OEM parms\n");
+			 "Unable to obtain EFI var data for OEM parms\n");
 		return NULL;
 	}
 
-	oem_hdr = (struct isci_oem_hdr *)evar->Data;
+	oem_hdr = (struct isci_oem_hdr *)efi_data;
 
 	if (memcmp(oem_hdr->sig, ISCI_OEM_SIG, ISCI_OEM_SIG_SIZE) != 0) {
 		dev_warn(&pdev->dev,
@@ -224,12 +221,8 @@ struct isci_orom *isci_get_efi_var(struct pci_dev *pdev)
 	}
 
 	/* calculate checksum */
-	tmp = (u8 *)oem_hdr;
-	for (j = 0, sum = 0; j < sizeof(oem_hdr); j++, tmp++)
-		sum += *tmp;
-
-	tmp = (u8 *)rom;
-	for (j = 0; j < sizeof(*rom); j++, tmp++)
+	tmp = (u8 *)efi_data;
+	for (j = 0, sum = 0; j < (sizeof(*oem_hdr) + sizeof(*rom)); j++, tmp++)
 		sum += *tmp;
 
 	if (sum != 0) {
@@ -237,12 +230,6 @@ struct isci_orom *isci_get_efi_var(struct pci_dev *pdev)
 			 "OEM table checksum failed\n");
 		return NULL;
 	}
-
-	copy_len = min_t(u16, evar->DataSize,
-		       min(oem_hdr->len - sizeof(*oem_hdr),
-			   sizeof(*rom)));
-
-	memcpy(rom, (char *)evar->Data + sizeof(*oem_hdr), copy_len);
 
 	if (memcmp(rom->hdr.signature,
 		   ISCI_ROM_SIG,

@@ -106,7 +106,7 @@ static int smp_execute_task(struct domain_device *dev, void *req, int req_size,
 			}
 		}
 		if (task->task_status.resp == SAS_TASK_COMPLETE &&
-		    task->task_status.stat == SAM_GOOD) {
+		    task->task_status.stat == SAM_STAT_GOOD) {
 			res = 0;
 			break;
 		} if (task->task_status.resp == SAS_TASK_COMPLETE &&
@@ -243,6 +243,11 @@ static int sas_ex_phy_discover_helper(struct domain_device *dev, u8 *disc_req,
 		 * dev to host FIS as described in section G.5 of
 		 * sas-2 r 04b */
 		dr = &((struct smp_resp *)disc_resp)->disc;
+		if (memcmp(dev->sas_addr, dr->attached_sas_addr,
+			  SAS_ADDR_SIZE) == 0) {
+			sas_printk("Found loopback topology, just ignore it!\n");
+			return 0;
+		}
 		if (!(dr->attached_dev_type == 0 &&
 		      dr->attached_sata_dev))
 			break;
@@ -323,6 +328,7 @@ static void ex_assign_report_general(struct domain_device *dev,
 	dev->ex_dev.ex_change_count = be16_to_cpu(rg->change_count);
 	dev->ex_dev.max_route_indexes = be16_to_cpu(rg->route_indexes);
 	dev->ex_dev.num_phys = min(rg->num_phys, (u8)MAX_EXPANDER_PHYS);
+	dev->ex_dev.t2t_supp = rg->t2t_supp;
 	dev->ex_dev.conf_route_table = rg->conf_route_table;
 	dev->ex_dev.configuring = rg->configuring;
 	memcpy(dev->ex_dev.enclosure_logical_id, rg->enclosure_logical_id, 8);
@@ -1124,15 +1130,17 @@ static void sas_print_parent_topology_bug(struct domain_device *child,
 	};
 	struct domain_device *parent = child->parent;
 
-	sas_printk("%s ex %016llx phy 0x%x <--> %s ex %016llx phy 0x%x "
-		   "has %c:%c routing link!\n",
+	sas_printk("%s ex %016llx (T2T supp:%d) phy 0x%x <--> %s ex %016llx "
+		   "(T2T supp:%d) phy 0x%x has %c:%c routing link!\n",
 
 		   ex_type[parent->dev_type],
 		   SAS_ADDR(parent->sas_addr),
+		   parent->ex_dev.t2t_supp,
 		   parent_phy->phy_id,
 
 		   ex_type[child->dev_type],
 		   SAS_ADDR(child->sas_addr),
+		   child->ex_dev.t2t_supp,
 		   child_phy->phy_id,
 
 		   ra_char[parent_phy->routing_attr],
@@ -1229,10 +1237,15 @@ static int sas_check_parent_topology(struct domain_device *child)
 					sas_print_parent_topology_bug(child, parent_phy, child_phy);
 					res = -ENODEV;
 				}
-			} else if (parent_phy->routing_attr == TABLE_ROUTING &&
-				   child_phy->routing_attr != SUBTRACTIVE_ROUTING) {
-				sas_print_parent_topology_bug(child, parent_phy, child_phy);
-				res = -ENODEV;
+			} else if (parent_phy->routing_attr == TABLE_ROUTING) {
+				if (child_phy->routing_attr == SUBTRACTIVE_ROUTING ||
+				    (child_phy->routing_attr == TABLE_ROUTING &&
+				     child_ex->t2t_supp && parent_ex->t2t_supp)) {
+					/* All good */;
+				} else {
+					sas_print_parent_topology_bug(child, parent_phy, child_phy);
+					res = -ENODEV;
+				}
 			}
 			break;
 		case FANOUT_DEV:
@@ -1720,27 +1733,13 @@ out:
 	return res;
 }
 
-/* FIXME: delete this routine when/if sas_ata stops submitting tasks
- * with host_lock held
- */
-void sas_device_gone(struct domain_device *dev)
-{
-	struct sas_rphy *rphy = dev->rphy;
-	struct Scsi_Host *shost = dev_to_shost(rphy->dev.parent);
-
-	/* take the lock to synchronize against incoming sata i/o */
-	spin_lock_irq(shost->host_lock);
-	dev->gone = 1;
-	spin_unlock_irq(shost->host_lock);
-}
-
 static void sas_unregister_ex_tree(struct domain_device *dev)
 {
 	struct expander_device *ex = &dev->ex_dev;
 	struct domain_device *child, *n;
 
 	list_for_each_entry_safe(child, n, &ex->children, siblings) {
-		sas_device_gone(child);
+		child->gone = 1;
 		if (child->dev_type == EDGE_DEV ||
 		    child->dev_type == FANOUT_DEV)
 			sas_unregister_ex_tree(child);
@@ -1761,7 +1760,7 @@ static void sas_unregister_devs_sas_addr(struct domain_device *parent,
 			&ex_dev->children, siblings) {
 			if (SAS_ADDR(child->sas_addr) ==
 			    SAS_ADDR(phy->attached_sas_addr)) {
-				sas_device_gone(child);
+				child->gone = 1;
 				if (child->dev_type == EDGE_DEV ||
 				    child->dev_type == FANOUT_DEV)
 					sas_unregister_ex_tree(child);
@@ -1770,7 +1769,7 @@ static void sas_unregister_devs_sas_addr(struct domain_device *parent,
 				break;
 			}
 		}
-		sas_device_gone(parent);
+		parent->gone = 1;
 		sas_disable_routing(parent, phy->attached_sas_addr);
 	}
 	memset(phy->attached_sas_addr, 0, SAS_ADDR_SIZE);

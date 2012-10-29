@@ -231,6 +231,7 @@ struct dasd_ccw_req {
 /* per dasd_ccw_req flags */
 #define DASD_CQR_FLAGS_USE_ERP   0	/* use ERP for this request */
 #define DASD_CQR_FLAGS_FAILFAST  1	/* FAILFAST */
+#define DASD_CQR_VERIFY_PATH     2      /* path verification request */
 #define DASD_CQR_ALLOW_SLOCK     3      /* Try this request even when lock was
 					 * stolen. Should not be combined with
 					 * DASD_CQR_FLAGS_USE_ERP
@@ -289,6 +290,14 @@ struct dasd_discipline {
 	 * before the analysis may be repeated.
 	 */
 	int (*do_analysis) (struct dasd_block *);
+
+	/*
+	 * This function is called, when new paths become available.
+	 * Disciplins may use this callback to do necessary setup work,
+	 * e.g. verify that new path is compatible with the current
+	 * configuration.
+	 */
+	int (*verify_path)(struct dasd_device *, __u8);
 
 	/*
 	 * Last things to do when a device is set online, and first things
@@ -366,6 +375,13 @@ extern struct dasd_discipline *dasd_diag_discipline_pointer;
 #define DASD_EER_STATECHANGE 3
 #define DASD_EER_PPRCSUSPEND 4
 
+struct dasd_path {
+	__u8 opm;
+	__u8 tbvpm;
+	__u8 ppm;
+	__u8 npm;
+};
+
 struct dasd_device {
 	/* Block device stuff. */
 	struct dasd_block *block;
@@ -381,6 +397,7 @@ struct dasd_device {
 	struct dasd_discipline *discipline;
 	struct dasd_discipline *base_discipline;
 	char *private;
+	struct dasd_path path_data;
 
 	/* Device state and target state. */
 	int state, target;
@@ -456,6 +473,10 @@ struct dasd_block {
 #define DASD_FLAG_OFFLINE	3	/* device is in offline processing */
 #define DASD_FLAG_EER_SNSS	4	/* A SNSS is required */
 #define DASD_FLAG_EER_IN_USE	5	/* A SNSS request is running */
+#define DASD_FLAG_DEVICE_RO	6	/* The device itself is read-only. Don't
+					 * confuse this with the user specified
+					 * read-only feature.
+					 */
 #define DASD_FLAG_IS_RESERVED	7	/* The device is reserved */
 #define DASD_FLAG_LOCK_STOLEN	8	/* The device lock was stolen */
 
@@ -584,6 +605,7 @@ struct dasd_ccw_req *
 dasd_smalloc_request(int , int, int, struct dasd_device *);
 void dasd_kfree_request(struct dasd_ccw_req *, struct dasd_device *);
 void dasd_sfree_request(struct dasd_ccw_req *, struct dasd_device *);
+void dasd_wakeup_cb(struct dasd_ccw_req *, void *);
 
 static inline int
 dasd_kmalloc_set_cda(struct ccw1 *ccw, void *cda, struct dasd_device *device)
@@ -623,16 +645,24 @@ void dasd_generic_remove (struct ccw_device *cdev);
 int dasd_generic_set_online(struct ccw_device *, struct dasd_discipline *);
 int dasd_generic_set_offline (struct ccw_device *cdev);
 int dasd_generic_notify(struct ccw_device *, int);
+int dasd_generic_last_path_gone(struct dasd_device *);
+int dasd_generic_path_operational(struct dasd_device *);
+
 void dasd_generic_handle_state_change(struct dasd_device *);
 int dasd_generic_pm_freeze(struct ccw_device *);
 int dasd_generic_restore_device(struct ccw_device *);
 enum uc_todo dasd_generic_uc_handler(struct ccw_device *, struct irb *);
+void dasd_generic_path_event(struct ccw_device *, int *);
+int dasd_generic_verify_path(struct dasd_device *, __u8);
 
 int dasd_generic_read_dev_chars(struct dasd_device *, int, void *, int);
 char *dasd_get_sense(struct irb *);
 
 void dasd_device_set_stop_bits(struct dasd_device *, int);
 void dasd_device_remove_stop_bits(struct dasd_device *, int);
+
+int dasd_device_is_ro(struct dasd_device *);
+
 
 /* externals in dasd_devmap.c */
 extern int dasd_max_devindex;
@@ -656,6 +686,9 @@ void dasd_remove_sysfs_files(struct ccw_device *);
 struct dasd_device *dasd_device_from_cdev(struct ccw_device *);
 struct dasd_device *dasd_device_from_cdev_locked(struct ccw_device *);
 struct dasd_device *dasd_device_from_devindex(int);
+
+void dasd_add_link_to_gendisk(struct gendisk *, struct dasd_device *);
+struct dasd_device *dasd_device_from_gendisk(struct gendisk *);
 
 int dasd_parse(void);
 int dasd_busid_known(const char *);

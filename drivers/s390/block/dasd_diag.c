@@ -146,12 +146,10 @@ dasd_diag_erp(struct dasd_device *device)
 	mdsk_term_io(device);
 	rc = mdsk_init_io(device, device->block->bp_block, 0, NULL);
 	if (rc == 4) {
-		if (!(device->features & DASD_FEATURE_READONLY)) {
+		if (!(test_and_set_bit(DASD_FLAG_DEVICE_RO, &device->flags)))
 			dev_warn(&device->cdev->dev,
 				 "The access mode of a DIAG device changed"
 				 " to read-only");
-			device->features |= DASD_FEATURE_READONLY;
-		}
 		rc = 0;
 	}
 	if (rc)
@@ -450,7 +448,7 @@ dasd_diag_check_device(struct dasd_device *device)
 		rc = -EIO;
 	} else {
 		if (rc == 4)
-			device->features |= DASD_FEATURE_READONLY;
+			set_bit(DASD_FLAG_DEVICE_RO, &device->flags);
 		dev_info(&device->cdev->dev,
 			 "New DASD with %ld byte/block, total size %ld KB%s\n",
 			 (unsigned long) block->bp_block,
@@ -621,6 +619,7 @@ static struct dasd_discipline dasd_diag_discipline = {
 	.ebcname = "DIAG",
 	.max_blocks = DIAG_MAX_BLOCKS,
 	.check_device = dasd_diag_check_device,
+	.verify_path = dasd_generic_verify_path,
 	.fill_geometry = dasd_diag_fill_geometry,
 	.start_IO = dasd_start_diag,
 	.term_IO = dasd_diag_term_IO,

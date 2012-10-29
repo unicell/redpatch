@@ -416,7 +416,6 @@ static void mlx4_en_auto_moderation(struct mlx4_en_priv *priv)
 	unsigned long avg_pkt_size;
 	unsigned long rx_packets;
 	unsigned long rx_bytes;
-	unsigned long rx_byte_diff;
 	unsigned long tx_packets;
 	unsigned long tx_pkt_diff;
 	unsigned long rx_pkt_diff;
@@ -440,25 +439,20 @@ static void mlx4_en_auto_moderation(struct mlx4_en_priv *priv)
 	rx_pkt_diff = ((unsigned long) (rx_packets -
 					priv->last_moder_packets));
 	packets = max(tx_pkt_diff, rx_pkt_diff);
-	rx_byte_diff = rx_bytes - priv->last_moder_bytes;
-	rx_byte_diff = rx_byte_diff ? rx_byte_diff : 1;
 	rate = packets * HZ / period;
 	avg_pkt_size = packets ? ((unsigned long) (rx_bytes -
 				 priv->last_moder_bytes)) / packets : 0;
 
 	/* Apply auto-moderation only when packet rate exceeds a rate that
 	 * it matters */
-	if (rate > MLX4_EN_RX_RATE_THRESH) {
+	if (rate > MLX4_EN_RX_RATE_THRESH && avg_pkt_size > MLX4_EN_AVG_PKT_SMALL) {
 		/* If tx and rx packet rates are not balanced, assume that
 		 * traffic is mainly BW bound and apply maximum moderation.
 		 * Otherwise, moderate according to packet rate */
-		if (2 * tx_pkt_diff > 3 * rx_pkt_diff &&
-		    rx_pkt_diff / rx_byte_diff <
-		    MLX4_EN_SMALL_PKT_SIZE)
-			moder_time = priv->rx_usecs_low;
-		else if (2 * rx_pkt_diff > 3 * tx_pkt_diff)
+		if (2 * tx_pkt_diff > 3 * rx_pkt_diff ||
+		    2 * rx_pkt_diff > 3 * tx_pkt_diff) {
 			moder_time = priv->rx_usecs_high;
-		else {
+		} else {
 			if (rate < priv->pkt_rate_low)
 				moder_time = priv->rx_usecs_low;
 			else if (rate > priv->pkt_rate_high)
@@ -470,9 +464,7 @@ static void mlx4_en_auto_moderation(struct mlx4_en_priv *priv)
 					priv->rx_usecs_low;
 		}
 	} else {
-		/* When packet rate is low, use default moderation rather than
-		 * 0 to prevent interrupt storms if traffic suddenly increases */
-		moder_time = priv->rx_usecs;
+		moder_time = priv->rx_usecs_low;
 	}
 
 	en_dbg(INTR, priv, "tx rate:%lu rx_rate:%lu\n",
@@ -564,6 +556,7 @@ int mlx4_en_start_port(struct net_device *dev)
 	int err = 0;
 	int i;
 	int j;
+	char name[32];
 
 	if (priv->port_up) {
 		en_dbg(DRV, priv, "start port called while port already up\n");
@@ -608,10 +601,19 @@ int mlx4_en_start_port(struct net_device *dev)
 		goto cq_err;
 	}
 
+	if (mdev->dev->caps.comp_pool && !priv->tx_vector) {
+		sprintf(name , "%s-tx", priv->dev->name);
+		if (mlx4_assign_eq(mdev->dev , name, &priv->tx_vector)) {
+			mlx4_warn(mdev, "Failed Assigning an EQ to "
+					"%s_tx ,Falling back to legacy "
+					"EQ's\n", priv->dev->name);
+		}
+	}
 	/* Configure tx cq's and rings */
 	for (i = 0; i < priv->tx_ring_num; i++) {
 		/* Configure cq */
 		cq = &priv->tx_cq[i];
+		cq->vector = priv->tx_vector;
 		err = mlx4_en_activate_cq(priv, cq);
 		if (err) {
 			en_err(priv, "Failed allocating Tx CQ\n");
@@ -675,6 +677,9 @@ int mlx4_en_start_port(struct net_device *dev)
 		en_err(priv, "Failed Initializing port\n");
 		goto mac_err;
 	}
+
+	/* Must redo promiscuous mode setup. */
+	priv->flags &= ~MLX4_EN_FLAG_PROMISC;
 
 	/* Schedule multicast task to populate multicast list */
 	queue_work(mdev->workqueue, &priv->mcast_task);
@@ -800,7 +805,6 @@ static int mlx4_en_open(struct net_device *dev)
 		priv->rx_ring[i].packets = 0;
 	}
 
-	mlx4_en_set_default_moderation(priv);
 	err = mlx4_en_start_port(dev);
 	if (err)
 		en_err(priv, "Failed starting port:%d\n", priv->port);
@@ -827,7 +831,7 @@ static int mlx4_en_close(struct net_device *dev)
 	return 0;
 }
 
-void mlx4_en_free_resources(struct mlx4_en_priv *priv)
+void mlx4_en_free_resources(struct mlx4_en_priv *priv, bool reserve_vectors)
 {
 	int i;
 
@@ -835,14 +839,14 @@ void mlx4_en_free_resources(struct mlx4_en_priv *priv)
 		if (priv->tx_ring[i].tx_info)
 			mlx4_en_destroy_tx_ring(priv, &priv->tx_ring[i]);
 		if (priv->tx_cq[i].buf)
-			mlx4_en_destroy_cq(priv, &priv->tx_cq[i]);
+			mlx4_en_destroy_cq(priv, &priv->tx_cq[i], reserve_vectors);
 	}
 
 	for (i = 0; i < priv->rx_ring_num; i++) {
 		if (priv->rx_ring[i].rx_info)
 			mlx4_en_destroy_rx_ring(priv, &priv->rx_ring[i]);
 		if (priv->rx_cq[i].buf)
-			mlx4_en_destroy_cq(priv, &priv->rx_cq[i]);
+			mlx4_en_destroy_cq(priv, &priv->rx_cq[i], reserve_vectors);
 	}
 }
 
@@ -850,6 +854,13 @@ int mlx4_en_alloc_resources(struct mlx4_en_priv *priv)
 {
 	struct mlx4_en_port_profile *prof = priv->prof;
 	int i;
+	int base_tx_qpn, err;
+
+	err = mlx4_qp_reserve_range(priv->mdev->dev, priv->tx_ring_num, 256, &base_tx_qpn);
+	if (err) {
+		en_err(priv, "failed reserving range for TX rings\n");
+		return err;
+	}
 
 	/* Create tx Rings */
 	for (i = 0; i < priv->tx_ring_num; i++) {
@@ -857,7 +868,7 @@ int mlx4_en_alloc_resources(struct mlx4_en_priv *priv)
 				      prof->tx_ring_size, i, TX))
 			goto err;
 
-		if (mlx4_en_create_tx_ring(priv, &priv->tx_ring[i],
+		if (mlx4_en_create_tx_ring(priv, &priv->tx_ring[i], base_tx_qpn + i,
 					   prof->tx_ring_size, TXBB_SIZE))
 			goto err;
 	}
@@ -877,6 +888,7 @@ int mlx4_en_alloc_resources(struct mlx4_en_priv *priv)
 
 err:
 	en_err(priv, "Failed to allocate NIC resources\n");
+	mlx4_qp_release_range(priv->mdev->dev, base_tx_qpn, priv->tx_ring_num);
 	return -ENOMEM;
 }
 
@@ -904,7 +916,7 @@ void mlx4_en_destroy_netdev(struct net_device *dev)
 	mdev->pndev[priv->port] = NULL;
 	mutex_unlock(&mdev->state_lock);
 
-	mlx4_en_free_resources(priv);
+	mlx4_en_free_resources(priv, false);
 	free_netdev(dev);
 }
 
@@ -931,7 +943,6 @@ static int mlx4_en_change_mtu(struct net_device *dev, int new_mtu)
 			en_dbg(DRV, priv, "Change MTU called with card down!?\n");
 		} else {
 			mlx4_en_stop_port(dev);
-			mlx4_en_set_default_moderation(priv);
 			err = mlx4_en_start_port(dev);
 			if (err) {
 				en_err(priv, "Failed restarting port:%d\n",
@@ -971,7 +982,8 @@ int mlx4_en_init_netdev(struct mlx4_en_dev *mdev, int port,
 	int i;
 	int err;
 
-	dev = alloc_etherdev_mq(sizeof(struct mlx4_en_priv), prof->tx_ring_num);
+	dev = alloc_etherdev_mqs(sizeof(struct mlx4_en_priv),
+	    prof->tx_ring_num, prof->rx_ring_num);
 	if (dev == NULL) {
 		mlx4_err(mdev, "Net device allocation failed\n");
 		return -ENOMEM;
@@ -1076,7 +1088,25 @@ int mlx4_en_init_netdev(struct mlx4_en_dev *mdev, int port,
 	en_warn(priv, "Using %d TX rings\n", prof->tx_ring_num);
 	en_warn(priv, "Using %d RX rings\n", prof->rx_ring_num);
 
+	/* Configure port */
+	err = mlx4_SET_PORT_general(mdev->dev, priv->port,
+				    MLX4_EN_MIN_MTU,
+				    0, 0, 0, 0);
+	if (err) {
+		en_err(priv, "Failed setting port general configurations "
+		       "for port %d, with error %d\n", priv->port, err);
+		goto out;
+	}
+
+	/* Init port */
+	en_warn(priv, "Initializing port\n");
+	err = mlx4_INIT_PORT(mdev->dev, priv->port);
+	if (err) {
+		en_err(priv, "Failed Initializing port\n");
+		goto out;
+	}
 	priv->registered = 1;
+	mlx4_en_set_default_moderation(priv);
 	queue_delayed_work(mdev->workqueue, &priv->stats_task, STATS_DELAY);
 	return 0;
 

@@ -316,7 +316,7 @@ static int iscsi_sw_tcp_xmit(struct iscsi_conn *conn)
 		rc = iscsi_sw_tcp_xmit_segment(tcp_conn, segment);
 		/*
 		 * We may not have been able to send data because the conn
-		 * is getting stopped. libiscsi will know so propogate err
+		 * is getting stopped. libiscsi will know so propagate err
 		 * for it to do the right thing.
 		 */
 		if (rc == -EAGAIN)
@@ -628,54 +628,12 @@ static void iscsi_sw_tcp_conn_stop(struct iscsi_cls_conn *cls_conn, int flag)
 	iscsi_conn_stop(cls_conn, flag);
 }
 
-static int iscsi_sw_tcp_get_addr(struct iscsi_conn *conn, struct socket *sock,
-				 char *buf, int *port,
-				 int (*getname)(struct socket *,
-						struct sockaddr *,
-						int *addrlen))
-{
-	struct sockaddr_storage *addr;
-	struct sockaddr_in6 *sin6;
-	struct sockaddr_in *sin;
-	int rc = 0, len;
-
-	addr = kmalloc(sizeof(*addr), GFP_KERNEL);
-	if (!addr)
-		return -ENOMEM;
-
-	if (getname(sock, (struct sockaddr *) addr, &len)) {
-		rc = -ENODEV;
-		goto free_addr;
-	}
-
-	switch (addr->ss_family) {
-	case AF_INET:
-		sin = (struct sockaddr_in *)addr;
-		spin_lock_bh(&conn->session->lock);
-		sprintf(buf, "%pI4", &sin->sin_addr.s_addr);
-		*port = be16_to_cpu(sin->sin_port);
-		spin_unlock_bh(&conn->session->lock);
-		break;
-	case AF_INET6:
-		sin6 = (struct sockaddr_in6 *)addr;
-		spin_lock_bh(&conn->session->lock);
-		sprintf(buf, "%pI6", &sin6->sin6_addr);
-		*port = be16_to_cpu(sin6->sin6_port);
-		spin_unlock_bh(&conn->session->lock);
-		break;
-	}
-free_addr:
-	kfree(addr);
-	return rc;
-}
-
 static int
 iscsi_sw_tcp_conn_bind(struct iscsi_cls_session *cls_session,
 		       struct iscsi_cls_conn *cls_conn, uint64_t transport_eph,
 		       int is_leading)
 {
-	struct Scsi_Host *shost = iscsi_session_to_shost(cls_session);
-	struct iscsi_host *ihost = shost_priv(shost);
+	struct iscsi_session *session = cls_session->dd_data;
 	struct iscsi_conn *conn = cls_conn->dd_data;
 	struct iscsi_tcp_conn *tcp_conn = conn->dd_data;
 	struct iscsi_sw_tcp_conn *tcp_sw_conn = tcp_conn->dd_data;
@@ -690,27 +648,15 @@ iscsi_sw_tcp_conn_bind(struct iscsi_cls_session *cls_session,
 				  "sockfd_lookup failed %d\n", err);
 		return -EEXIST;
 	}
-	/*
-	 * copy these values now because if we drop the session
-	 * userspace may still want to query the values since we will
-	 * be using them for the reconnect
-	 */
-	err = iscsi_sw_tcp_get_addr(conn, sock, conn->portal_address,
-				    &conn->portal_port, kernel_getpeername);
-	if (err)
-		goto free_socket;
-
-	err = iscsi_sw_tcp_get_addr(conn, sock, ihost->local_address,
-				    &ihost->local_port, kernel_getsockname);
-	if (err)
-		goto free_socket;
 
 	err = iscsi_conn_bind(cls_session, cls_conn, is_leading);
 	if (err)
 		goto free_socket;
 
+	spin_lock_bh(&session->lock);
 	/* bind iSCSI connection and socket */
 	tcp_sw_conn->sock = sock;
+	spin_unlock_bh(&session->lock);
 
 	/* setup Socket parameters */
 	sk = sock->sk;
@@ -772,24 +718,74 @@ static int iscsi_sw_tcp_conn_get_param(struct iscsi_cls_conn *cls_conn,
 				       enum iscsi_param param, char *buf)
 {
 	struct iscsi_conn *conn = cls_conn->dd_data;
-	int len;
+	struct iscsi_tcp_conn *tcp_conn = conn->dd_data;
+	struct iscsi_sw_tcp_conn *tcp_sw_conn = tcp_conn->dd_data;
+	struct sockaddr_in6 addr;
+	int rc, len;
 
 	switch(param) {
 	case ISCSI_PARAM_CONN_PORT:
-		spin_lock_bh(&conn->session->lock);
-		len = sprintf(buf, "%hu\n", conn->portal_port);
-		spin_unlock_bh(&conn->session->lock);
-		break;
 	case ISCSI_PARAM_CONN_ADDRESS:
 		spin_lock_bh(&conn->session->lock);
-		len = sprintf(buf, "%s\n", conn->portal_address);
+		if (!tcp_sw_conn || !tcp_sw_conn->sock) {
+			spin_unlock_bh(&conn->session->lock);
+			return -ENOTCONN;
+		}
+		rc = kernel_getpeername(tcp_sw_conn->sock,
+					(struct sockaddr *)&addr, &len);
 		spin_unlock_bh(&conn->session->lock);
-		break;
+		if (rc)
+			return rc;
+
+		return iscsi_conn_get_addr_param((struct sockaddr_storage *)
+						 &addr, param, buf);
 	default:
 		return iscsi_conn_get_param(cls_conn, param, buf);
 	}
 
-	return len;
+	return 0;
+}
+
+static int iscsi_sw_tcp_host_get_param(struct Scsi_Host *shost,
+				       enum iscsi_host_param param, char *buf)
+{
+	struct iscsi_sw_tcp_host *tcp_sw_host = iscsi_host_priv(shost);
+	struct iscsi_session *session = tcp_sw_host->session;
+	struct iscsi_conn *conn;
+	struct iscsi_tcp_conn *tcp_conn;
+	struct iscsi_sw_tcp_conn *tcp_sw_conn;
+	struct sockaddr_in6 addr;
+	int rc, len;
+
+	switch (param) {
+	case ISCSI_HOST_PARAM_IPADDRESS:
+		spin_lock_bh(&session->lock);
+		conn = session->leadconn;
+		if (!conn) {
+			spin_unlock_bh(&session->lock);
+			return -ENOTCONN;
+		}
+		tcp_conn = conn->dd_data;
+
+		tcp_sw_conn = tcp_conn->dd_data;
+		if (!tcp_sw_conn->sock) {
+			spin_unlock_bh(&session->lock);
+			return -ENOTCONN;
+		}
+
+		rc = kernel_getsockname(tcp_sw_conn->sock,
+					(struct sockaddr *)&addr, &len);
+		spin_unlock_bh(&session->lock);
+		if (rc)
+			return rc;
+
+		return iscsi_conn_get_addr_param((struct sockaddr_storage *)
+						 &addr, param, buf);
+	default:
+		return iscsi_host_get_param(shost, param, buf);
+	}
+
+	return 0;
 }
 
 static void
@@ -817,6 +813,7 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 {
 	struct iscsi_cls_session *cls_session;
 	struct iscsi_session *session;
+	struct iscsi_sw_tcp_host *tcp_sw_host;
 	struct Scsi_Host *shost;
 
 	if (ep) {
@@ -824,7 +821,8 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 		return NULL;
 	}
 
-	shost = iscsi_host_alloc(&iscsi_sw_tcp_sht, 0, 1);
+	shost = iscsi_host_alloc(&iscsi_sw_tcp_sht,
+				 sizeof(struct iscsi_sw_tcp_host), 1);
 	if (!shost)
 		return NULL;
 	shost->transportt = iscsi_sw_tcp_scsi_transport;
@@ -845,6 +843,8 @@ iscsi_sw_tcp_session_create(struct iscsi_endpoint *ep, uint16_t cmds_max,
 	if (!cls_session)
 		goto remove_host;
 	session = cls_session->dd_data;
+	tcp_sw_host = iscsi_host_priv(shost);
+	tcp_sw_host->session = session;
 
 	shost->can_queue = session->scsi_cmds_max;
 	if (iscsi_tcp_r2tpool_alloc(session))
@@ -869,6 +869,61 @@ static void iscsi_sw_tcp_session_destroy(struct iscsi_cls_session *cls_session)
 
 	iscsi_host_remove(shost);
 	iscsi_host_free(shost);
+}
+
+static mode_t iscsi_sw_tcp_attr_is_visible(int param_type, int param)
+{
+	switch (param_type) {
+	case ISCSI_HOST_PARAM:
+		switch (param) {
+		case ISCSI_HOST_PARAM_NETDEV_NAME:
+		case ISCSI_HOST_PARAM_HWADDRESS:
+		case ISCSI_HOST_PARAM_IPADDRESS:
+		case ISCSI_HOST_PARAM_INITIATOR_NAME:
+			return S_IRUGO;
+		default:
+			return 0;
+		}
+	case ISCSI_PARAM:
+		switch (param) {
+		case ISCSI_PARAM_MAX_RECV_DLENGTH:
+		case ISCSI_PARAM_MAX_XMIT_DLENGTH:
+		case ISCSI_PARAM_HDRDGST_EN:
+		case ISCSI_PARAM_DATADGST_EN:
+		case ISCSI_PARAM_CONN_ADDRESS:
+		case ISCSI_PARAM_CONN_PORT:
+		case ISCSI_PARAM_EXP_STATSN:
+		case ISCSI_PARAM_PERSISTENT_ADDRESS:
+		case ISCSI_PARAM_PERSISTENT_PORT:
+		case ISCSI_PARAM_PING_TMO:
+		case ISCSI_PARAM_RECV_TMO:
+		case ISCSI_PARAM_INITIAL_R2T_EN:
+		case ISCSI_PARAM_MAX_R2T:
+		case ISCSI_PARAM_IMM_DATA_EN:
+		case ISCSI_PARAM_FIRST_BURST:
+		case ISCSI_PARAM_MAX_BURST:
+		case ISCSI_PARAM_PDU_INORDER_EN:
+		case ISCSI_PARAM_DATASEQ_INORDER_EN:
+		case ISCSI_PARAM_ERL:
+		case ISCSI_PARAM_TARGET_NAME:
+		case ISCSI_PARAM_TPGT:
+		case ISCSI_PARAM_USERNAME:
+		case ISCSI_PARAM_PASSWORD:
+		case ISCSI_PARAM_USERNAME_IN:
+		case ISCSI_PARAM_PASSWORD_IN:
+		case ISCSI_PARAM_FAST_ABORT:
+		case ISCSI_PARAM_ABORT_TMO:
+		case ISCSI_PARAM_LU_RESET_TMO:
+		case ISCSI_PARAM_TGT_RESET_TMO:
+		case ISCSI_PARAM_IFACE_NAME:
+		case ISCSI_PARAM_INITIATOR_NAME:
+			return S_IRUGO;
+		default:
+			return 0;
+		}
+	}
+
+	return 0;
 }
 
 static int iscsi_sw_tcp_slave_alloc(struct scsi_device *sdev)
@@ -909,33 +964,6 @@ static struct iscsi_transport iscsi_sw_tcp_transport = {
 	.name			= "tcp",
 	.caps			= CAP_RECOVERY_L0 | CAP_MULTI_R2T | CAP_HDRDGST
 				  | CAP_DATADGST,
-	.param_mask		= ISCSI_MAX_RECV_DLENGTH |
-				  ISCSI_MAX_XMIT_DLENGTH |
-				  ISCSI_HDRDGST_EN |
-				  ISCSI_DATADGST_EN |
-				  ISCSI_INITIAL_R2T_EN |
-				  ISCSI_MAX_R2T |
-				  ISCSI_IMM_DATA_EN |
-				  ISCSI_FIRST_BURST |
-				  ISCSI_MAX_BURST |
-				  ISCSI_PDU_INORDER_EN |
-				  ISCSI_DATASEQ_INORDER_EN |
-				  ISCSI_ERL |
-				  ISCSI_CONN_PORT |
-				  ISCSI_CONN_ADDRESS |
-				  ISCSI_EXP_STATSN |
-				  ISCSI_PERSISTENT_PORT |
-				  ISCSI_PERSISTENT_ADDRESS |
-				  ISCSI_TARGET_NAME | ISCSI_TPGT |
-				  ISCSI_USERNAME | ISCSI_PASSWORD |
-				  ISCSI_USERNAME_IN | ISCSI_PASSWORD_IN |
-				  ISCSI_FAST_ABORT | ISCSI_ABORT_TMO |
-				  ISCSI_LU_RESET_TMO | ISCSI_TGT_RESET_TMO |
-				  ISCSI_PING_TMO | ISCSI_RECV_TMO |
-				  ISCSI_IFACE_NAME | ISCSI_INITIATOR_NAME,
-	.host_param_mask	= ISCSI_HOST_HWADDRESS | ISCSI_HOST_IPADDRESS |
-				  ISCSI_HOST_INITIATOR_NAME |
-				  ISCSI_HOST_NETDEV_NAME,
 	/* session management */
 	.create_session		= iscsi_sw_tcp_session_create,
 	.destroy_session	= iscsi_sw_tcp_session_destroy,
@@ -943,13 +971,14 @@ static struct iscsi_transport iscsi_sw_tcp_transport = {
 	.create_conn		= iscsi_sw_tcp_conn_create,
 	.bind_conn		= iscsi_sw_tcp_conn_bind,
 	.destroy_conn		= iscsi_sw_tcp_conn_destroy,
+	.attr_is_visible	= iscsi_sw_tcp_attr_is_visible,
 	.set_param		= iscsi_sw_tcp_conn_set_param,
 	.get_conn_param		= iscsi_sw_tcp_conn_get_param,
 	.get_session_param	= iscsi_session_get_param,
 	.start_conn		= iscsi_conn_start,
 	.stop_conn		= iscsi_sw_tcp_conn_stop,
 	/* iscsi host params */
-	.get_host_param		= iscsi_host_get_param,
+	.get_host_param		= iscsi_sw_tcp_host_get_param,
 	.set_host_param		= iscsi_host_set_param,
 	/* IO */
 	.send_pdu		= iscsi_conn_send_pdu,

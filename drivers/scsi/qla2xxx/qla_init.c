@@ -5213,7 +5213,7 @@ qla81xx_nvram_config(scsi_qla_host_t *vha)
 	}
 
 	/* Reset Initialization control block */
-	memset(icb, 0, sizeof(struct init_cb_81xx));
+	memset(icb, 0, ha->init_cb_size);
 
 	/* Copy 1st segment. */
 	dptr1 = (uint8_t *)icb;
@@ -5437,6 +5437,13 @@ qla82xx_restart_isp(scsi_qla_host_t *vha)
 
 		ha->isp_abort_cnt = 0;
 		clear_bit(ISP_ABORT_RETRY, &vha->dpc_flags);
+
+		/* Update the firmware version */
+		qla2x00_get_fw_version(vha, &ha->fw_major_version,
+			&ha->fw_minor_version, &ha->fw_subminor_version,
+			&ha->fw_attributes, &ha->fw_memory_size,
+			ha->mpi_version, &ha->mpi_capabilities,
+			ha->phy_version);
 
 		if (ha->fce) {
 			ha->flags.fce_enabled = 1;

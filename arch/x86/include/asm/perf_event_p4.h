@@ -1,5 +1,5 @@
 /*
- * Netburst Perfomance Events (P4, old Xeon)
+ * Netburst Performance Events (P4, old Xeon)
  */
 
 #ifndef PERF_EVENT_P4_H
@@ -9,7 +9,7 @@
 #include <linux/bitops.h>
 
 /*
- * NetBurst has perfomance MSRs shared between
+ * NetBurst has performance MSRs shared between
  * threads if HT is turned on, ie for both logical
  * processors (mem: in turn in Atom with HT support
  * perf-MSRs are not shared and every thread has its
@@ -19,6 +19,10 @@
 #define ARCH_P4_RESERVED_ESCR	(2) /* IQ_ESCR(0,1) not always present */
 #define ARCH_P4_MAX_ESCR	(ARCH_P4_TOTAL_ESCR - ARCH_P4_RESERVED_ESCR)
 #define ARCH_P4_MAX_CCCR	(18)
+
+#define ARCH_P4_CNTRVAL_BITS	(40)
+#define ARCH_P4_CNTRVAL_MASK	((1ULL << ARCH_P4_CNTRVAL_BITS) - 1)
+#define ARCH_P4_UNFLAGGED_BIT	((1ULL) << (ARCH_P4_CNTRVAL_BITS - 1))
 
 #define P4_ESCR_EVENT_MASK	0x7e000000U
 #define P4_ESCR_EVENT_SHIFT	25
@@ -98,6 +102,14 @@
 #define P4_CONFIG_HT			(1ULL << P4_CONFIG_HT_SHIFT)
 
 /*
+ * If an event has alias it should be marked
+ * with a special bit. (Don't forget to check
+ * P4_PEBS_CONFIG_MASK and related bits on
+ * modification.)
+ */
+#define P4_CONFIG_ALIASABLE		(1 << 9)
+
+/*
  * The bits we allow to pass for RAW events
  */
 #define P4_CONFIG_MASK_ESCR		\
@@ -118,6 +130,31 @@
 #define P4_CONFIG_MASK				  	  \
 	(p4_config_pack_escr(P4_CONFIG_MASK_ESCR))	| \
 	(p4_config_pack_cccr(P4_CONFIG_MASK_CCCR))
+
+/*
+ * In case of event aliasing we need to preserve some
+ * caller bits, otherwise the mapping won't be complete.
+ */
+#define P4_CONFIG_EVENT_ALIAS_MASK			  \
+	(p4_config_pack_escr(P4_CONFIG_MASK_ESCR)	| \
+	 p4_config_pack_cccr(P4_CCCR_EDGE		| \
+			     P4_CCCR_THRESHOLD_MASK	| \
+			     P4_CCCR_COMPLEMENT		| \
+			     P4_CCCR_COMPARE))
+
+#define  P4_CONFIG_EVENT_ALIAS_IMMUTABLE_BITS		  \
+	((P4_CONFIG_HT)					| \
+	 p4_config_pack_escr(P4_ESCR_T0_OS		| \
+			     P4_ESCR_T0_USR		| \
+			     P4_ESCR_T1_OS		| \
+			     P4_ESCR_T1_USR)		| \
+	 p4_config_pack_cccr(P4_CCCR_OVF		| \
+			     P4_CCCR_CASCADE		| \
+			     P4_CCCR_FORCE_OVF		| \
+			     P4_CCCR_THREAD_ANY		| \
+			     P4_CCCR_OVF_PMI_T0		| \
+			     P4_CCCR_OVF_PMI_T1		| \
+			     P4_CONFIG_ALIASABLE))
 
 static inline bool p4_is_event_cascaded(u64 config)
 {

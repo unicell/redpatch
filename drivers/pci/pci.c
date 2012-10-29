@@ -1503,7 +1503,7 @@ void pci_enable_ari(struct pci_dev *dev)
 {
 	int pos;
 	u32 cap;
-	u16 ctrl;
+	u16 flags, ctrl;
 	struct pci_dev *bridge;
 
 	if (!dev->is_pcie || dev->devfn)
@@ -1521,6 +1521,11 @@ void pci_enable_ari(struct pci_dev *dev)
 	if (!pos)
 		return;
 
+	/* ARI is a PCIe v2 feature */
+	pci_read_config_word(bridge, pos + PCI_EXP_FLAGS, &flags);
+	if ((flags & PCI_EXP_FLAGS_VERS) < 2)
+		return;
+
 	pci_read_config_dword(bridge, pos + PCI_EXP_DEVCAP2, &cap);
 	if (!(cap & PCI_EXP_DEVCAP2_ARI))
 		return;
@@ -1531,6 +1536,300 @@ void pci_enable_ari(struct pci_dev *dev)
 
 	bridge->ari_enabled = 1;
 }
+
+/**
+ * pci_enable_ido - enable ID-based ordering on a device
+ * @dev: the PCI device
+ * @type: which types of IDO to enable
+ *
+ * Enable ID-based ordering on @dev.  @type can contain the bits
+ * %PCI_EXP_IDO_REQUEST and/or %PCI_EXP_IDO_COMPLETION to indicate
+ * which types of transactions are allowed to be re-ordered.
+ */
+void pci_enable_ido(struct pci_dev *dev, unsigned long type)
+{
+	int pos;
+	u16 ctrl;
+
+	pos = pci_pcie_cap(dev);
+	if (!pos)
+		return;
+
+	pci_read_config_word(dev, pos + PCI_EXP_DEVCTL2, &ctrl);
+	if (type & PCI_EXP_IDO_REQUEST)
+		ctrl |= PCI_EXP_IDO_REQ_EN;
+	if (type & PCI_EXP_IDO_COMPLETION)
+		ctrl |= PCI_EXP_IDO_CMP_EN;
+	pci_write_config_word(dev, pos + PCI_EXP_DEVCTL2, ctrl);
+}
+EXPORT_SYMBOL(pci_enable_ido);
+
+/**
+ * pci_disable_ido - disable ID-based ordering on a device
+ * @dev: the PCI device
+ * @type: which types of IDO to disable
+ */
+void pci_disable_ido(struct pci_dev *dev, unsigned long type)
+{
+	int pos;
+	u16 ctrl;
+
+	if (!pci_is_pcie(dev))
+		return;
+
+	pos = pci_pcie_cap(dev);
+	if (!pos)
+		return;
+
+	pci_read_config_word(dev, pos + PCI_EXP_DEVCTL2, &ctrl);
+	if (type & PCI_EXP_IDO_REQUEST)
+		ctrl &= ~PCI_EXP_IDO_REQ_EN;
+	if (type & PCI_EXP_IDO_COMPLETION)
+		ctrl &= ~PCI_EXP_IDO_CMP_EN;
+	pci_write_config_word(dev, pos + PCI_EXP_DEVCTL2, ctrl);
+}
+EXPORT_SYMBOL(pci_disable_ido);
+
+/**
+ * pci_enable_obff - enable optimized buffer flush/fill
+ * @dev: PCI device
+ * @type: type of signaling to use
+ *
+ * Try to enable @type OBFF signaling on @dev.  It will try using WAKE#
+ * signaling if possible, falling back to message signaling only if
+ * WAKE# isn't supported.  @type should indicate whether the PCIe link
+ * be brought out of L0s or L1 to send the message.  It should be either
+ * %PCI_EXP_OBFF_SIGNAL_ALWAYS or %PCI_OBFF_SIGNAL_L0.
+ *
+ * If your device can benefit from receiving all messages, even at the
+ * power cost of bringing the link back up from a low power state, use
+ * %PCI_EXP_OBFF_SIGNAL_ALWAYS.  Otherwise, use %PCI_OBFF_SIGNAL_L0 (the
+ * preferred type).
+ *
+ * RETURNS:
+ * Zero on success, appropriate error number on failure.
+ */
+int pci_enable_obff(struct pci_dev *dev, enum pci_obff_signal_type type)
+{
+	int pos;
+	u32 cap;
+	u16 ctrl;
+	int ret;
+
+	if (!pci_is_pcie(dev))
+		return -ENOTSUPP;
+
+	pos = pci_pcie_cap(dev);
+	if (!pos)
+		return -ENOTSUPP;
+
+	pci_read_config_dword(dev, pos + PCI_EXP_DEVCAP2, &cap);
+	if (!(cap & PCI_EXP_OBFF_MASK))
+		return -ENOTSUPP; /* no OBFF support at all */
+
+	/* Make sure the topology supports OBFF as well */
+	if (dev->bus) {
+		ret = pci_enable_obff(dev->bus->self, type);
+		if (ret)
+			return ret;
+	}
+
+	pci_read_config_word(dev, pos + PCI_EXP_DEVCTL2, &ctrl);
+	if (cap & PCI_EXP_OBFF_WAKE)
+		ctrl |= PCI_EXP_OBFF_WAKE_EN;
+	else {
+		switch (type) {
+		case PCI_EXP_OBFF_SIGNAL_L0:
+			if (!(ctrl & PCI_EXP_OBFF_WAKE_EN))
+				ctrl |= PCI_EXP_OBFF_MSGA_EN;
+			break;
+		case PCI_EXP_OBFF_SIGNAL_ALWAYS:
+			ctrl &= ~PCI_EXP_OBFF_WAKE_EN;
+			ctrl |= PCI_EXP_OBFF_MSGB_EN;
+			break;
+		default:
+			WARN(1, "bad OBFF signal type\n");
+			return -ENOTSUPP;
+		}
+	}
+	pci_write_config_word(dev, pos + PCI_EXP_DEVCTL2, ctrl);
+
+	return 0;
+}
+EXPORT_SYMBOL(pci_enable_obff);
+
+/**
+ * pci_disable_obff - disable optimized buffer flush/fill
+ * @dev: PCI device
+ *
+ * Disable OBFF on @dev.
+ */
+void pci_disable_obff(struct pci_dev *dev)
+{
+	int pos;
+	u16 ctrl;
+
+	if (!pci_is_pcie(dev))
+		return;
+
+	pos = pci_pcie_cap(dev);
+	if (!pos)
+		return;
+
+	pci_read_config_word(dev, pos + PCI_EXP_DEVCTL2, &ctrl);
+	ctrl &= ~PCI_EXP_OBFF_WAKE_EN;
+	pci_write_config_word(dev, pos + PCI_EXP_DEVCTL2, ctrl);
+}
+EXPORT_SYMBOL(pci_disable_obff);
+
+/**
+ * pci_ltr_supported - check whether a device supports LTR
+ * @dev: PCI device
+ *
+ * RETURNS:
+ * True if @dev supports latency tolerance reporting, false otherwise.
+ */
+bool pci_ltr_supported(struct pci_dev *dev)
+{
+	int pos;
+	u32 cap;
+
+	if (!pci_is_pcie(dev))
+		return false;
+
+	pos = pci_pcie_cap(dev);
+	if (!pos)
+		return false;
+
+	pci_read_config_dword(dev, pos + PCI_EXP_DEVCAP2, &cap);
+
+	return cap & PCI_EXP_DEVCAP2_LTR;
+}
+EXPORT_SYMBOL(pci_ltr_supported);
+
+/**
+ * pci_enable_ltr - enable latency tolerance reporting
+ * @dev: PCI device
+ *
+ * Enable LTR on @dev if possible, which means enabling it first on
+ * upstream ports.
+ *
+ * RETURNS:
+ * Zero on success, errno on failure.
+ */
+int pci_enable_ltr(struct pci_dev *dev)
+{
+	int pos;
+	u16 ctrl;
+	int ret;
+
+	if (!pci_ltr_supported(dev))
+		return -ENOTSUPP;
+
+	pos = pci_pcie_cap(dev);
+	if (!pos)
+		return -ENOTSUPP;
+
+	/* Only primary function can enable/disable LTR */
+	if (PCI_FUNC(dev->devfn) != 0)
+		return -EINVAL;
+
+	/* Enable upstream ports first */
+	if (dev->bus) {
+		ret = pci_enable_ltr(dev->bus->self);
+		if (ret)
+			return ret;
+	}
+
+	pci_read_config_word(dev, pos + PCI_EXP_DEVCTL2, &ctrl);
+	ctrl |= PCI_EXP_LTR_EN;
+	pci_write_config_word(dev, pos + PCI_EXP_DEVCTL2, ctrl);
+
+	return 0;
+}
+EXPORT_SYMBOL(pci_enable_ltr);
+
+/**
+ * pci_disable_ltr - disable latency tolerance reporting
+ * @dev: PCI device
+ */
+void pci_disable_ltr(struct pci_dev *dev)
+{
+	int pos;
+	u16 ctrl;
+
+	if (!pci_ltr_supported(dev))
+		return;
+
+	pos = pci_pcie_cap(dev);
+	if (!pos)
+		return;
+
+	/* Only primary function can enable/disable LTR */
+	if (PCI_FUNC(dev->devfn) != 0)
+		return;
+
+	pci_read_config_word(dev, pos + PCI_EXP_DEVCTL2, &ctrl);
+	ctrl &= ~PCI_EXP_LTR_EN;
+	pci_write_config_word(dev, pos + PCI_EXP_DEVCTL2, ctrl);
+}
+EXPORT_SYMBOL(pci_disable_ltr);
+
+static int __pci_ltr_scale(int *val)
+{
+	int scale = 0;
+
+	while (*val > 1023) {
+		*val = (*val + 31) / 32;
+		scale++;
+	}
+	return scale;
+}
+
+/**
+ * pci_set_ltr - set LTR latency values
+ * @dev: PCI device
+ * @snoop_lat_ns: snoop latency in nanoseconds
+ * @nosnoop_lat_ns: nosnoop latency in nanoseconds
+ *
+ * Figure out the scale and set the LTR values accordingly.
+ */
+int pci_set_ltr(struct pci_dev *dev, int snoop_lat_ns, int nosnoop_lat_ns)
+{
+	int pos, ret, snoop_scale, nosnoop_scale;
+	u16 val;
+
+	if (!pci_ltr_supported(dev))
+		return -ENOTSUPP;
+
+	snoop_scale = __pci_ltr_scale(&snoop_lat_ns);
+	nosnoop_scale = __pci_ltr_scale(&nosnoop_lat_ns);
+
+	if (snoop_lat_ns > PCI_LTR_VALUE_MASK ||
+	    nosnoop_lat_ns > PCI_LTR_VALUE_MASK)
+		return -EINVAL;
+
+	if ((snoop_scale > (PCI_LTR_SCALE_MASK >> PCI_LTR_SCALE_SHIFT)) ||
+	    (nosnoop_scale > (PCI_LTR_SCALE_MASK >> PCI_LTR_SCALE_SHIFT)))
+		return -EINVAL;
+
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_LTR);
+	if (!pos)
+		return -ENOTSUPP;
+
+	val = (snoop_scale << PCI_LTR_SCALE_SHIFT) | snoop_lat_ns;
+	ret = pci_write_config_word(dev, pos + PCI_LTR_MAX_SNOOP_LAT, val);
+	if (ret != 4)
+		return -EIO;
+
+	val = (nosnoop_scale << PCI_LTR_SCALE_SHIFT) | nosnoop_lat_ns;
+	ret = pci_write_config_word(dev, pos + PCI_LTR_MAX_NOSNOOP_LAT, val);
+	if (ret != 4)
+		return -EIO;
+
+	return 0;
+}
+EXPORT_SYMBOL(pci_set_ltr);
 
 static int pci_acs_enable;
 
@@ -2599,11 +2898,11 @@ void __init pci_register_set_vga_state(arch_set_vga_state_t func)
 }
 
 static int pci_set_vga_state_arch(struct pci_dev *dev, bool decode,
-		      unsigned int command_bits, bool change_bridge)
+		      unsigned int command_bits, u32 flags)
 {
 	if (arch_set_vga_state)
 		return arch_set_vga_state(dev, decode, command_bits,
-						change_bridge);
+						flags);
 	return 0;
 }
 
@@ -2615,7 +2914,7 @@ static int pci_set_vga_state_arch(struct pci_dev *dev, bool decode,
  * @change_bridge: traverse ancestors and change bridges
  */
 int pci_set_vga_state(struct pci_dev *dev, bool decode,
-		      unsigned int command_bits, bool change_bridge)
+		      unsigned int command_bits, u32 flags)
 {
 	struct pci_bus *bus;
 	struct pci_dev *bridge;
@@ -2625,18 +2924,20 @@ int pci_set_vga_state(struct pci_dev *dev, bool decode,
 	WARN_ON(command_bits & ~(PCI_COMMAND_IO|PCI_COMMAND_MEMORY));
 
 	/* ARCH specific VGA enables */
-	rc = pci_set_vga_state_arch(dev, decode, command_bits, change_bridge);
+	rc = pci_set_vga_state_arch(dev, decode, command_bits, flags);
 	if (rc)
 		return rc;
 
-	pci_read_config_word(dev, PCI_COMMAND, &cmd);
-	if (decode == true)
-		cmd |= command_bits;
-	else
-		cmd &= ~command_bits;
-	pci_write_config_word(dev, PCI_COMMAND, cmd);
+	if (flags & PCI_VGA_STATE_CHANGE_DECODES) {
+		pci_read_config_word(dev, PCI_COMMAND, &cmd);
+		if (decode == true)
+			cmd |= command_bits;
+		else
+			cmd &= ~command_bits;
+		pci_write_config_word(dev, PCI_COMMAND, cmd);
+	}
 
-	if (change_bridge == false)
+	if (!(flags & PCI_VGA_STATE_CHANGE_BRIDGE))
 		return 0;
 
 	bus = dev->bus;
@@ -2825,6 +3126,10 @@ static int __init pci_setup(char *str)
 				pci_hotplug_io_size = memparse(str + 9, &str);
 			} else if (!strncmp(str, "hpmemsize=", 10)) {
 				pci_hotplug_mem_size = memparse(str + 10, &str);
+			} else if (!strncmp(str, "nosriov", 7)) {
+				pci_sriov_enabled = 0;
+			} else if (!strncmp(str, "sriov", 5)) {
+				pci_sriov_enabled = 1;
 			} else {
 				printk(KERN_ERR "PCI: Unknown option `%s'\n",
 						str);

@@ -10,6 +10,7 @@
  */
 
 #include <linux/ctype.h>
+#include <linux/edac.h>
 #include <linux/bug.h>
 
 #include "edac_core.h"
@@ -122,19 +123,6 @@ static const char *edac_caps[] = {
 	[EDAC_S8ECD8ED] = "S8ECD8ED",
 	[EDAC_S16ECD16ED] = "S16ECD16ED"
 };
-
-
-
-static ssize_t memctrl_int_store(void *ptr, const char *buffer, size_t count)
-{
-	int *value = (int *)ptr;
-
-	if (isdigit(*buffer))
-		*value = simple_strtoul(buffer, NULL, 0);
-
-	return count;
-}
-
 
 /* EDAC sysfs CSROW data structures and methods
  */
@@ -447,54 +435,53 @@ static ssize_t mci_reset_counters_store(struct mem_ctl_info *mci,
 	return count;
 }
 
-/* memory scrubbing */
+/* Memory scrubbing interface:
+ *
+ * A MC driver can limit the scrubbing bandwidth based on the CPU type.
+ * Therefore, ->set_sdram_scrub_rate should be made to return the actual
+ * bandwidth that is accepted or 0 when scrubbing is to be disabled.
+ *
+ * Negative value still means that an error has occurred while setting
+ * the scrub rate.
+ */
 static ssize_t mci_sdram_scrub_rate_store(struct mem_ctl_info *mci,
-					const char *data, size_t count)
+					  const char *data, size_t count)
 {
-	u32 bandwidth = -1;
+	unsigned long bandwidth = 0;
+	int new_bw = 0;
 
-	if (mci->set_sdram_scrub_rate) {
+	if (!mci->set_sdram_scrub_rate)
+		return -EINVAL;
 
-		memctrl_int_store(&bandwidth, data, count);
+	if (strict_strtoul(data, 10, &bandwidth) < 0)
+		return -EINVAL;
 
-		if (!(*mci->set_sdram_scrub_rate) (mci, &bandwidth)) {
-			edac_printk(KERN_DEBUG, EDAC_MC,
-				"Scrub rate set successfully, applied: %d\n",
-				bandwidth);
-		} else {
-			/* FIXME: error codes maybe? */
-			edac_printk(KERN_DEBUG, EDAC_MC,
-				"Scrub rate set FAILED, could not apply: %d\n",
-				bandwidth);
-		}
-	} else {
-		/* FIXME: produce "not implemented" ERROR for user-side. */
+	new_bw = mci->set_sdram_scrub_rate(mci, bandwidth);
+	if (new_bw < 0) {
 		edac_printk(KERN_WARNING, EDAC_MC,
-			"Memory scrubbing 'set'control is not implemented!\n");
+			    "Error setting scrub rate to: %lu\n", bandwidth);
+		return -EINVAL;
 	}
+
 	return count;
 }
 
+/*
+ * ->get_sdram_scrub_rate() return value semantics same as above.
+ */
 static ssize_t mci_sdram_scrub_rate_show(struct mem_ctl_info *mci, char *data)
 {
-	u32 bandwidth = -1;
+	int bandwidth = 0;
 
-	if (mci->get_sdram_scrub_rate) {
-		if (!(*mci->get_sdram_scrub_rate) (mci, &bandwidth)) {
-			edac_printk(KERN_DEBUG, EDAC_MC,
-				"Scrub rate successfully, fetched: %d\n",
-				bandwidth);
-		} else {
-			/* FIXME: error codes maybe? */
-			edac_printk(KERN_DEBUG, EDAC_MC,
-				"Scrub rate fetch FAILED, got: %d\n",
-				bandwidth);
-		}
-	} else {
-		/* FIXME: produce "not implemented" ERROR for user-side.  */
-		edac_printk(KERN_WARNING, EDAC_MC,
-			"Memory scrubbing 'get' control is not implemented\n");
+	if (!mci->get_sdram_scrub_rate)
+		return -EINVAL;
+
+	bandwidth = mci->get_sdram_scrub_rate(mci);
+	if (bandwidth < 0) {
+		edac_printk(KERN_DEBUG, EDAC_MC, "Error reading scrub rate\n");
+		return bandwidth;
 	}
+
 	return sprintf(data, "%d\n", bandwidth);
 }
 
@@ -1032,13 +1019,13 @@ void edac_remove_sysfs_mci_device(struct mem_ctl_info *mci)
  */
 int edac_sysfs_setup_mc_kset(void)
 {
-	int err = 0;
+	int err = -EINVAL;
 	struct sysdev_class *edac_class;
 
 	debugf1("%s()\n", __func__);
 
 	/* get the /sys/devices/system/edac class reference */
-	edac_class = edac_get_edac_class();
+	edac_class = edac_get_sysfs_class();
 	if (edac_class == NULL) {
 		debugf1("%s() no edac_class error=%d\n", __func__, err);
 		goto fail_out;
@@ -1049,15 +1036,16 @@ int edac_sysfs_setup_mc_kset(void)
 	if (!mc_kset) {
 		err = -ENOMEM;
 		debugf1("%s() Failed to register '.../edac/mc'\n", __func__);
-		goto fail_out;
+		goto fail_kset;
 	}
 
 	debugf1("%s() Registered '.../edac/mc' kobject\n", __func__);
 
 	return 0;
 
+fail_kset:
+	edac_put_sysfs_class();
 
-	/* error unwind stack */
 fail_out:
 	return err;
 }
@@ -1070,5 +1058,6 @@ fail_out:
 void edac_sysfs_teardown_mc_kset(void)
 {
 	kset_unregister(mc_kset);
+	edac_put_sysfs_class();
 }
 

@@ -174,9 +174,14 @@ static struct resource bss_resource = {
 #ifdef CONFIG_X86_32
 /* cpu data as detected by the assembly code in head.S */
 struct cpuinfo_x86 new_cpu_data __cpuinitdata = {0, 0, 0, 0, -1, 1, 0, 0, -1};
+struct cpuinfo_x86_rh new_cpu_data_rh __cpuinitdata;
 /* common cpu data for all cpus */
 struct cpuinfo_x86 boot_cpu_data __read_mostly = {0, 0, 0, 0, -1, 1, 0, 0, -1};
+/* This symbol should not be on kabi whitelists */
+struct cpuinfo_x86_rh boot_cpu_data_rh;
 EXPORT_SYMBOL(boot_cpu_data);
+EXPORT_SYMBOL(boot_cpu_data_rh);
+
 static void set_mca_bus(int x)
 {
 #ifdef CONFIG_MCA
@@ -206,7 +211,10 @@ struct ist_info ist_info;
 struct cpuinfo_x86 boot_cpu_data __read_mostly = {
 	.x86_phys_bits = MAX_PHYSMEM_BITS,
 };
+/* This symbol should not be on kabi whitelists */
+struct cpuinfo_x86_rh boot_cpu_data_rh __read_mostly;
 EXPORT_SYMBOL(boot_cpu_data);
+EXPORT_SYMBOL(boot_cpu_data_rh);
 #endif
 
 
@@ -305,6 +313,20 @@ static void __init reserve_brk(void)
 	/* Mark brk area as locked down and no longer taking any
 	   new allocations */
 	_brk_start = 0;
+}
+
+static unsigned long __init reserve_log_buf(unsigned long len)
+{
+	unsigned long end_of_lowmem = max_low_pfn_mapped << PAGE_SHIFT;
+	unsigned long addr = end_of_lowmem - len;
+	unsigned long mem;
+
+	mem = find_e820_area(addr, end_of_lowmem, len, PAGE_SIZE);
+	if (mem == -1ULL)
+		return 0ULL;
+
+	reserve_early(mem, mem + len, "LOG BUF");
+	return mem;
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -961,6 +983,8 @@ void __init setup_arch(char **cmdline_p)
 	if (init_ohci1394_dma_early)
 		init_ohci1394_dma_on_all_controllers();
 #endif
+	/* Allocate bigger log buffer as early as possible */
+	setup_log_buf(reserve_log_buf);
 
 	reserve_initrd();
 
@@ -996,6 +1020,13 @@ void __init setup_arch(char **cmdline_p)
 	find_smp_config();
 
 	reserve_ibft_region();
+
+	/*
+	 * The EFI specification says that boot service code won't be called
+	 * after ExitBootServices(). This is, in fact, a lie.
+	 */
+	if (efi_enabled)
+		efi_reserve_boot_services();
 
 	reserve_crashkernel();
 

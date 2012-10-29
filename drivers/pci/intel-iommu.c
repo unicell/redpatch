@@ -46,6 +46,8 @@
 #define ROOT_SIZE		VTD_PAGE_SIZE
 #define CONTEXT_SIZE		VTD_PAGE_SIZE
 
+#define IS_BRIDGE_HOST_DEVICE(pdev) \
+			    ((pdev->class >> 8) == PCI_CLASS_BRIDGE_HOST)
 #define IS_GFX_DEVICE(pdev) ((pdev->class >> 16) == PCI_BASE_CLASS_DISPLAY)
 #define IS_ISA_DEVICE(pdev) ((pdev->class >> 8) == PCI_CLASS_BRIDGE_ISA)
 #define IS_AZALIA(pdev) ((pdev)->vendor == 0x8086 && (pdev)->device == 0x3a3e)
@@ -343,6 +345,9 @@ static int dmar_map_gfx = 1;
 static int dmar_forcedac;
 static int intel_iommu_strict;
 
+int intel_iommu_gfx_mapped;
+EXPORT_SYMBOL_GPL(intel_iommu_gfx_mapped);
+
 #define DUMMY_DEVICE_DOMAIN_INFO ((struct device_domain_info *)(-1))
 static DEFINE_SPINLOCK(device_domain_lock);
 static LIST_HEAD(device_domain_list);
@@ -372,6 +377,11 @@ static int __init intel_iommu_setup(char *str)
 			printk(KERN_INFO
 				"Intel-IOMMU: disable batched IOTLB flush\n");
 			intel_iommu_strict = 1;
+		} else if (!strncmp(str, "pt64", 6)) {
+			pr_info("Intel-IOMMU: enable 64bit passthrough mode, "
+				"disable Forcing DAC for PCI devices\n");
+			iommu_pass_through = 1;
+			dmar_forcedac = 0;
 		}
 
 		str += strcspn(str, ",");
@@ -2132,10 +2142,10 @@ static int identity_mapping(struct pci_dev *pdev)
 	if (likely(!iommu_identity_mapping))
 		return 0;
 
+	info = pdev->dev.archdata.iommu;
+	if (info && info != DUMMY_DEVICE_DOMAIN_INFO)
+		return (info->domain == si_domain);
 
-	list_for_each_entry(info, &si_domain->devices, link)
-		if (info->dev == pdev)
-			return 1;
 	return 0;
 }
 
@@ -2213,8 +2223,19 @@ static int iommu_should_identity_map(struct pci_dev *pdev, int startup)
 	 * Assume that they will -- if they turn out not to be, then we can 
 	 * take them out of the 1:1 domain later.
 	 */
-	if (!startup)
-		return pdev->dma_mask > DMA_BIT_MASK(32);
+	if (!startup) {
+		/*
+		 * If the device's dma_mask is less than the system's memory
+		 * size then this is not a candidate for identity mapping.
+		 */
+		u64 dma_mask = pdev->dma_mask;
+
+		if (pdev->dev.coherent_dma_mask &&
+		    pdev->dev.coherent_dma_mask < dma_mask)
+			dma_mask = pdev->dev.coherent_dma_mask;
+
+		return dma_mask >= dma_get_required_mask(&pdev->dev);
+	}
 
 	return 1;
 }
@@ -2229,6 +2250,9 @@ static int __init iommu_prepare_static_identity_mapping(int hw)
 		return -EFAULT;
 
 	for_each_pci_dev(pdev) {
+		/* Skip Host/PCI Bridge devices */
+		if (IS_BRIDGE_HOST_DEVICE(pdev))
+			continue;
 		if (iommu_should_identity_map(pdev, 1)) {
 			printk(KERN_INFO "IOMMU: %s identity mapping for device %s\n",
 			       hw ? "hardware" : "software", pci_name(pdev));
@@ -2609,8 +2633,7 @@ static dma_addr_t __intel_map_single(struct device *hwdev, phys_addr_t paddr,
 	iommu = domain_get_iommu(domain);
 	size = aligned_nrpages(paddr, size);
 
-	iova = intel_alloc_iova(hwdev, domain, dma_to_mm_pfn(size),
-				pdev->dma_mask);
+	iova = intel_alloc_iova(hwdev, domain, dma_to_mm_pfn(size), dma_mask);
 	if (!iova)
 		goto error;
 
@@ -3091,9 +3114,6 @@ static void __init init_no_remapping_devices(void)
 		}
 	}
 
-	if (dmar_map_gfx)
-		return;
-
 	for_each_drhd_unit(drhd) {
 		int i;
 		if (drhd->ignored || drhd->include_all)
@@ -3108,11 +3128,15 @@ static void __init init_no_remapping_devices(void)
 			continue;
 
 		/* bypass IOMMU if it is just for gfx devices */
-		drhd->ignored = 1;
-		for (i = 0; i < drhd->devices_cnt; i++) {
-			if (!drhd->devices[i])
-				continue;
-			drhd->devices[i]->dev.archdata.iommu = DUMMY_DEVICE_DOMAIN_INFO;
+		if (dmar_map_gfx) {
+			intel_iommu_gfx_mapped = 1;
+		} else {
+			drhd->ignored = 1;
+			for (i = 0; i < drhd->devices_cnt; i++) {
+				if (!drhd->devices[i])
+					continue;
+				drhd->devices[i]->dev.archdata.iommu = DUMMY_DEVICE_DOMAIN_INFO;
+			}
 		}
 	}
 }
@@ -3398,8 +3422,8 @@ static void domain_remove_one_dev_info(struct dmar_domain *domain,
 	spin_lock_irqsave(&device_domain_lock, flags);
 	list_for_each_safe(entry, tmp, &domain->devices) {
 		info = list_entry(entry, struct device_domain_info, link);
-		/* No need to compare PCI domain; it has to be the same */
-		if (info->bus == pdev->bus->number &&
+		if (info->segment == pci_domain_nr(pdev->bus) &&
+		    info->bus == pdev->bus->number &&
 		    info->devfn == pdev->devfn) {
 			list_del(&info->link);
 			list_del(&info->global);
@@ -3813,7 +3837,11 @@ static void __devinit quirk_calpella_no_shadow_gtt(struct pci_dev *dev)
 	if (!(ggc & GGC_MEMORY_VT_ENABLED)) {
 		printk(KERN_INFO "DMAR: BIOS has allocated no shadow GTT; disabling IOMMU for graphics\n");
 		dmar_map_gfx = 0;
-	}
+	} else if (dmar_map_gfx) {
+		/* we have to ensure the gfx device is idle before we flush */
+		printk(KERN_INFO "DMAR: Disabling batched IOTLB flush on Ironlake\n");
+		intel_iommu_strict = 1;
+       }
 }
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0040, quirk_calpella_no_shadow_gtt);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0044, quirk_calpella_no_shadow_gtt);

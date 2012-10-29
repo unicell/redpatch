@@ -118,7 +118,7 @@ void blk_set_default_limits(struct queue_limits *lim)
 	lim->discard_granularity = 0;
 	lim->discard_alignment = 0;
 	lim->discard_misaligned = 0;
-	lim->discard_zeroes_data = -1;
+	lim->discard_zeroes_data = 1;
 	lim->logical_block_size = lim->physical_block_size = lim->io_min = 512;
 	lim->bounce_pfn = (unsigned long)(BLK_BOUNCE_ANY >> PAGE_SHIFT);
 	lim->alignment_offset = 0;
@@ -172,13 +172,7 @@ void blk_queue_make_request(struct request_queue *q, make_request_fn *mfn)
 
 	blk_set_default_limits(&q->limits);
 	blk_queue_max_hw_sectors(q, BLK_SAFE_MAX_SECTORS);
-
-	/*
-	 * If the caller didn't supply a lock, fall back to our embedded
-	 * per-queue locks
-	 */
-	if (!q->queue_lock)
-		q->queue_lock = &q->__queue_lock;
+	q->limits.discard_zeroes_data = 0;
 
 	/*
 	 * by default assume old behaviour and bounce for any highmem page
@@ -467,11 +461,6 @@ void blk_queue_io_opt(struct request_queue *q, unsigned int opt)
 	blk_limits_io_opt(&q->limits, opt);
 }
 EXPORT_SYMBOL(blk_queue_io_opt);
-
-/*
- * Returns the minimum that is _not_ zero, unless both are zero.
- */
-#define min_not_zero(l, r) (l == 0) ? r : ((r == 0) ? l : min(l, r))
 
 /**
  * blk_queue_stack_limits - inherit underlying queue limits for stacked drivers
@@ -879,6 +868,12 @@ int blk_queue_ordered(struct request_queue *q, unsigned ordered,
 	return 0;
 }
 EXPORT_SYMBOL(blk_queue_ordered);
+
+void blk_queue_flush_queueable(struct request_queue *q, bool queueable)
+{
+	q->flush_not_queueable = !queueable;
+}
+EXPORT_SYMBOL_GPL(blk_queue_flush_queueable);
 
 static int __init blk_settings_init(void)
 {

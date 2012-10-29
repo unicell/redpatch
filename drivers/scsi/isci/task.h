@@ -52,14 +52,13 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
-#if !defined(_ISCI_TASK_H_)
+#ifndef _ISCI_TASK_H_
 #define _ISCI_TASK_H_
 
 #include <scsi/sas_ata.h>
+#include "host.h"
 
 struct isci_request;
-struct isci_host;
 
 /**
  * enum isci_tmf_cb_state - This enum defines the possible states in which the
@@ -99,16 +98,15 @@ struct isci_tmf {
 	struct completion *complete;
 	enum sas_protocol proto;
 	union {
-		struct sci_ssp_response_iu resp_iu;
+		struct ssp_response_iu resp_iu;
 		struct dev_to_host_fis d2h_fis;
-	}                            resp;
+		u8 rsp_buf[SSP_RESP_IU_MAX_SIZE];
+	} resp;
 	unsigned char lun[8];
 	u16 io_tag;
 	struct isci_remote_device *device;
 	enum isci_tmf_function_codes tmf_code;
 	int status;
-
-	struct isci_timer *timeout_timer;
 
 	/* The optional callback function allows the user process to
 	 * track the TMF transmit / timeout conditions.
@@ -120,8 +118,7 @@ struct isci_tmf {
 
 };
 
-static inline void isci_print_tmf(
-	struct isci_tmf *tmf)
+static inline void isci_print_tmf(struct isci_tmf *tmf)
 {
 	if (SAS_PROTOCOL_SATA == tmf->proto)
 		dev_dbg(&tmf->device->isci_port->isci_host->pdev->dev,
@@ -144,16 +141,13 @@ static inline void isci_print_tmf(
 			"tmf->resp.resp_iu.data[3] = %x\n",
 			__func__,
 			tmf->status,
-			tmf->resp.resp_iu.data_present,
+			tmf->resp.resp_iu.datapres,
 			tmf->resp.resp_iu.status,
-			(tmf->resp.resp_iu.response_data_length[0] << 24) +
-			(tmf->resp.resp_iu.response_data_length[1] << 16) +
-			(tmf->resp.resp_iu.response_data_length[2] << 8) +
-			tmf->resp.resp_iu.response_data_length[3],
-			tmf->resp.resp_iu.data[0],
-			tmf->resp.resp_iu.data[1],
-			tmf->resp.resp_iu.data[2],
-			tmf->resp.resp_iu.data[3]);
+			be32_to_cpu(tmf->resp.resp_iu.response_data_len),
+			tmf->resp.resp_iu.resp_data[0],
+			tmf->resp.resp_iu.resp_data[1],
+			tmf->resp.resp_iu.resp_data[2],
+			tmf->resp.resp_iu.resp_data[3]);
 }
 
 
@@ -216,21 +210,6 @@ int isci_queuecommand(
 	void (*donefunc)(struct scsi_cmnd *));
 
 int isci_bus_reset_handler(struct scsi_cmnd *cmd);
-
-void isci_task_build_tmf(
-	struct isci_tmf *tmf,
-	struct isci_remote_device *isci_device,
-	enum isci_tmf_function_codes code,
-	void (*tmf_sent_cb)(enum isci_tmf_cb_state,
-			    struct isci_tmf *,
-			    void *),
-	void *cb_data);
-
-
-int isci_task_execute_tmf(
-	struct isci_host *isci_host,
-	struct isci_tmf *tmf,
-	unsigned long timeout_ms);
 
 /**
  * enum isci_completion_selection - This enum defines the possible actions to
@@ -307,7 +286,47 @@ isci_task_set_completion_status(
 	task->task_status.resp = response;
 	task->task_status.stat = status;
 
+	switch (task->task_proto) {
+
+	case SAS_PROTOCOL_SATA:
+	case SAS_PROTOCOL_STP:
+	case SAS_PROTOCOL_SATA | SAS_PROTOCOL_STP:
+
+		if (task_notification_selection
+		    == isci_perform_error_io_completion) {
+			/* SATA/STP I/O has it's own means of scheduling device
+			* error handling on the normal path.
+			*/
+			task_notification_selection
+				= isci_perform_normal_io_completion;
+		}
+		break;
+	default:
+		break;
+	}
+
 	switch (task_notification_selection) {
+
+	case isci_perform_error_io_completion:
+
+		if (task->task_proto == SAS_PROTOCOL_SMP) {
+			/* There is no error escalation in the SMP case.
+			 * Convert to a normal completion to avoid the
+			 * timeout in the discovery path and to let the
+			 * next action take place quickly.
+			 */
+			task_notification_selection
+				= isci_perform_normal_io_completion;
+
+			/* Fall through to the normal case... */
+		} else {
+			/* Use sas_task_abort */
+			/* Leave SAS_TASK_STATE_DONE clear
+			 * Leave SAS_TASK_AT_INITIATOR set.
+			 */
+			break;
+		}
+
 	case isci_perform_aborted_io_completion:
 		/* This path can occur with task-managed requests as well as
 		 * requests terminated because of LUN or device resets.
@@ -320,12 +339,6 @@ isci_task_set_completion_status(
 	default:
 		WARN_ONCE(1, "unknown task_notification_selection: %d\n",
 			 task_notification_selection);
-		/* Fall through to the error case... */
-	case isci_perform_error_io_completion:
-		/* Use sas_task_abort */
-		/* Leave SAS_TASK_STATE_DONE clear
-		 * Leave SAS_TASK_AT_INITIATOR set.
-		 */
 		break;
 	}
 
@@ -348,26 +361,26 @@ isci_task_set_completion_status(
 * @status: This parameter is the status code for the completed task.
 *
 */
-static inline void isci_execpath_callback(
-	struct isci_host *ihost,
-	struct sas_task  *task,
-	void (*func)(struct sas_task *))
+static inline void isci_execpath_callback(struct isci_host *ihost,
+					  struct sas_task  *task,
+					  void (*func)(struct sas_task *))
 {
-	unsigned long flags;
+	struct domain_device *dev = task->dev;
 
-	if (dev_is_sata(task->dev) && task->uldd_task) {
+	if (dev_is_sata(dev) && task->uldd_task) {
+		unsigned long flags;
+
 		/* Since we are still in the submit path, and since
-		* libsas takes the host lock on behalf of SATA
-		* devices before I/O starts (in the non-discovery case),
-		* we need to unlock before we can call the callback function.
-		*/
+		 * libsas takes the host lock on behalf of SATA
+		 * devices before I/O starts (in the non-discovery case),
+		 * we need to unlock before we can call the callback function.
+		 */
 		raw_local_irq_save(flags);
-		spin_unlock(ihost->shost->host_lock);
+		spin_unlock(dev->sata_dev.ap->lock);
 		func(task);
-		spin_lock(ihost->shost->host_lock);
+		spin_lock(dev->sata_dev.ap->lock);
 		raw_local_irq_restore(flags);
 	} else
 		func(task);
 }
-
 #endif /* !defined(_SCI_TASK_H_) */

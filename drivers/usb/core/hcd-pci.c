@@ -217,10 +217,16 @@ static int check_root_hub_suspended(struct device *dev)
 	struct pci_dev		*pci_dev = to_pci_dev(dev);
 	struct usb_hcd		*hcd = pci_get_drvdata(pci_dev);
 
-	if (!(hcd->state == HC_STATE_SUSPENDED ||
-			hcd->state == HC_STATE_HALT)) {
+	if (HCD_RH_RUNNING(hcd)) {
 		dev_warn(dev, "Root hub is not suspended\n");
 		return -EBUSY;
+	}
+	if (hcd->shared_hcd) {
+		hcd = hcd->shared_hcd;
+		if (HCD_RH_RUNNING(hcd)) {
+			dev_warn(dev, "Secondary root hub is not suspended\n");
+			return -EBUSY;
+		}
 	}
 	return 0;
 }
@@ -244,7 +250,7 @@ static int hcd_pci_suspend(struct device *dev)
 	if (pci_dev->current_state != PCI_D0)
 		return retval;
 
-	if (hcd->driver->pci_suspend) {
+	if (hcd->driver->pci_suspend && !HCD_DEAD(hcd)) {
 		retval = hcd->driver->pci_suspend(hcd);
 		suspend_report_result(hcd->driver->pci_suspend, retval);
 		if (retval)
@@ -279,10 +285,11 @@ static int hcd_pci_suspend_noirq(struct device *dev)
 
 	pci_save_state(pci_dev);
 
-	/* If the root hub is HALTed rather than SUSPENDed,
-	 * disallow remote wakeup.
+	/* If the root hub is dead rather than suspended, disallow remote
+	 * wakeup.  usb_hc_died() should ensure that both hosts are marked as
+	 * dying, so we only need to check the primary roothub.
 	 */
-	if (hcd->state == HC_STATE_HALT)
+	if (HCD_DEAD(hcd))
 		device_set_wakeup_enable(dev, 0);
 	dev_dbg(dev, "wakeup: %d\n", device_may_wakeup(dev));
 
@@ -341,7 +348,9 @@ static int resume_common(struct device *dev, bool hibernated)
 	struct usb_hcd		*hcd = pci_get_drvdata(pci_dev);
 	int			retval;
 
-	if (hcd->state != HC_STATE_SUSPENDED) {
+	if (HCD_RH_RUNNING(hcd) ||
+			(hcd->shared_hcd &&
+			 HCD_RH_RUNNING(hcd->shared_hcd))) {
 		dev_dbg(dev, "can't resume, not suspended!\n");
 		return 0;
 	}
@@ -355,11 +364,15 @@ static int resume_common(struct device *dev, bool hibernated)
 	pci_set_master(pci_dev);
 
 	clear_bit(HCD_FLAG_SAW_IRQ, &hcd->flags);
+	if (hcd->shared_hcd)
+		clear_bit(HCD_FLAG_SAW_IRQ, &hcd->shared_hcd->flags);
 
-	if (hcd->driver->pci_resume) {
+	if (hcd->driver->pci_resume && !HCD_DEAD(hcd)) {
 		retval = hcd->driver->pci_resume(hcd, hibernated);
 		if (retval) {
 			dev_err(dev, "PCI post-resume error %d!\n", retval);
+			if (hcd->shared_hcd)
+				usb_hc_died(hcd->shared_hcd);
 			usb_hc_died(hcd);
 		}
 	}

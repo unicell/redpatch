@@ -4,7 +4,8 @@ SUBLEVEL = 32
 EXTRAVERSION =
 NAME = Man-Eating Seals of Antiquity
 RHEL_MAJOR = 6
-RHEL_MINOR = 1
+RHEL_MINOR = 2
+RHEL_RELEASE = 219
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
@@ -369,8 +370,7 @@ CPP_VERS        := $(shell expr $(CPP_MAJOR) \* 1000000 + $(CPP_MINOR) \* 1000 \
 ifeq ($(KBUILD_EXTMOD),)
 KBUILD_CFLAGS   += $(shell if [ $(CPP_VERS) -ge 4004004 ]; then \
 		   echo "-Wno-array-bounds"; else echo ""; fi)
-# enable -Werror on RHEL6 only for in tree modules
-KBUILD_CFLAGS   += $(shell if [ ! -z "$(shell cat /etc/redhat-release |grep Santiago)" ] ; then \
+KBUILD_CFLAGS   += $(shell if [ $(CPP_MAJOR) -eq 4 -a $(CPP_MINOR) -eq 4  ] ; then \
 		   echo "-Werror"; else echo ""; fi)
 endif ##($(KBUILD_EXTMOD),)
 endif #(,$(filter $(ARCH), i386 x86_64))
@@ -566,6 +566,10 @@ ifndef CONFIG_CC_STACKPROTECTOR
 KBUILD_CFLAGS += $(call cc-option, -fno-stack-protector)
 endif
 
+# This warning generated too much noise in a regular build.
+# Use make W=1 to enable this warning (see scripts/Makefile.build)
+KBUILD_CFLAGS += $(call cc-disable-warning, unused-but-set-variable)
+
 ifdef CONFIG_FRAME_POINTER
 KBUILD_CFLAGS	+= -fno-omit-frame-pointer -fno-optimize-sibling-calls
 else
@@ -594,7 +598,7 @@ CHECKFLAGS     += $(NOSTDINC_FLAGS)
 KBUILD_CFLAGS += $(call cc-option,-Wdeclaration-after-statement,)
 
 # disable pointer signed / unsigned warnings in gcc 4.0
-KBUILD_CFLAGS += $(call cc-option,-Wno-pointer-sign,)
+KBUILD_CFLAGS += $(call cc-disable-warning, pointer-sign)
 
 # disable invalid "can't wrap" optimizations for signed / pointers
 KBUILD_CFLAGS	+= $(call cc-option,-fno-strict-overflow)
@@ -1077,7 +1081,8 @@ define filechk_version.h
 	echo '#define RHEL_MINOR $(RHEL_MINOR)'; \
 	echo '#define RHEL_RELEASE_VERSION(a,b) (((a) << 8) + (b))'; \
 	echo '#define RHEL_RELEASE_CODE \
-		$(shell expr $(RHEL_MAJOR) \* 256 + $(RHEL_MINOR))';)
+		$(shell expr $(RHEL_MAJOR) \* 256 + $(RHEL_MINOR))'; \
+	echo '#define RHEL_RELEASE "$(RHEL_RELEASE)"';)
 endef
 
 include/linux/version.h: $(srctree)/Makefile FORCE

@@ -124,6 +124,7 @@ static s32 e1000_set_phy_type(struct e1000_hw *hw)
 	case M88E1000_I_PHY_ID:
 	case M88E1011_I_PHY_ID:
 	case M88E1111_I_PHY_ID:
+	case M88E1118_E_PHY_ID:
 		hw->phy_type = e1000_phy_m88;
 		break;
 	case IGP01E1000_I_PHY_ID:
@@ -3079,7 +3080,6 @@ s32 e1000_phy_hw_reset(struct e1000_hw *hw)
 {
 	u32 ctrl, ctrl_ext;
 	u32 led_ctrl;
-	s32 ret_val;
 
 	e_dbg("e1000_phy_hw_reset");
 
@@ -3125,11 +3125,7 @@ s32 e1000_phy_hw_reset(struct e1000_hw *hw)
 	}
 
 	/* Wait for FW to finish PHY configuration. */
-	ret_val = e1000_get_phy_cfg_done(hw);
-	if (ret_val != E1000_SUCCESS)
-		return ret_val;
-
-	return ret_val;
+	return e1000_get_phy_cfg_done(hw);
 }
 
 /**
@@ -3222,7 +3218,8 @@ static s32 e1000_detect_gig_phy(struct e1000_hw *hw)
 		break;
 	case e1000_ce4100:
 		if ((hw->phy_id == RTL8211B_PHY_ID) ||
-		    (hw->phy_id == RTL8201N_PHY_ID))
+		    (hw->phy_id == RTL8201N_PHY_ID) ||
+		    (hw->phy_id == M88E1118_E_PHY_ID))
 			match = true;
 		break;
 	case e1000_82541:

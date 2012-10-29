@@ -255,6 +255,25 @@ static inline void squash_the_stupid_serial_number(struct cpuinfo_x86 *c)
 }
 #endif
 
+static int disable_smep __cpuinitdata;
+static __init int setup_disable_smep(char *arg)
+{
+	disable_smep = 1;
+	return 1;
+}
+__setup("nosmep", setup_disable_smep);
+
+static __cpuinit void setup_smep(struct cpuinfo_x86 *c)
+{
+	if (cpu_has(c, X86_FEATURE_SMEP)) {
+		if (unlikely(disable_smep)) {
+			setup_clear_cpu_cap(X86_FEATURE_SMEP);
+			clear_in_cr4(X86_CR4_SMEP);
+		} else
+			set_in_cr4(X86_CR4_SMEP);
+	}
+}
+
 /*
  * Some CPU features depend on higher CPUID levels, which may not always
  * be available due to CPUID level capping or broken virtualization
@@ -264,6 +283,37 @@ struct cpuid_dependent_feature {
 	u32 feature;
 	u32 level;
 };
+
+static const u32
+xen_dangerous_cpuid_features[] = {
+	/* Mask out GBPAGES & RDTSCP for Xen BZ#703055 */
+	X86_FEATURE_GBPAGES,
+	X86_FEATURE_RDTSCP,
+	/* Mask out features masked by BZ#712131 */
+	X86_FEATURE_MWAIT,
+	/* Mask out features masked by BZ#711317 */
+	X86_FEATURE_CONSTANT_TSC,
+	X86_FEATURE_NONSTOP_TSC,
+	0
+};
+
+static void __cpuinit fltr_xen_cpuid_features(struct cpuinfo_x86 *c, bool warn)
+{
+	const u32 *df;
+
+	for (df = xen_dangerous_cpuid_features; *df; df++) {
+		if (!cpu_has(c, *df))
+			continue;
+
+		clear_cpu_cap(c, *df);
+
+		if (!warn)
+			continue;
+
+		pr_warning("CPU: CPU feature %s disabled on xen guest\n",
+				x86_cap_flags[*df]);
+	}
+}
 
 static const struct cpuid_dependent_feature __cpuinitconst
 cpuid_dependent_features[] = {
@@ -302,22 +352,12 @@ static void __cpuinit filter_cpuid_features(struct cpuinfo_x86 *c, bool warn)
 				x86_cap_flags[df->feature], df->level);
 	}
 
-	/* RHEL Xen HVM guests must filter additional features. BZ#703055 */
-	if (xen_cpuid_base() == 0)
-		return;
-
-	if (warn && cpu_has(c, X86_FEATURE_GBPAGES))
-		printk(KERN_WARNING
-		       "CPU: CPU feature %s disabled\n",
-				x86_cap_flags[X86_FEATURE_GBPAGES]);
-
-	if (warn && cpu_has(c, X86_FEATURE_RDTSCP))
-		printk(KERN_WARNING
-		       "CPU: CPU feature %s disabled\n",
-				x86_cap_flags[X86_FEATURE_RDTSCP]);
-
-	clear_cpu_cap(c, X86_FEATURE_GBPAGES);
-	clear_cpu_cap(c, X86_FEATURE_RDTSCP);
+	/*
+	 * RHEL Xen HVM guests must filter out additional not masked
+	 * by old kernel-xen features, to avoid crashes.
+	 */
+	if (xen_cpuid_base() != 0)
+		fltr_xen_cpuid_features(c, warn);
 }
 
 /*
@@ -348,8 +388,8 @@ static const char *__cpuinit table_lookup_model(struct cpuinfo_x86 *c)
 	return NULL;		/* Not found */
 }
 
-__u32 cpu_caps_cleared[NCAPINTS] __cpuinitdata;
-__u32 cpu_caps_set[NCAPINTS] __cpuinitdata;
+__u32 cpu_caps_cleared[RHNCAPINTS] __cpuinitdata;
+__u32 cpu_caps_set[RHNCAPINTS] __cpuinitdata;
 
 void load_percpu_segment(int cpu)
 {
@@ -577,6 +617,17 @@ static void __cpuinit get_cpu_cap(struct cpuinfo_x86 *c)
 		c->x86_capability[4] = excap;
 	}
 
+	/* Additional Intel-defined flags: level 0x00000007 */
+	if (c->cpuid_level >= 0x00000007) {
+		u32 eax, ebx, ecx, edx;
+		struct cpuinfo_x86_rh *rh = &cpu_data_rh(c->cpu_index);
+
+		cpuid_count(0x00000007, 0, &eax, &ebx, &ecx, &edx);
+
+		/* write into "word 9" of the rh extended capability area */
+		rh->x86_capability[9 - NCAPINTS] = ebx;
+	}
+
 	/* AMD-defined flags: level 0x80000001 */
 	xlvl = cpuid_eax(0x80000000);
 	c->extended_cpuid_level = xlvl;
@@ -602,6 +653,9 @@ static void __cpuinit get_cpu_cap(struct cpuinfo_x86 *c)
 	if (c->extended_cpuid_level >= 0x80000007)
 		c->x86_power = cpuid_edx(0x80000007);
 
+
+	if (this_cpu->c_bsp_init)
+		this_cpu->c_bsp_init(c);
 }
 
 static void __cpuinit identify_cpu_without_cpuid(struct cpuinfo_x86 *c)
@@ -641,6 +695,8 @@ static void __cpuinit identify_cpu_without_cpuid(struct cpuinfo_x86 *c)
  */
 static void __init early_identify_cpu(struct cpuinfo_x86 *c)
 {
+	struct cpuinfo_x86_rh *rh = &cpu_data_rh(c->cpu_index);
+
 #ifdef CONFIG_X86_64
 	c->x86_clflush_size = 64;
 	c->x86_phys_bits = 36;
@@ -653,6 +709,7 @@ static void __init early_identify_cpu(struct cpuinfo_x86 *c)
 	c->x86_cache_alignment = c->x86_clflush_size;
 
 	memset(&c->x86_capability, 0, sizeof c->x86_capability);
+	memset(&rh->x86_capability, 0, sizeof rh->x86_capability);
 	c->extended_cpuid_level = 0;
 
 	if (!have_cpuid_p())
@@ -675,6 +732,8 @@ static void __init early_identify_cpu(struct cpuinfo_x86 *c)
 	c->cpu_index = boot_cpu_id;
 #endif
 	filter_cpuid_features(c, false);
+
+	setup_smep(c);
 }
 
 void __init early_cpu_init(void)
@@ -748,6 +807,8 @@ static void __cpuinit generic_identify(struct cpuinfo_x86 *c)
 #endif
 	}
 
+	setup_smep(c);
+
 	get_model_name(c); /* Default name */
 
 	init_scattered_cpuid_features(c);
@@ -760,6 +821,7 @@ static void __cpuinit generic_identify(struct cpuinfo_x86 *c)
 static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 {
 	int i;
+	struct cpuinfo_x86_rh *rh = &cpu_data_rh(c->cpu_index);
 
 	c->loops_per_jiffy = loops_per_jiffy;
 	c->x86_cache_size = -1;
@@ -781,6 +843,7 @@ static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 #endif
 	c->x86_cache_alignment = c->x86_clflush_size;
 	memset(&c->x86_capability, 0, sizeof c->x86_capability);
+	memset(&rh->x86_capability, 0, sizeof rh->x86_capability);
 
 	generic_identify(c);
 
@@ -791,6 +854,10 @@ static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 	for (i = 0; i < NCAPINTS; i++) {
 		c->x86_capability[i] &= ~cpu_caps_cleared[i];
 		c->x86_capability[i] |= cpu_caps_set[i];
+	}
+	for (i = NCAPINTS; i < RHNCAPINTS; i++) {
+		rh->x86_capability[i - NCAPINTS] &= ~cpu_caps_cleared[i];
+		rh->x86_capability[i - NCAPINTS] |= cpu_caps_set[i];
 	}
 
 #ifdef CONFIG_X86_64
@@ -861,6 +928,10 @@ static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 		c->x86_capability[i] &= ~cpu_caps_cleared[i];
 		c->x86_capability[i] |= cpu_caps_set[i];
 	}
+	for (i = NCAPINTS; i < RHNCAPINTS; i++) {
+		rh->x86_capability[i - NCAPINTS] &= ~cpu_caps_cleared[i];
+		rh->x86_capability[i - NCAPINTS] |= cpu_caps_set[i];
+	}
 
 	/*
 	 * On SMP, boot_cpu_data holds the common feature set between
@@ -872,6 +943,9 @@ static void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 		/* AND the already accumulated flags with these */
 		for (i = 0; i < NCAPINTS; i++)
 			boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
+		for (i = 0; i < (RHNCAPINTS - NCAPINTS); i++)
+			boot_cpu_data_rh.x86_capability[i] &=
+							  rh->x86_capability[i];
 	}
 
 #ifdef CONFIG_X86_MCE
@@ -1007,7 +1081,7 @@ static __init int setup_disablecpuid(char *arg)
 {
 	int bit;
 
-	if (get_option(&arg, &bit) && bit < NCAPINTS*32)
+	if (get_option(&arg, &bit) && bit < RHNCAPINTS*32)
 		setup_clear_cpu_cap(bit);
 	else
 		return 0;

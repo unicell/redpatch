@@ -19,6 +19,7 @@
 #include <linux/proc_fs.h>
 #include <linux/if_bonding.h>
 #include <linux/kobject.h>
+#include <linux/cpumask.h>
 #include <linux/in6.h>
 #include "bond_3ad.h"
 #include "bond_alb.h"
@@ -119,6 +120,31 @@ extern struct list_head bond_dev_list;
 		bond_for_each_slave_from(bond, pos, cnt, (bond)->first_slave)
 
 
+#ifdef CONFIG_NET_POLL_CONTROLLER
+extern atomic_t netpoll_block_tx;
+
+static inline void block_netpoll_tx(void)
+{
+	atomic_inc(&netpoll_block_tx);
+}
+
+static inline void unblock_netpoll_tx(void)
+{
+	atomic_dec(&netpoll_block_tx);
+}
+
+static inline int is_netpoll_tx_blocked(struct net_device *dev)
+{
+	if (unlikely(dev->priv_flags & IFF_IN_NETPOLL))
+		return atomic_read(&netpoll_block_tx);
+	return 0;
+}
+#else
+#define block_netpoll_tx()
+#define unblock_netpoll_tx()
+#define is_netpoll_tx_blocked(dev) (0)
+#endif
+
 struct bond_params {
 	int mode;
 	int xmit_policy;
@@ -168,12 +194,12 @@ struct slave {
 	s8     new_link;
 	s8     state;   /* one of BOND_STATE_XXXX */
 	u32    original_flags;
+	u8     duplex;
 	u32    original_mtu;
 	u32    link_failure_count;
-	u8     perm_hwaddr[ETH_ALEN];
-	u16    speed;
-	u8     duplex;
+	u32    speed;
 	u16    queue_id;
+	u8     perm_hwaddr[ETH_ALEN];
 	struct ad_slave_info ad_info; /* HUGE - better to dynamically alloc */
 	struct tlb_slave_info tlb_info;
 };

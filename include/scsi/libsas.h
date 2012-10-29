@@ -141,8 +141,11 @@ struct expander_device {
 	u16    ex_change_count;
 	u16    max_route_indexes;
 	u8     num_phys;
+
+	u8     t2t_supp:1;
 	u8     configuring:1;
 	u8     conf_route_table:1;
+
 	u8     enclosure_logical_id[8];
 
 	struct ex_phy *ex_phy;
@@ -385,6 +388,11 @@ sdev_to_domain_dev(struct scsi_device *sdev) {
 	return starget_to_domain_dev(sdev->sdev_target);
 }
 
+static inline struct ata_device *sas_to_ata_dev(struct domain_device *dev)
+{
+	return &dev->sata_dev.ap->link.device[0];
+}
+
 static inline struct domain_device *
 cmd_to_domain_dev(struct scsi_cmnd *cmd)
 {
@@ -417,6 +425,13 @@ static inline void sas_flush_discovery(struct Scsi_Host *shost)
 	scsi_flush_work(shost);
 }
 
+static inline unsigned int to_sas_gpio_od(int device, int bit)
+{
+	return 3 * device + bit;
+}
+
+int try_test_sas_gpio_gp_bit(unsigned int od, u8 *data, u8 index, u8 count);
+
 /* ---------- Tasks ---------- */
 /*
       service_response |  SAS_TASK_COMPLETE  |  SAS_TASK_UNDELIVERED |
@@ -437,16 +452,7 @@ enum service_response {
 };
 
 enum exec_status {
-	SAM_GOOD         = 0,
-	SAM_CHECK_COND   = 2,
-	SAM_COND_MET     = 4,
-	SAM_BUSY         = 8,
-	SAM_INTERMEDIATE = 0x10,
-	SAM_IM_COND_MET  = 0x12,
-	SAM_RESV_CONFLICT= 0x14,
-	SAM_TASK_SET_FULL= 0x28,
-	SAM_ACA_ACTIVE   = 0x30,
-	SAM_TASK_ABORTED = 0x40,
+	/* The SAM_STAT_.. codes fit in the lower 6 bits */
 
 	SAS_DEV_NO_RESPONSE = 0x80,
 	SAS_DATA_UNDERRUN,
@@ -625,6 +631,7 @@ struct sas_domain_function_template {
 	int (*lldd_clear_aca)(struct domain_device *, u8 *lun);
 	int (*lldd_clear_task_set)(struct domain_device *, u8 *lun);
 	int (*lldd_I_T_nexus_reset)(struct domain_device *);
+	int (*lldd_ata_soft_reset)(struct domain_device *);
 	int (*lldd_lu_reset)(struct domain_device *, u8 *lun);
 	int (*lldd_query_task)(struct sas_task *);
 
@@ -634,6 +641,10 @@ struct sas_domain_function_template {
 
 	/* Phy management */
 	int (*lldd_control_phy)(struct asd_sas_phy *, enum phy_func, void *);
+
+	/* GPIO support */
+	int (*lldd_write_gpio)(struct sas_ha_struct *, u8 reg_type,
+			       u8 reg_index, u8 reg_count, u8 *write_data);
 };
 
 extern int sas_register_ha(struct sas_ha_struct *);

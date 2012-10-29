@@ -149,6 +149,8 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/hardirq.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -1512,7 +1514,7 @@ static int e100_phy_init(struct nic *nic)
 
 static int e100_hw_init(struct nic *nic)
 {
-	int err;
+	int err = 0;
 
 	e100_hw_reset(nic);
 
@@ -1668,7 +1670,8 @@ static void e100_adjust_adaptive_ifs(struct nic *nic, int speed, int duplex)
 static void e100_watchdog(unsigned long data)
 {
 	struct nic *nic = (struct nic *)data;
-	struct ethtool_cmd cmd;
+	struct ethtool_cmd cmd = { .cmd = ETHTOOL_GSET };
+	u32 speed;
 
 	netif_printk(nic, timer, KERN_DEBUG, nic->netdev,
 		     "right now = %ld\n", jiffies);
@@ -1676,10 +1679,11 @@ static void e100_watchdog(unsigned long data)
 	/* mii library handles link maintenance tasks */
 
 	mii_ethtool_gset(&nic->mii, &cmd);
+	speed = ethtool_cmd_speed(&cmd);
 
 	if (mii_link_ok(&nic->mii) && !netif_carrier_ok(nic->netdev)) {
 		netdev_info(nic->netdev, "NIC Link is Up %u Mbps %s Duplex\n",
-			    cmd.speed == SPEED_100 ? 100 : 10,
+			    speed == SPEED_100 ? 100 : 10,
 			    cmd.duplex == DUPLEX_FULL ? "Full" : "Half");
 	} else if (!mii_link_ok(&nic->mii) && netif_carrier_ok(nic->netdev)) {
 		netdev_info(nic->netdev, "NIC Link is Down\n");
@@ -1698,13 +1702,13 @@ static void e100_watchdog(unsigned long data)
 	spin_unlock_irq(&nic->cmd_lock);
 
 	e100_update_stats(nic);
-	e100_adjust_adaptive_ifs(nic, cmd.speed, cmd.duplex);
+	e100_adjust_adaptive_ifs(nic, speed, cmd.duplex);
 
 	if (nic->mac <= mac_82557_D100_C)
 		/* Issue a multicast command to workaround a 557 lock up */
 		e100_set_multicast_list(nic->netdev);
 
-	if (nic->flags & ich && cmd.speed==SPEED_10 && cmd.duplex==DUPLEX_HALF)
+	if (nic->flags & ich && speed == SPEED_10 && cmd.duplex == DUPLEX_HALF)
 		/* Need SW workaround for ICH[x] 10Mbps/half duplex Tx hang. */
 		nic->flags |= ich_10h_workaround;
 	else

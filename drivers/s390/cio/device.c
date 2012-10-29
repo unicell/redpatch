@@ -537,15 +537,24 @@ static ssize_t online_store (struct device *dev, struct device_attribute *attr,
 	int force, ret;
 	unsigned long i;
 
-	if (!dev_fsm_final_state(cdev) &&
-	    cdev->private->state != DEV_STATE_DISCONNECTED)
-		return -EAGAIN;
+	/* Prevent conflict between multiple on-/offline processing requests. */
 	if (atomic_cmpxchg(&cdev->private->onoff, 0, 1) != 0)
 		return -EAGAIN;
+	/* Prevent conflict between internal I/Os and on-/offline processing. */
+	if (!dev_fsm_final_state(cdev) &&
+	    cdev->private->state != DEV_STATE_DISCONNECTED) {
+		ret = -EAGAIN;
+		goto out_onoff;
+	}
+	/* Prevent conflict between pending work and on-/offline processing.*/
+	if (work_pending(&cdev->private->todo_work)) {
+		ret = -EAGAIN;
+		goto out_onoff;
+	}
 
 	if (cdev->drv && !try_module_get(cdev->drv->owner)) {
-		atomic_set(&cdev->private->onoff, 0);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_onoff;
 	}
 	if (!strncmp(buf, "force\n", count)) {
 		force = 1;
@@ -570,6 +579,7 @@ static ssize_t online_store (struct device *dev, struct device_attribute *attr,
 out:
 	if (cdev->drv)
 		module_put(cdev->drv->owner);
+out_onoff:
 	atomic_set(&cdev->private->onoff, 0);
 	return (ret < 0) ? ret : count;
 }
@@ -1146,6 +1156,7 @@ err:
 static int io_subchannel_chp_event(struct subchannel *sch,
 				   struct chp_link *link, int event)
 {
+	struct ccw_device *cdev = sch_get_cdev(sch);
 	int mask;
 
 	mask = chp_ssd_get_mask(&sch->ssd_info, link);
@@ -1155,22 +1166,30 @@ static int io_subchannel_chp_event(struct subchannel *sch,
 	case CHP_VARY_OFF:
 		sch->opm &= ~mask;
 		sch->lpm &= ~mask;
+		if (cdev)
+			cdev->private->path_gone_mask |= mask;
 		io_subchannel_terminate_path(sch, mask);
 		break;
 	case CHP_VARY_ON:
 		sch->opm |= mask;
 		sch->lpm |= mask;
+		if (cdev)
+			cdev->private->path_new_mask |= mask;
 		io_subchannel_verify(sch);
 		break;
 	case CHP_OFFLINE:
 		if (cio_update_schib(sch))
 			return -ENODEV;
+		if (cdev)
+			cdev->private->path_gone_mask |= mask;
 		io_subchannel_terminate_path(sch, mask);
 		break;
 	case CHP_ONLINE:
 		if (cio_update_schib(sch))
 			return -ENODEV;
 		sch->lpm |= mask & sch->opm;
+		if (cdev)
+			cdev->private->path_new_mask |= mask;
 		io_subchannel_verify(sch);
 		break;
 	}
@@ -1295,10 +1314,12 @@ static int purge_fn(struct device *dev, void *data)
 
 	spin_lock_irq(cdev->ccwlock);
 	if (is_blacklisted(id->ssid, id->devno) &&
-	    (cdev->private->state == DEV_STATE_OFFLINE)) {
+	    (cdev->private->state == DEV_STATE_OFFLINE) &&
+	    (atomic_cmpxchg(&cdev->private->onoff, 0, 1) == 0)) {
 		CIO_MSG_EVENT(3, "ccw: purging 0.%x.%04x\n", id->ssid,
 			      id->devno);
 		ccw_device_sched_todo(cdev, CDEV_TODO_UNREG);
+		atomic_set(&cdev->private->onoff, 0);
 	}
 	spin_unlock_irq(cdev->ccwlock);
 	/* Abort loop in case of pending signal. */
@@ -1821,6 +1842,7 @@ static void __ccw_device_pm_restore(struct ccw_device *cdev)
 	 * available again. Kick re-detection.
 	 */
 	cdev->private->flags.resuming = 1;
+	cdev->private->path_new_mask = LPM_ANYPATH;
 	css_schedule_eval(sch->schid);
 	spin_unlock_irq(sch->lock);
 	css_complete_work();

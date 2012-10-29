@@ -41,10 +41,10 @@
 #define MC_PROC_NAME_MAX_LEN	7
 
 #if PAGE_SHIFT < 20
-#define PAGES_TO_MiB( pages )	( ( pages ) >> ( 20 - PAGE_SHIFT ) )
-#define MiB_TO_PAGES(mb)	((mb) >> (20 - PAGE_SHIFT))
+#define PAGES_TO_MiB(pages)	((pages) >> (20 - PAGE_SHIFT))
+#define MiB_TO_PAGES(mb)	((mb) << (20 - PAGE_SHIFT))
 #else				/* PAGE_SHIFT > 20 */
-#define PAGES_TO_MiB( pages )	( ( pages ) << ( PAGE_SHIFT - 20 ) )
+#define PAGES_TO_MiB(pages)	((pages) << (PAGE_SHIFT - 20))
 #define MiB_TO_PAGES(mb)	((mb) >> (PAGE_SHIFT - 20))
 #endif
 
@@ -74,9 +74,10 @@
 #define EDAC_PCI "PCI"
 #define EDAC_DEBUG "DEBUG"
 
+extern const char *edac_mem_types[];
+
 #ifdef CONFIG_EDAC_DEBUG
 extern int edac_debug_level;
-extern const char *edac_mem_types[];
 
 #ifndef CONFIG_EDAC_DEBUG_VERBOSE
 #define edac_debug_printk(level, fmt, arg...)                           \
@@ -395,13 +396,13 @@ struct mem_ctl_info {
 	   internal representation and configures whatever else needs
 	   to be configured.
 	 */
-	int (*set_sdram_scrub_rate) (struct mem_ctl_info * mci, u32 * bw);
+	int (*set_sdram_scrub_rate) (struct mem_ctl_info * mci, u32 bw);
 
 	/* Get the current sdram memory scrub rate from the internal
 	   representation and converts it to the closest matching
 	   bandwith in bytes/sec.
 	 */
-	int (*get_sdram_scrub_rate) (struct mem_ctl_info * mci, u32 * bw);
+	int (*get_sdram_scrub_rate) (struct mem_ctl_info * mci);
 
 
 	/* pointer to edac checking routine */

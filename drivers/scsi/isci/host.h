@@ -52,61 +52,145 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
-
-#if !defined(_SCI_HOST_H_)
+#ifndef _SCI_HOST_H_
 #define _SCI_HOST_H_
 
-#include "phy.h"
-/*#include "task.h"*/
-#include "timers.h"
 #include "remote_device.h"
-#include "scic_remote_device.h"
+#include "phy.h"
+#include "isci.h"
+#include "remote_node_table.h"
+#include "registers.h"
+#include "unsolicited_frame_control.h"
+#include "probe_roms.h"
 
-#define DRV_NAME "isci"
-#define SCI_PCI_BAR_COUNT 2
-#define SCI_NUM_MSI_X_INT 2
-#define SCI_SMU_BAR       0
-#define SCI_SMU_BAR_SIZE  (16*1024)
-#define SCI_SCU_BAR       1
-#define SCI_SCU_BAR_SIZE  (4*1024*1024)
-#define SCI_IO_SPACE_BAR0 2
-#define SCI_IO_SPACE_BAR1 3
-#define ISCI_CAN_QUEUE_VAL 250 /* < SCI_MAX_IO_REQUESTS ? */
-#define SCIC_CONTROLLER_STOP_TIMEOUT 5000
+struct isci_request;
+struct scu_task_context;
 
-struct coherent_memory_info {
-	struct list_head node;
-	dma_addr_t dma_handle;
-	void *vaddr;
-	size_t size;
-	struct sci_physical_memory_descriptor *mde;
+
+/**
+ * struct sci_power_control -
+ *
+ * This structure defines the fields for managing power control for direct
+ * attached disk devices.
+ */
+struct sci_power_control {
+	/**
+	 * This field is set when the power control timer is running and cleared when
+	 * it is not.
+	 */
+	bool timer_started;
+
+	/**
+	 * Timer to control when the directed attached disks can consume power.
+	 */
+	struct sci_timer timer;
+
+	/**
+	 * This field is used to keep track of how many phys are put into the
+	 * requesters field.
+	 */
+	u8 phys_waiting;
+
+	/**
+	 * This field is used to keep track of how many phys have been granted to consume power
+	 */
+	u8 phys_granted_power;
+
+	/**
+	 * This field is an array of phys that we are waiting on. The phys are direct
+	 * mapped into requesters via struct sci_phy.phy_index
+	 */
+	struct isci_phy *requesters[SCI_MAX_PHYS];
+
 };
 
+struct sci_port_configuration_agent;
+typedef void (*port_config_fn)(struct isci_host *,
+			       struct sci_port_configuration_agent *,
+			       struct isci_port *, struct isci_phy *);
+
+struct sci_port_configuration_agent {
+	u16 phy_configured_mask;
+	u16 phy_ready_mask;
+	struct {
+		u8 min_index;
+		u8 max_index;
+	} phy_valid_port_range[SCI_MAX_PHYS];
+	bool timer_pending;
+	port_config_fn link_up_handler;
+	port_config_fn link_down_handler;
+	struct sci_timer	timer;
+};
+
+/**
+ * isci_host - primary host/controller object
+ * @timer: timeout start/stop operations
+ * @device_table: rni (hw remote node index) to remote device lookup table
+ * @available_remote_nodes: rni allocator
+ * @power_control: manage device spin up
+ * @io_request_sequence: generation number for tci's (task contexts)
+ * @task_context_table: hw task context table
+ * @remote_node_context_table: hw remote node context table
+ * @completion_queue: hw-producer driver-consumer communication ring
+ * @completion_queue_get: tracks the driver 'head' of the ring to notify hw
+ * @logical_port_entries: min({driver|silicon}-supported-port-count)
+ * @remote_node_entries: min({driver|silicon}-supported-node-count)
+ * @task_context_entries: min({driver|silicon}-supported-task-count)
+ * @phy_timer: phy startup timer
+ * @invalid_phy_mask: if an invalid_link_up notification is reported a bit for
+ * 		      the phy index is set so further notifications are not
+ * 		      made.  Once the phy reports link up and is made part of a
+ * 		      port then this bit is cleared.
+
+ */
 struct isci_host {
-	struct scic_sds_controller *core_controller;
-	union scic_oem_parameters oem_parameters;
+	struct sci_base_state_machine sm;
+	/* XXX can we time this externally */
+	struct sci_timer timer;
+	/* XXX drop reference module params directly */
+	struct sci_user_parameters user_parameters;
+	/* XXX no need to be a union */
+	struct sci_oem_params oem_parameters;
+	struct sci_port_configuration_agent port_agent;
+	struct isci_remote_device *device_table[SCI_MAX_REMOTE_DEVICES];
+	struct sci_remote_node_table available_remote_nodes;
+	struct sci_power_control power_control;
+	u8 io_request_sequence[SCI_MAX_IO_REQUESTS];
+	struct scu_task_context *task_context_table;
+	dma_addr_t task_context_dma;
+	union scu_remote_node_context *remote_node_context_table;
+	u32 *completion_queue;
+	u32 completion_queue_get;
+	u32 logical_port_entries;
+	u32 remote_node_entries;
+	u32 task_context_entries;
+	struct sci_unsolicited_frame_control uf_control;
+
+	/* phy startup */
+	struct sci_timer phy_timer;
+	/* XXX kill */
+	bool phy_startup_timer_pending;
+	u32 next_phy_to_start;
+	/* XXX convert to unsigned long and use bitops */
+	u8 invalid_phy_mask;
+
+	/* TODO attempt dynamic interrupt coalescing scheme */
+	u16 interrupt_coalesce_number;
+	u32 interrupt_coalesce_timeout;
+	struct smu_registers __iomem *smu_registers;
+	struct scu_registers __iomem *scu_registers;
+
+	u16 tci_head;
+	u16 tci_tail;
+	u16 tci_pool[SCI_MAX_IO_REQUESTS];
 
 	int id; /* unique within a given pci device */
-	struct list_head timers;
-	void *core_ctrl_memory;
-	struct dma_pool *dma_pool;
-	unsigned int dma_pool_alloc_size;
 	struct isci_phy phys[SCI_MAX_PHYS];
-
-	/* isci_ports and sas_ports are implicitly parallel to the
-	 * ports maintained by the core
-	 */
-	struct isci_port isci_ports[SCI_MAX_PORTS];
-	struct asd_sas_port sas_ports[SCI_MAX_PORTS];
+	struct isci_port ports[SCI_MAX_PORTS + 1]; /* includes dummy port */
 	struct sas_ha_struct sas_ha;
 
-	int can_queue;
-	spinlock_t queue_lock;
 	spinlock_t state_lock;
-
 	struct pci_dev *pdev;
-
 	enum isci_status status;
 	#define IHOST_START_PENDING 0
 	#define IHOST_STOP_PENDING 1
@@ -114,22 +198,97 @@ struct isci_host {
 	wait_queue_head_t eventq;
 	struct Scsi_Host *shost;
 	struct tasklet_struct completion_tasklet;
-	struct list_head mdl_struct_list;
 	struct list_head requests_to_complete;
 	struct list_head requests_to_errorback;
 	spinlock_t scic_lock;
-
-	/* careful only access this via idev_by_id */
-	struct isci_remote_device devices[0];
+	struct isci_request *reqs[SCI_MAX_IO_REQUESTS];
+	struct isci_remote_device devices[SCI_MAX_REMOTE_DEVICES];
 };
 
-static inline struct isci_remote_device *idev_by_id(struct isci_host *ihost, int i)
-{
-	void *p = ihost->devices;
+/**
+ * enum sci_controller_states - This enumeration depicts all the states
+ *    for the common controller state machine.
+ */
+enum sci_controller_states {
+	/**
+	 * Simply the initial state for the base controller state machine.
+	 */
+	SCIC_INITIAL = 0,
 
-	return p + i * (sizeof(struct isci_remote_device) +
-			scic_remote_device_get_object_size());
-}
+	/**
+	 * This state indicates that the controller is reset.  The memory for
+	 * the controller is in it's initial state, but the controller requires
+	 * initialization.
+	 * This state is entered from the INITIAL state.
+	 * This state is entered from the RESETTING state.
+	 */
+	SCIC_RESET,
+
+	/**
+	 * This state is typically an action state that indicates the controller
+	 * is in the process of initialization.  In this state no new IO operations
+	 * are permitted.
+	 * This state is entered from the RESET state.
+	 */
+	SCIC_INITIALIZING,
+
+	/**
+	 * This state indicates that the controller has been successfully
+	 * initialized.  In this state no new IO operations are permitted.
+	 * This state is entered from the INITIALIZING state.
+	 */
+	SCIC_INITIALIZED,
+
+	/**
+	 * This state indicates the the controller is in the process of becoming
+	 * ready (i.e. starting).  In this state no new IO operations are permitted.
+	 * This state is entered from the INITIALIZED state.
+	 */
+	SCIC_STARTING,
+
+	/**
+	 * This state indicates the controller is now ready.  Thus, the user
+	 * is able to perform IO operations on the controller.
+	 * This state is entered from the STARTING state.
+	 */
+	SCIC_READY,
+
+	/**
+	 * This state is typically an action state that indicates the controller
+	 * is in the process of resetting.  Thus, the user is unable to perform
+	 * IO operations on the controller.  A reset is considered destructive in
+	 * most cases.
+	 * This state is entered from the READY state.
+	 * This state is entered from the FAILED state.
+	 * This state is entered from the STOPPED state.
+	 */
+	SCIC_RESETTING,
+
+	/**
+	 * This state indicates that the controller is in the process of stopping.
+	 * In this state no new IO operations are permitted, but existing IO
+	 * operations are allowed to complete.
+	 * This state is entered from the READY state.
+	 */
+	SCIC_STOPPING,
+
+	/**
+	 * This state indicates that the controller has successfully been stopped.
+	 * In this state no new IO operations are permitted.
+	 * This state is entered from the STOPPING state.
+	 */
+	SCIC_STOPPED,
+
+	/**
+	 * This state indicates that the controller could not successfully be
+	 * initialized.  In this state no new IO operations are permitted.
+	 * This state is entered from the INITIALIZING state.
+	 * This state is entered from the STARTING state.
+	 * This state is entered from the STOPPING state.
+	 * This state is entered from the RESETTING state.
+	 */
+	SCIC_FAILED,
+};
 
 /**
  * struct isci_pci_info - This class represents the pci function containing the
@@ -154,17 +313,13 @@ static inline struct isci_pci_info *to_pci_info(struct pci_dev *pdev)
 	     id < ARRAY_SIZE(to_pci_info(pdev)->hosts) && ihost; \
 	     ihost = to_pci_info(pdev)->hosts[++id])
 
-static inline
-enum isci_status isci_host_get_state(
-	struct isci_host *isci_host)
+static inline enum isci_status isci_host_get_state(struct isci_host *isci_host)
 {
 	return isci_host->status;
 }
 
-
-static inline void isci_host_change_state(
-	struct isci_host *isci_host,
-	enum isci_status status)
+static inline void isci_host_change_state(struct isci_host *isci_host,
+					  enum isci_status status)
 {
 	unsigned long flags;
 
@@ -177,40 +332,6 @@ static inline void isci_host_change_state(
 	isci_host->status = status;
 	spin_unlock_irqrestore(&isci_host->state_lock, flags);
 
-}
-
-static inline int isci_host_can_queue(
-	struct isci_host *isci_host,
-	int num)
-{
-	int ret = 0;
-	unsigned long flags;
-
-	spin_lock_irqsave(&isci_host->queue_lock, flags);
-	if ((isci_host->can_queue - num) < 0) {
-		dev_dbg(&isci_host->pdev->dev,
-			"%s: isci_host->can_queue = %d\n",
-			__func__,
-			isci_host->can_queue);
-		ret = -SAS_QUEUE_FULL;
-
-	} else
-		isci_host->can_queue -= num;
-
-	spin_unlock_irqrestore(&isci_host->queue_lock, flags);
-
-	return ret;
-}
-
-static inline void isci_host_can_dequeue(
-	struct isci_host *isci_host,
-	int num)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&isci_host->queue_lock, flags);
-	isci_host->can_queue += num;
-	spin_unlock_irqrestore(&isci_host->queue_lock, flags);
 }
 
 static inline void wait_for_start(struct isci_host *ihost)
@@ -238,40 +359,151 @@ static inline struct isci_host *dev_to_ihost(struct domain_device *dev)
 	return dev->port->ha->lldd_ha;
 }
 
+/* we always use protocol engine group zero */
+#define ISCI_PEG 0
+
+/* see sci_controller_io_tag_allocate|free for how seq and tci are built */
+#define ISCI_TAG(seq, tci) (((u16) (seq)) << 12 | tci)
+
+/* these are returned by the hardware, so sanitize them */
+#define ISCI_TAG_SEQ(tag) (((tag) >> 12) & (SCI_MAX_SEQ-1))
+#define ISCI_TAG_TCI(tag) ((tag) & (SCI_MAX_IO_REQUESTS-1))
+
+/* interrupt coalescing baseline: 9 == 3 to 5us interrupt delay per command */
+#define ISCI_COALESCE_BASE 9
+
+/* expander attached sata devices require 3 rnc slots */
+static inline int sci_remote_device_node_count(struct isci_remote_device *idev)
+{
+	struct domain_device *dev = idev->domain_dev;
+
+	if ((dev->dev_type == SATA_DEV || (dev->tproto & SAS_PROTOCOL_STP)) &&
+	    !idev->is_direct_attached)
+		return SCU_STP_REMOTE_NODE_COUNT;
+	return SCU_SSP_REMOTE_NODE_COUNT;
+}
+
 /**
- * isci_host_scan_finished() -
+ * sci_controller_clear_invalid_phy() -
  *
- * This function is one of the SCSI Host Template functions. The SCSI midlayer
- * calls this function during a target scan, approx. once every 10 millisecs.
+ * This macro will clear the bit in the invalid phy mask for this controller
+ * object.  This is used to control messages reported for invalid link up
+ * notifications.
  */
-int isci_host_scan_finished(
-	struct Scsi_Host *,
-	unsigned long);
+#define sci_controller_clear_invalid_phy(controller, phy) \
+	((controller)->invalid_phy_mask &= ~(1 << (phy)->phy_index))
 
+static inline struct device *sciphy_to_dev(struct isci_phy *iphy)
+{
 
-/**
- * isci_host_scan_start() -
- *
- * This function is one of the SCSI Host Template function, called by the SCSI
- * mid layer berfore a target scan begins. The core library controller start
- * routine is called from here.
+	if (!iphy || !iphy->isci_port || !iphy->isci_port->isci_host)
+		return NULL;
+
+	return &iphy->isci_port->isci_host->pdev->dev;
+}
+
+static inline struct device *sciport_to_dev(struct isci_port *iport)
+{
+
+	if (!iport || !iport->isci_host)
+		return NULL;
+
+	return &iport->isci_host->pdev->dev;
+}
+
+static inline struct device *scirdev_to_dev(struct isci_remote_device *idev)
+{
+	if (!idev || !idev->isci_port || !idev->isci_port->isci_host)
+		return NULL;
+
+	return &idev->isci_port->isci_host->pdev->dev;
+}
+
+static inline bool is_a2(struct pci_dev *pdev)
+{
+	if (pdev->revision < 4)
+		return true;
+	return false;
+}
+
+static inline bool is_b0(struct pci_dev *pdev)
+{
+	if (pdev->revision == 4)
+		return true;
+	return false;
+}
+
+static inline bool is_c0(struct pci_dev *pdev)
+{
+	if (pdev->revision >= 5)
+		return true;
+	return false;
+}
+
+/* set hw control for 'activity', even though active enclosures seem to drive
+ * the activity led on their own.  Skip setting FSENG control on 'status' due
+ * to unexpected operation and 'error' due to not being a supported automatic
+ * FSENG output
  */
-void isci_host_scan_start(
-	struct Scsi_Host *);
+#define SGPIO_HW_CONTROL 0x00000443
 
-/**
- * isci_host_start_complete() -
- *
- * This function is called by the core library, through the ISCI Module, to
- * indicate controller start status.
- */
-void isci_host_start_complete(
-	struct isci_host *,
-	enum sci_status);
+static inline int isci_gpio_count(struct isci_host *ihost)
+{
+	return ARRAY_SIZE(ihost->scu_registers->peg0.sgpio.output_data_select);
+}
 
-void isci_host_stop_complete(
-	struct isci_host *isci_host,
-	enum sci_status completion_status);
+void sci_controller_post_request(struct isci_host *ihost,
+				      u32 request);
+void sci_controller_release_frame(struct isci_host *ihost,
+				       u32 frame_index);
+void sci_controller_copy_sata_response(void *response_buffer,
+					    void *frame_header,
+					    void *frame_buffer);
+enum sci_status sci_controller_allocate_remote_node_context(struct isci_host *ihost,
+								 struct isci_remote_device *idev,
+								 u16 *node_id);
+void sci_controller_free_remote_node_context(
+	struct isci_host *ihost,
+	struct isci_remote_device *idev,
+	u16 node_id);
+
+struct isci_request *sci_request_by_tag(struct isci_host *ihost,
+					     u16 io_tag);
+
+void sci_controller_power_control_queue_insert(
+	struct isci_host *ihost,
+	struct isci_phy *iphy);
+
+void sci_controller_power_control_queue_remove(
+	struct isci_host *ihost,
+	struct isci_phy *iphy);
+
+void sci_controller_link_up(
+	struct isci_host *ihost,
+	struct isci_port *iport,
+	struct isci_phy *iphy);
+
+void sci_controller_link_down(
+	struct isci_host *ihost,
+	struct isci_port *iport,
+	struct isci_phy *iphy);
+
+void sci_controller_remote_device_stopped(
+	struct isci_host *ihost,
+	struct isci_remote_device *idev);
+
+void sci_controller_copy_task_context(
+	struct isci_host *ihost,
+	struct isci_request *ireq);
+
+void sci_controller_register_setup(struct isci_host *ihost);
+
+enum sci_status sci_controller_continue_io(struct isci_request *ireq);
+int isci_host_scan_finished(struct Scsi_Host *, unsigned long);
+void isci_host_scan_start(struct Scsi_Host *);
+u16 isci_alloc_tag(struct isci_host *ihost);
+enum sci_status isci_free_tag(struct isci_host *ihost, u16 io_tag);
+void isci_tci_free(struct isci_host *ihost, u16 tci);
 
 int isci_host_init(struct isci_host *);
 
@@ -284,8 +516,8 @@ void isci_host_deinit(
 
 void isci_host_port_link_up(
 	struct isci_host *,
-	struct scic_sds_port *,
-	struct scic_sds_phy *);
+	struct isci_port *,
+	struct isci_phy *);
 int isci_host_dev_found(struct domain_device *);
 
 void isci_host_remote_device_start_complete(
@@ -293,4 +525,36 @@ void isci_host_remote_device_start_complete(
 	struct isci_remote_device *,
 	enum sci_status);
 
-#endif /* !defined(_SCI_HOST_H_) */
+void sci_controller_disable_interrupts(
+	struct isci_host *ihost);
+
+enum sci_status sci_controller_start_io(
+	struct isci_host *ihost,
+	struct isci_remote_device *idev,
+	struct isci_request *ireq);
+
+enum sci_task_status sci_controller_start_task(
+	struct isci_host *ihost,
+	struct isci_remote_device *idev,
+	struct isci_request *ireq);
+
+enum sci_status sci_controller_terminate_request(
+	struct isci_host *ihost,
+	struct isci_remote_device *idev,
+	struct isci_request *ireq);
+
+enum sci_status sci_controller_complete_io(
+	struct isci_host *ihost,
+	struct isci_remote_device *idev,
+	struct isci_request *ireq);
+
+void sci_port_configuration_agent_construct(
+	struct sci_port_configuration_agent *port_agent);
+
+enum sci_status sci_port_configuration_agent_initialize(
+	struct isci_host *ihost,
+	struct sci_port_configuration_agent *port_agent);
+
+int isci_gpio_write(struct sas_ha_struct *, u8 reg_type, u8 reg_index,
+		    u8 reg_count, u8 *write_data);
+#endif

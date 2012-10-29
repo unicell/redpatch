@@ -381,6 +381,7 @@ static void clear_rgrpdi(struct gfs2_sbd *sdp)
 
 		if (gl) {
 			gl->gl_object = NULL;
+			gfs2_glock_add_to_lru(gl);
 			gfs2_glock_put(gl);
 		}
 
@@ -1608,6 +1609,10 @@ void gfs2_free_data(struct gfs2_inode *ip, u64 bstart, u32 blen)
 	gfs2_rgrp_out(rgd, rgd->rd_bits[0].bi_bh->b_data);
 
 	gfs2_trans_add_rg(rgd);
+
+	/* Directories keep their data in the metadata address space */
+	if (ip->i_depth)
+		gfs2_meta_wipe(ip, bstart, blen);
 
 	gfs2_statfs_change(sdp, 0, +blen, 0);
 	gfs2_quota_change(ip, -(s64)blen, ip->i_inode.i_uid, ip->i_inode.i_gid);

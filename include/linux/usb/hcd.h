@@ -76,6 +76,10 @@ struct usb_hcd {
 	struct kref		kref;		/* reference counter */
 
 	const char		*product_desc;	/* product/vendor string */
+	int			speed;		/* Speed for this roothub.
+						 * May be different from
+						 * hcd->driver->flags & HCD_MASK
+						 */
 	char			irq_descr[24];	/* driver + bus # */
 
 	struct timer_list	rh_timer;	/* drives root-hub polling */
@@ -96,6 +100,11 @@ struct usb_hcd {
 #define HCD_FLAG_HW_ACCESSIBLE	1
 #define HCD_FLAG_SAW_IRQ	2
 #define HCD_FLAG_RH_POLLABLE	3
+#define HCD_FLAG_POLL_RH		4	/* poll for rh status? */
+#define HCD_FLAG_POLL_PENDING		5	/* status has changed? */
+#define HCD_FLAG_WAKEUP_PENDING		6	/* root hub is resuming? */
+#define HCD_FLAG_RH_RUNNING		7	/* root hub is running? */
+#define HCD_FLAG_DEAD			8	/* controller has died? */
 
 	/* The flags can be tested using these macros; they are likely to
 	 * be slightly faster than test_bit().
@@ -103,14 +112,18 @@ struct usb_hcd {
 #define HCD_HW_ACCESSIBLE(hcd)	((hcd)->flags & (1U << HCD_FLAG_HW_ACCESSIBLE))
 #define HCD_SAW_IRQ(hcd)	((hcd)->flags & (1U << HCD_FLAG_SAW_IRQ))
 #define HCD_RH_POLLABLE(hcd)	((hcd)->flags & (1U << HCD_FLAG_RH_POLLABLE))
+#define HCD_POLL_RH(hcd)	((hcd)->flags & (1U << HCD_FLAG_POLL_RH))
+#define HCD_POLL_PENDING(hcd)	((hcd)->flags & (1U << HCD_FLAG_POLL_PENDING))
+#define HCD_WAKEUP_PENDING(hcd)	((hcd)->flags & (1U << HCD_FLAG_WAKEUP_PENDING))
+#define HCD_RH_RUNNING(hcd)	((hcd)->flags & (1U << HCD_FLAG_RH_RUNNING))
+#define HCD_DEAD(hcd)		((hcd)->flags & (1U << HCD_FLAG_DEAD))
 
+	/* Flags that get set only during HCD registration or removal. */
 	unsigned		rh_registered:1;/* is root hub registered? */
 
 	/* The next flag is a stopgap, to be removed when all the HCDs
 	 * support the new root-hub polling mechanism. */
 	unsigned		uses_new_polling:1;
-	unsigned		poll_rh:1;	/* poll for rh status? */
-	unsigned		poll_pending:1;	/* status has changed? */
 	unsigned		wireless:1;	/* Wireless USB HCD */
 	unsigned		authorized_default:1;
 	unsigned		has_tt:1;	/* Integrated TT in root hub */
@@ -135,7 +148,9 @@ struct usb_hcd {
 	 * bandwidth_mutex should be dropped after a successful control message
 	 * to the device, or resetting the bandwidth after a failed attempt.
 	 */
-	struct mutex		bandwidth_mutex;
+	struct mutex		*bandwidth_mutex;
+	struct usb_hcd		*shared_hcd;
+	struct usb_hcd		*primary_hcd;
 
 
 #define HCD_BUFFER_POOLS	4
@@ -198,6 +213,7 @@ struct hc_driver {
 	int	flags;
 #define	HCD_MEMORY	0x0001		/* HC regs use memory (else I/O) */
 #define	HCD_LOCAL_MEM	0x0002		/* HC needs local memory */
+#define	HCD_SHARED	0x0004		/* Two (or more) usb_hcds share HW */
 #define	HCD_USB11	0x0010		/* USB 1.1 */
 #define	HCD_USB2	0x0020		/* USB 2.0 */
 #define	HCD_USB3	0x0040		/* USB 3.0 */
@@ -336,8 +352,12 @@ extern int usb_hcd_get_frame_number(struct usb_device *udev);
 
 extern struct usb_hcd *usb_create_hcd(const struct hc_driver *driver,
 		struct device *dev, const char *bus_name);
+extern struct usb_hcd *usb_create_shared_hcd(const struct hc_driver *driver,
+		struct device *dev, const char *bus_name,
+		struct usb_hcd *shared_hcd);
 extern struct usb_hcd *usb_get_hcd(struct usb_hcd *hcd);
 extern void usb_put_hcd(struct usb_hcd *hcd);
+extern int usb_hcd_is_primary_hcd(struct usb_hcd *hcd);
 extern int usb_add_hcd(struct usb_hcd *hcd,
 		unsigned int irqnum, unsigned long irqflags);
 extern void usb_remove_hcd(struct usb_hcd *hcd);
@@ -460,6 +480,10 @@ extern void usb_ep0_reinit(struct usb_device *);
 
 
 /*-------------------------------------------------------------------------*/
+
+/* class requests from USB 3.0 hub spec, table 10-5 */
+#define SetHubDepth		(0x3000 | HUB_SET_DEPTH)
+#define GetPortErrorCount	(0x8000 | HUB_GET_PORT_ERR_COUNT)
 
 /*
  * Generic bandwidth allocation constants/support
@@ -600,13 +624,6 @@ static inline void usbmon_urb_complete(struct usb_bus *bus, struct urb *urb,
 		int status) {}
 
 #endif /* CONFIG_USB_MON || CONFIG_USB_MON_MODULE */
-
-/*-------------------------------------------------------------------------*/
-
-/* hub.h ... DeviceRemovable in 2.4.2-ac11, gone in 2.4.10 */
-/* bleech -- resurfaced in 2.4.11 or 2.4.12 */
-#define bitmap 	DeviceRemovable
-
 
 /*-------------------------------------------------------------------------*/
 

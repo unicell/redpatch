@@ -291,8 +291,16 @@ static int scsi_check_sense(struct scsi_cmnd *scmd)
 		 * so that we can deal with it there.
 		 */
 		if (scmd->device->expecting_cc_ua) {
-			scmd->device->expecting_cc_ua = 0;
-			return NEEDS_RETRY;
+			/*
+			 * Because some device does not queue unit
+			 * attentions correctly, we carefully check
+			 * additional sense code and qualifier so as
+			 * not to squash media change unit attention.
+			 */
+			if (sshdr.asc != 0x28 || sshdr.ascq != 0x00) {
+				scmd->device->expecting_cc_ua = 0;
+				return NEEDS_RETRY;
+			}
 		}
 		/*
 		 * if the device is in the process of becoming ready, we 
@@ -637,12 +645,6 @@ static int __scsi_try_to_abort_cmd(struct scsi_cmnd *scmd)
  */
 static int scsi_try_to_abort_cmd(struct scsi_cmnd *scmd)
 {
-	/*
-	 * scsi_done was called just after the command timed out and before
-	 * we had a chance to process it. (db)
-	 */
-	if (scmd->serial_number == 0)
-		return SUCCESS;
 	return __scsi_try_to_abort_cmd(scmd);
 }
 
@@ -774,17 +776,19 @@ static int scsi_send_eh_cmnd(struct scsi_cmnd *scmd, unsigned char *cmnd,
 	struct Scsi_Host *shost = sdev->host;
 	DECLARE_COMPLETION_ONSTACK(done);
 	unsigned long timeleft;
-	unsigned long flags;
+	unsigned long flags = 0;
 	struct scsi_eh_save ses;
 	int rtn;
 
 	scsi_eh_prep_cmnd(scmd, &ses, cmnd, cmnd_size, sense_bytes);
 	shost->eh_action = &done;
 
-	spin_lock_irqsave(shost->host_lock, flags);
+	if (!shost->hostt->lockless)
+		spin_lock_irqsave(shost->host_lock, flags);
 	scsi_log_send(scmd);
 	shost->hostt->queuecommand(scmd, scsi_eh_done);
-	spin_unlock_irqrestore(shost->host_lock, flags);
+	if (!shost->hostt->lockless)
+		spin_unlock_irqrestore(shost->host_lock, flags);
 
 	timeleft = wait_for_completion_timeout(&done, timeout);
 

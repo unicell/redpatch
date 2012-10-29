@@ -28,19 +28,62 @@
 #include "util.h"
 #include "trans.h"
 
+static void gfs2_ail_error(struct gfs2_glock *gl, const struct buffer_head *bh)
+{
+	fs_err(gl->gl_sbd, "AIL buffer %p: blocknr %llu state 0x%08lx mapping %p page state 0x%lx\n",
+	       bh, (unsigned long long)bh->b_blocknr, bh->b_state,
+	       bh->b_page->mapping, bh->b_page->flags);
+	fs_err(gl->gl_sbd, "AIL glock %u:%llu mapping %p\n",
+	       gl->gl_name.ln_type, gl->gl_name.ln_number,
+	       gfs2_glock2aspace(gl));
+	BUG();
+	/*gfs2_lm_withdraw(gl->gl_sbd, "AIL error\n");*/
+}
+
 /**
- * ail_empty_gl - remove all buffers for a given lock from the AIL
+ * __gfs2_ail_flush - remove all buffers for a given lock from the AIL
  * @gl: the glock
+ * @fsync: set when called from fsync (not all buffers will be clean)
  *
  * None of the buffers should be dirty, locked, or pinned.
  */
 
-static void gfs2_ail_empty_gl(struct gfs2_glock *gl)
+static void __gfs2_ail_flush(struct gfs2_glock *gl, bool fsync)
 {
 	struct gfs2_sbd *sdp = gl->gl_sbd;
 	struct list_head *head = &gl->gl_ail_list;
-	struct gfs2_bufdata *bd;
+	struct gfs2_bufdata *bd, *tmp;
 	struct buffer_head *bh;
+	const unsigned long b_state = (1UL << BH_Dirty)|(1UL << BH_Pinned)|(1UL << BH_Lock);
+	sector_t blocknr;
+
+	gfs2_log_lock(sdp);
+	spin_lock(&sdp->sd_ail_lock);
+	list_for_each_entry_safe(bd, tmp, head, bd_ail_gl_list) {
+		bh = bd->bd_bh;
+		if (bh->b_state & b_state) {
+			if (fsync)
+				continue;
+			gfs2_ail_error(gl, bh);
+		}
+		blocknr = bh->b_blocknr;
+		bh->b_private = NULL;
+		gfs2_remove_from_ail(bd); /* drops ref on bh */
+
+		bd->bd_bh = NULL;
+		bd->bd_blkno = blocknr;
+
+		gfs2_trans_add_revoke(sdp, bd);
+	}
+	BUG_ON(!fsync && atomic_read(&gl->gl_ail_count));
+	spin_unlock(&sdp->sd_ail_lock);
+	gfs2_log_unlock(sdp);
+}
+
+
+static void gfs2_ail_empty_gl(struct gfs2_glock *gl)
+{
+	struct gfs2_sbd *sdp = gl->gl_sbd;
 	struct gfs2_trans tr;
 
 	memset(&tr, 0, sizeof(tr));
@@ -48,7 +91,6 @@ static void gfs2_ail_empty_gl(struct gfs2_glock *gl)
 
 	if (!tr.tr_revokes)
 		return;
-
 	/* A shortened, inline version of gfs2_trans_begin() */
 	tr.tr_reserved = 1 + gfs2_struct2blk(sdp, tr.tr_revokes, sizeof(u64));
 	tr.tr_ip = (unsigned long)__builtin_return_address(0);
@@ -57,21 +99,25 @@ static void gfs2_ail_empty_gl(struct gfs2_glock *gl)
 	BUG_ON(current->journal_info);
 	current->journal_info = &tr;
 
-	gfs2_log_lock(sdp);
-	while (!list_empty(head)) {
-		bd = list_entry(head->next, struct gfs2_bufdata,
-				bd_ail_gl_list);
-		bh = bd->bd_bh;
-		gfs2_remove_from_ail(bd);
-		bd->bd_bh = NULL;
-		bh->b_private = NULL;
-		bd->bd_blkno = bh->b_blocknr;
-		gfs2_assert_withdraw(sdp, !buffer_busy(bh));
-		gfs2_trans_add_revoke(sdp, bd);
-	}
-	gfs2_assert_withdraw(sdp, !atomic_read(&gl->gl_ail_count));
-	gfs2_log_unlock(sdp);
+	__gfs2_ail_flush(gl, 0);
 
+	gfs2_trans_end(sdp);
+	gfs2_log_flush(sdp, NULL);
+}
+
+void gfs2_ail_flush(struct gfs2_glock *gl, bool fsync)
+{
+	struct gfs2_sbd *sdp = gl->gl_sbd;
+	unsigned int revokes = atomic_read(&gl->gl_ail_count);
+	int ret;
+
+	if (!revokes)
+		return;
+
+	ret = gfs2_trans_begin(sdp, 0, revokes);
+	if (ret)
+		return;
+	__gfs2_ail_flush(gl, fsync);
 	gfs2_trans_end(sdp);
 	gfs2_log_flush(sdp, NULL);
 }
@@ -407,7 +453,6 @@ const struct gfs2_glock_operations gfs2_inode_glops = {
 	.go_lock = inode_go_lock,
 	.go_dump = inode_go_dump,
 	.go_type = LM_TYPE_INODE,
-	.go_min_hold_time = HZ / 5,
 	.go_flags = GLOF_ASPACE,
 };
 
@@ -418,7 +463,6 @@ const struct gfs2_glock_operations gfs2_rgrp_glops = {
 	.go_unlock = rgrp_go_unlock,
 	.go_dump = gfs2_rgrp_dump,
 	.go_type = LM_TYPE_RGRP,
-	.go_min_hold_time = HZ / 5,
 	.go_flags = GLOF_ASPACE,
 };
 

@@ -470,6 +470,7 @@ static void tun_net_init(struct net_device *dev)
 		dev->netdev_ops = &tap_netdev_ops;
 		/* Ethernet TAP Device */
 		ether_setup(dev);
+		netdev_extended(dev)->ext_priv_flags &= ~IFF_TX_SKB_SHARING;
 
 		random_ether_addr(dev->dev_addr);
 
@@ -753,6 +754,8 @@ static __inline__ ssize_t tun_put_user(struct tun_struct *tun,
 			gso.flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
 			gso.csum_start = skb->csum_start - skb_headroom(skb);
 			gso.csum_offset = skb->csum_offset;
+		} else if (skb->ip_summed == CHECKSUM_UNNECESSARY) {
+			gso.flags = VIRTIO_NET_HDR_F_DATA_VALID;
 		} /* else everything is zero */
 
 		if (unlikely(memcpy_toiovecend(iv, (void *)&gso, total,
@@ -782,7 +785,8 @@ static ssize_t tun_do_read(struct tun_struct *tun,
 
 	DBG(KERN_INFO "%s: tun_chr_read\n", tun->dev->name);
 
-	add_wait_queue(&tun->socket.wait, &wait);
+	if (unlikely(!noblock))
+		add_wait_queue(&tun->socket.wait, &wait);
 	while (len) {
 		current->state = TASK_INTERRUPTIBLE;
 
@@ -813,7 +817,8 @@ static ssize_t tun_do_read(struct tun_struct *tun,
 	}
 
 	current->state = TASK_RUNNING;
-	remove_wait_queue(&tun->socket.wait, &wait);
+	if (unlikely(!noblock))
+		remove_wait_queue(&tun->socket.wait, &wait);
 
 	return ret;
 }

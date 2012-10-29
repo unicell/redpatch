@@ -17,6 +17,7 @@
 #include <linux/typecheck.h>
 #include <linux/ratelimit.h>
 #include <linux/dynamic_debug.h>
+#include <linux/init.h>
 #include <asm/byteorder.h>
 #include <asm/bug.h>
 
@@ -44,6 +45,16 @@ extern const char linux_proc_banner[];
 #define IS_ALIGNED(x, a)		(((x) & ((typeof(x))(a) - 1)) == 0)
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]) + __must_be_array(arr))
+
+/*
+ * This looks more complex than it should be. But we need to
+ * get the type for the ~ right in round_down (it needs to be
+ * as wide as the result!), and we want to evaluate the macro
+ * arguments just once each.
+ */
+#define __round_mask(x, y) ((__typeof__(x))((y)-1))
+#define round_up(x, y) ((((x)-1) | __round_mask(x, y))+1)
+#define round_down(x, y) ((x) & ~__round_mask(x, y))
 
 #define FIELD_SIZEOF(t, f) (sizeof(((t*)0)->f))
 #define DIV_ROUND_UP(n,d) (((n) + (d) - 1) / (d))
@@ -151,9 +162,22 @@ extern int _cond_resched(void);
 
 #define might_sleep_if(cond) do { if (cond) might_sleep(); } while (0)
 
-#define abs(x) ({				\
-		long __x = (x);			\
-		(__x < 0) ? -__x : __x;		\
+/*
+ * abs() handles unsigned and signed longs, ints, shorts and chars.  For all
+ * input types abs() returns a signed long.
+ * abs() should not be used for 64-bit types (s64, u64, long long) - use abs64()
+ * for those.
+ */
+#define abs(x) ({						\
+		long ret;					\
+		if (sizeof(x) == sizeof(long)) {		\
+			long __x = (x);				\
+			ret = (__x < 0) ? -__x : __x;		\
+		} else {					\
+			int __x = (x);				\
+			ret = (__x < 0) ? -__x : __x;		\
+		}						\
+		ret;						\
 	})
 
 #define abs64(x) ({				\
@@ -169,6 +193,11 @@ static inline void might_fault(void)
 	might_sleep();
 }
 #endif
+
+struct va_format {
+	const char *fmt;
+	va_list *va;
+};
 
 extern struct atomic_notifier_head panic_notifier_list;
 extern long (*panic_blink)(long time);
@@ -266,6 +295,7 @@ extern bool printk_timed_ratelimit(unsigned long *caller_jiffies,
 
 extern int printk_delay_msec;
 extern int dmesg_restrict;
+extern int kptr_restrict;
 
 /*
  * Print a one-time message (analogous to WARN_ONCE() et al):
@@ -299,6 +329,8 @@ static inline void log_buf_kexec_setup(void)
 {
 }
 #endif
+
+void __init setup_log_buf(unsigned long (*alloc_fn)(unsigned long len));
 
 extern int printk_needs_cpu(int cpu);
 extern void printk_tick(void);
@@ -674,6 +706,16 @@ static inline void ftrace_dump(void) { }
 	(void) (&_max1 == &_max3);		\
 	_max1 > _max2 ? (_max1 > _max3 ? _max1 : _max3) : \
 		(_max2 > _max3 ? _max2 : _max3); })
+
+/**
+ * min_not_zero - return the minimum that is _not_ zero, unless both are zero
+ * @x: value1
+ * @y: value2
+ */
+#define min_not_zero(x, y) ({			\
+	typeof(x) __x = (x);			\
+	typeof(y) __y = (y);			\
+	__x == 0 ? __y : ((__y == 0) ? __x : min(__x, __y)); })
 
 /**
  * clamp - return a value clamped to a given range with strict typechecking

@@ -21,6 +21,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/bio.h>
+#include <trace/events/jbd.h>
 
 /*
  * Default IO end handler for temporary BJ_IO buffer_heads.
@@ -204,6 +205,8 @@ write_out_data:
 			if (!trylock_buffer(bh)) {
 				BUFFER_TRACE(bh, "needs blocking lock");
 				spin_unlock(&journal->j_list_lock);
+				trace_jbd_do_submit_data(journal,
+						     commit_transaction);
 				/* Write out all data to prevent deadlocks */
 				journal_do_submit_data(wbuf, bufs, write_op);
 				bufs = 0;
@@ -236,6 +239,8 @@ write_out_data:
 			jbd_unlock_bh_state(bh);
 			if (bufs == journal->j_wbufsize) {
 				spin_unlock(&journal->j_list_lock);
+				trace_jbd_do_submit_data(journal,
+						     commit_transaction);
 				journal_do_submit_data(wbuf, bufs, write_op);
 				bufs = 0;
 				goto write_out_data;
@@ -266,6 +271,7 @@ write_out_data:
 		}
 	}
 	spin_unlock(&journal->j_list_lock);
+	trace_jbd_do_submit_data(journal, commit_transaction);
 	journal_do_submit_data(wbuf, bufs, write_op);
 
 	return err;
@@ -295,7 +301,7 @@ void journal_commit_transaction(journal_t *journal)
 	int first_tag = 0;
 	int tag_flag;
 	int i;
-	int write_op = WRITE_SYNC;
+	int write_op = WRITE_SYNC_PLUG;
 
 	/*
 	 * First job: lock down the current transaction and wait for
@@ -322,19 +328,14 @@ void journal_commit_transaction(journal_t *journal)
 	commit_transaction = journal->j_running_transaction;
 	J_ASSERT(commit_transaction->t_state == T_RUNNING);
 
+	trace_jbd_start_commit(journal, commit_transaction);
 	jbd_debug(1, "JBD: starting commit of transaction %d\n",
 			commit_transaction->t_tid);
 
 	spin_lock(&journal->j_state_lock);
 	commit_transaction->t_state = T_LOCKED;
 
-	/*
-	 * Use plugged writes here, since we want to submit several before
-	 * we unplug the device. We don't do explicit unplugging in here,
-	 * instead we rely on sync_buffer() doing the unplug for us.
-	 */
-	if (commit_transaction->t_synchronous_commit)
-		write_op = WRITE_SYNC_PLUG;
+	trace_jbd_commit_locking(journal, commit_transaction);
 	spin_lock(&commit_transaction->t_handle_lock);
 	while (commit_transaction->t_updates) {
 		DEFINE_WAIT(wait);
@@ -405,6 +406,7 @@ void journal_commit_transaction(journal_t *journal)
 	 */
 	journal_switch_revoke_table(journal);
 
+	trace_jbd_commit_flushing(journal, commit_transaction);
 	commit_transaction->t_state = T_FLUSH;
 	journal->j_committing_transaction = commit_transaction;
 	journal->j_running_transaction = NULL;
@@ -502,6 +504,7 @@ void journal_commit_transaction(journal_t *journal)
 	commit_transaction->t_state = T_COMMIT;
 	spin_unlock(&journal->j_state_lock);
 
+	trace_jbd_commit_logging(journal, commit_transaction);
 	J_ASSERT(commit_transaction->t_nr_buffers <=
 		 commit_transaction->t_outstanding_credits);
 
@@ -723,8 +726,13 @@ wait_for_iobuf:
                    required. */
 		JBUFFER_TRACE(jh, "file as BJ_Forget");
 		journal_file_buffer(jh, commit_transaction, BJ_Forget);
-		/* Wake up any transactions which were waiting for this
-		   IO to complete */
+		/*
+		 * Wake up any transactions which were waiting for this
+		 * IO to complete. The barrier must be here so that changes
+		 * by journal_file_buffer() take effect before wake_up_bit()
+		 * does the waitqueue check.
+		 */
+		smp_mb();
 		wake_up_bit(&bh->b_state, BH_Unshadow);
 		JBUFFER_TRACE(jh, "brelse shadowed buffer");
 		__brelse(bh);
@@ -942,6 +950,7 @@ restart_loop:
 	}
 	spin_unlock(&journal->j_list_lock);
 
+	trace_jbd_end_commit(journal, commit_transaction);
 	jbd_debug(1, "JBD: commit %d complete, head %d\n",
 		  journal->j_commit_sequence, journal->j_tail_sequence);
 

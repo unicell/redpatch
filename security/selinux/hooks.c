@@ -2526,6 +2526,91 @@ out:
 	return rc;
 }
 
+static int selinux_sb_remount(struct super_block *sb, void *data)
+{
+	int rc, i, *flags;
+	struct security_mnt_opts opts;
+	char *secdata, **mount_options;
+	struct superblock_security_struct *sbsec = sb->s_security;
+
+	if (!(sbsec->flags & SE_SBINITIALIZED))
+		return 0;
+
+	if (!data)
+		return 0;
+
+	if (sb->s_type->fs_flags & FS_BINARY_MOUNTDATA)
+		return 0;
+
+	security_init_mnt_opts(&opts);
+	secdata = alloc_secdata();
+	if (!secdata)
+		return -ENOMEM;
+	rc = selinux_sb_copy_data(data, secdata);
+	if (rc)
+		goto out_free_secdata;
+
+	rc = selinux_parse_opts_str(secdata, &opts);
+	if (rc)
+		goto out_free_secdata;
+
+	mount_options = opts.mnt_opts;
+	flags = opts.mnt_opts_flags;
+
+	for (i = 0; i < opts.num_mnt_opts; i++) {
+		u32 sid;
+		size_t len;
+
+		if (flags[i] == SE_SBLABELSUPP)
+			continue;
+		len = strlen(mount_options[i]);
+		rc = security_context_to_sid(mount_options[i], len, &sid);
+		if (rc) {
+			printk(KERN_WARNING "SELinux: security_context_to_sid"
+			       "(%s) failed for (dev %s, type %s) errno=%d\n",
+			       mount_options[i], sb->s_id, sb->s_type->name, rc);
+			goto out_free_opts;
+		}
+		rc = -EINVAL;
+		switch (flags[i]) {
+		case FSCONTEXT_MNT:
+			if (bad_option(sbsec, FSCONTEXT_MNT, sbsec->sid, sid))
+				goto out_bad_option;
+			break;
+		case CONTEXT_MNT:
+			if (bad_option(sbsec, CONTEXT_MNT, sbsec->mntpoint_sid, sid))
+				goto out_bad_option;
+			break;
+		case ROOTCONTEXT_MNT: {
+			struct inode_security_struct *root_isec;
+			root_isec = sb->s_root->d_inode->i_security;
+
+			if (bad_option(sbsec, ROOTCONTEXT_MNT, root_isec->sid, sid))
+				goto out_bad_option;
+			break;
+		}
+		case DEFCONTEXT_MNT:
+			if (bad_option(sbsec, DEFCONTEXT_MNT, sbsec->def_sid, sid))
+				goto out_bad_option;
+			break;
+		default:
+			goto out_free_opts;
+		}
+	}
+
+	rc = 0;
+out_free_opts:
+	security_free_mnt_opts(&opts);
+out_free_secdata:
+	free_secdata(secdata);
+	return rc;
+out_bad_option:
+	printk(KERN_WARNING "SELinux: unable to change security options "
+	       "during remount (dev %s, type=%s)\n", sb->s_id,
+	       sb->s_type->name);
+	goto out_free_opts;
+}
+
 static int selinux_sb_kern_mount(struct super_block *sb, int flags, void *data)
 {
 	const struct cred *cred = current_cred();
@@ -2609,7 +2694,10 @@ static int selinux_inode_init_security(struct inode *inode, struct inode *dir,
 	sid = tsec->sid;
 	newsid = tsec->create_sid;
 
-	if (!newsid || !(sbsec->flags & SE_SBLABELSUPP)) {
+	if ((sbsec->flags & SE_SBINITIALIZED) &&
+	    (sbsec->behavior == SECURITY_FS_USE_MNTPOINT))
+		newsid = sbsec->mntpoint_sid;
+	else if (!newsid || !(sbsec->flags & SE_SBLABELSUPP)) {
 		rc = security_transition_sid(sid, dsec->sid,
 					     inode_mode_to_security_class(inode->i_mode),
 					     &newsid);
@@ -4615,11 +4703,11 @@ static unsigned int selinux_ip_postroute_compat(struct sk_buff *skb,
 	if (selinux_secmark_enabled())
 		if (avc_has_perm(sksec->sid, skb->secmark,
 				 SECCLASS_PACKET, PACKET__SEND, &ad))
-			return NF_DROP;
+			return NF_DROP_ERR(-ECONNREFUSED);
 
 	if (selinux_policycap_netpeer)
 		if (selinux_xfrm_postroute_last(sksec->sid, skb, &ad, proto))
-			return NF_DROP;
+			return NF_DROP_ERR(-ECONNREFUSED);
 
 	return NF_ACCEPT;
 }
@@ -4676,7 +4764,7 @@ static unsigned int selinux_ip_postroute(struct sk_buff *skb, int ifindex,
 				secmark_perm = PACKET__SEND;
 			break;
 		default:
-			return NF_DROP;
+			return NF_DROP_ERR(-ECONNREFUSED);
 		}
 		if (secmark_perm == PACKET__FORWARD_OUT) {
 			if (selinux_skb_peerlbl_sid(skb, family, &peer_sid))
@@ -4698,7 +4786,7 @@ static unsigned int selinux_ip_postroute(struct sk_buff *skb, int ifindex,
 	if (secmark_active)
 		if (avc_has_perm(peer_sid, skb->secmark,
 				 SECCLASS_PACKET, secmark_perm, &ad))
-			return NF_DROP;
+			return NF_DROP_ERR(-ECONNREFUSED);
 
 	if (peerlbl_active) {
 		u32 if_sid;
@@ -4708,13 +4796,13 @@ static unsigned int selinux_ip_postroute(struct sk_buff *skb, int ifindex,
 			return NF_DROP;
 		if (avc_has_perm(peer_sid, if_sid,
 				 SECCLASS_NETIF, NETIF__EGRESS, &ad))
-			return NF_DROP;
+			return NF_DROP_ERR(-ECONNREFUSED);
 
 		if (sel_netnode_sid(addrp, family, &node_sid))
 			return NF_DROP;
 		if (avc_has_perm(peer_sid, node_sid,
 				 SECCLASS_NODE, NODE__SENDTO, &ad))
-			return NF_DROP;
+			return NF_DROP_ERR(-ECONNREFUSED);
 	}
 
 	return NF_ACCEPT;
@@ -5508,6 +5596,7 @@ static struct security_operations selinux_ops = {
 	.sb_alloc_security =		selinux_sb_alloc_security,
 	.sb_free_security =		selinux_sb_free_security,
 	.sb_copy_data =			selinux_sb_copy_data,
+	.sb_remount =			selinux_sb_remount,
 	.sb_kern_mount =		selinux_sb_kern_mount,
 	.sb_show_options =		selinux_sb_show_options,
 	.sb_statfs =			selinux_sb_statfs,
