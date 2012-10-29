@@ -4960,8 +4960,8 @@ static irqreturn_t ipr_handle_other_interrupt(struct ipr_ioa_cfg *ioa_cfg,
 	int_mask_reg = readl(ioa_cfg->regs.sense_interrupt_mask_reg32);
 	int_reg &= ~int_mask_reg;
 
-	/* If an interrupt on the adapter did not occur, ignore it.
-	 * Or in the case of SIS 64, check for a stage change interrupt.
+	/* Ignore the interrupt if it was not an operational interrupt.
+	 * Or, in the case of SIS 64, check for a stage change interrupt.
 	 */
 	if ((int_reg & IPR_PCII_OPER_INTERRUPTS) == 0) {
 		if (ioa_cfg->sis64) {
