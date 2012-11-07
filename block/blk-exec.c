@@ -45,7 +45,7 @@ static void blk_end_sync_rq(struct request *rq, int error)
  *    for execution.  Don't wait for completion.
  *
  * Note:
- *    This function will invoke @done directly if the queue is dead.
+ *    This function will invoke @done directly if the queue is dead
  */
 void blk_execute_rq_nowait(struct request_queue *q, struct gendisk *bd_disk,
 			   struct request *rq, int at_head,
@@ -68,9 +68,9 @@ void blk_execute_rq_nowait(struct request_queue *q, struct gendisk *bd_disk,
 		return;
 	}
 
-	__elv_add_request(q, rq, where);
-	__blk_run_queue(q);
-	/* the queue is stopped so it won't be run */
+	__elv_add_request(q, rq, where, 1);
+	__generic_unplug_device(q);
+	/* the queue is stopped so it won't be plugged+unplugged */
 	if (rq->cmd_type == REQ_TYPE_PM_RESUME)
 		q->request_fn(q);
 	spin_unlock_irq(q->queue_lock);
