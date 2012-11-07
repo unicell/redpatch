@@ -742,7 +742,7 @@ xfs_inode_item_pushbuf(
 		return true;
 	if (XFS_BUF_ISDELAYWRITE(bp))
 		xfs_buf_delwri_promote(bp);
-	if (xfs_buf_ispinned(bp))
+	if (XFS_BUF_ISPINNED(bp))
 		ret = false;
 	xfs_buf_relse(bp);
 	return ret;
