@@ -96,34 +96,64 @@ enum sctp_optname {
 	SCTP_DELAYED_ACK,
 #define SCTP_DELAYED_ACK_TIME SCTP_DELAYED_ACK
 #define SCTP_DELAYED_SACK SCTP_DELAYED_ACK_TIME
-#define SCTP_CONTEXT	17
-#define SCTP_FRAGMENT_INTERLEAVE	18
-#define SCTP_PARTIAL_DELIVERY_POINT	19 /* Set/Get partial delivery point */
-#define SCTP_MAX_BURST	20		/* Set/Get max burst */
-#define SCTP_AUTH_CHUNK	21	/* Set only: add a chunk type to authenticate */
-#define SCTP_HMAC_IDENT	22
-#define SCTP_AUTH_KEY	23
-#define SCTP_AUTH_ACTIVE_KEY	24
-#define SCTP_AUTH_DELETE_KEY	25
-#define SCTP_PEER_AUTH_CHUNKS	26	/* Read only */
-#define SCTP_LOCAL_AUTH_CHUNKS	27	/* Read only */
-#define SCTP_GET_ASSOC_NUMBER	28	/* Read only */
-#define SCTP_GET_ASSOC_ID_LIST	29	/* Read only */
-#define SCTP_AUTO_ASCONF       30
-#define SCTP_PEER_ADDR_THLDS	31
+#define SCTP_DELAYED_ACK SCTP_DELAYED_ACK
+	SCTP_CONTEXT,	/* Receive Context */
+#define SCTP_CONTEXT SCTP_CONTEXT
+	SCTP_FRAGMENT_INTERLEAVE,
+#define SCTP_FRAGMENT_INTERLEAVE SCTP_FRAGMENT_INTERLEAVE
+	SCTP_PARTIAL_DELIVERY_POINT,	/* Set/Get partial delivery point */
+#define SCTP_PARTIAL_DELIVERY_POINT SCTP_PARTIAL_DELIVERY_POINT
+	SCTP_MAX_BURST,		/* Set/Get max burst */
+#define SCTP_MAX_BURST SCTP_MAX_BURST
+	SCTP_AUTH_CHUNK,	/* Set only: add a chunk type to authenticat */
+#define SCTP_AUTH_CHUNK SCTP_AUTH_CHUNK
+	SCTP_HMAC_IDENT,
+#define SCTP_HMAC_IDENT SCTP_HMAC_IDENT
+	SCTP_AUTH_KEY,
+#define SCTP_AUTH_KEY SCTP_AUTH_KEY
+	SCTP_AUTH_ACTIVE_KEY,
+#define SCTP_AUTH_ACTIVE_KEY SCTP_AUTH_ACTIVE_KEY
+	SCTP_AUTH_DELETE_KEY,
+#define SCTP_AUTH_DELETE_KEY SCTP_AUTH_DELETE_KEY
+	SCTP_PEER_AUTH_CHUNKS,		/* Read only */
+#define SCTP_PEER_AUTH_CHUNKS SCTP_PEER_AUTH_CHUNKS
+	SCTP_LOCAL_AUTH_CHUNKS,		/* Read only */
+#define SCTP_LOCAL_AUTH_CHUNKS SCTP_LOCAL_AUTH_CHUNKS
+	SCTP_GET_ASSOC_NUMBER,		/* Read only */
+#define SCTP_GET_ASSOC_NUMBER SCTP_GET_ASSOC_NUMBER
+	SCTP_GET_ASSOC_ID_LIST,  	/* Read only */
+#define SCTP_GET_ASSOC_ID_LIST SCTP_GET_ASSOC_ID_LIST
+	SCTP_PEER_ADDR_THLDS = 31,
+#define SCTP_PEER_ADDR_THLDS SCTP_PEER_ADDR_THLDS
 
-/* Internal Socket Options. Some of the sctp library functions are
- * implemented using these socket options.
- */
-#define SCTP_SOCKOPT_BINDX_ADD	100	/* BINDX requests for adding addrs */
-#define SCTP_SOCKOPT_BINDX_REM	101	/* BINDX requests for removing addrs. */
-#define SCTP_SOCKOPT_PEELOFF	102	/* peel off association. */
-/* Options 104-106 are deprecated and removed. Do not use this space */
-#define SCTP_SOCKOPT_CONNECTX_OLD	107	/* CONNECTX old requests. */
-#define SCTP_GET_PEER_ADDRS	108		/* Get all peer address. */
-#define SCTP_GET_LOCAL_ADDRS	109		/* Get all local address. */
-#define SCTP_SOCKOPT_CONNECTX	110		/* CONNECTX requests. */
-#define SCTP_SOCKOPT_CONNECTX3	111	/* CONNECTX requests (updated) */
+	/* Internal Socket Options. Some of the sctp library functions are 
+	 * implemented using these socket options.
+	 */
+	SCTP_SOCKOPT_BINDX_ADD = 100,/* BINDX requests for adding addresses. */
+#define SCTP_SOCKOPT_BINDX_ADD	SCTP_SOCKOPT_BINDX_ADD
+	SCTP_SOCKOPT_BINDX_REM, /* BINDX requests for removing addresses. */
+#define SCTP_SOCKOPT_BINDX_REM	SCTP_SOCKOPT_BINDX_REM
+	SCTP_SOCKOPT_PEELOFF, 	/* peel off association. */
+#define SCTP_SOCKOPT_PEELOFF	SCTP_SOCKOPT_PEELOFF
+	SCTP_GET_PEER_ADDRS_NUM_OLD, 	/* Get number of peer addresss. */
+#define SCTP_GET_PEER_ADDRS_NUM_OLD	SCTP_GET_PEER_ADDRS_NUM_OLD
+	SCTP_GET_PEER_ADDRS_OLD, 	/* Get all peer addresss. */
+#define SCTP_GET_PEER_ADDRS_OLD	SCTP_GET_PEER_ADDRS_OLD
+	SCTP_GET_LOCAL_ADDRS_NUM_OLD, 	/* Get number of local addresss. */
+#define SCTP_GET_LOCAL_ADDRS_NUM_OLD	SCTP_GET_LOCAL_ADDRS_NUM_OLD
+	SCTP_GET_LOCAL_ADDRS_OLD, 	/* Get all local addresss. */
+#define SCTP_GET_LOCAL_ADDRS_OLD	SCTP_GET_LOCAL_ADDRS_OLD
+	SCTP_SOCKOPT_CONNECTX_OLD, /* CONNECTX old requests. */
+#define SCTP_SOCKOPT_CONNECTX_OLD	SCTP_SOCKOPT_CONNECTX_OLD
+	SCTP_GET_PEER_ADDRS, 	/* Get all peer addresss. */
+#define SCTP_GET_PEER_ADDRS	SCTP_GET_PEER_ADDRS
+	SCTP_GET_LOCAL_ADDRS, 	/* Get all local addresss. */
+#define SCTP_GET_LOCAL_ADDRS	SCTP_GET_LOCAL_ADDRS
+	SCTP_SOCKOPT_CONNECTX, /* CONNECTX requests. */
+#define SCTP_SOCKOPT_CONNECTX	SCTP_SOCKOPT_CONNECTX
+	SCTP_SOCKOPT_CONNECTX3, /* CONNECTX requests. (new implementation) */
+#define SCTP_SOCKOPT_CONNECTX3	SCTP_SOCKOPT_CONNECTX3
+};
 
 /*
  * 5.2.1 SCTP Initiation Structure (SCTP_INIT)

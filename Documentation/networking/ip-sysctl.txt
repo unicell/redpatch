@@ -1317,7 +1317,7 @@ pf_retrans - INTEGER
 	for details.  Note also that a value of pf_retrans > path_max_retrans
 	disables this feature
 
-	Default: 0
+	Default: INT_MAX
 
 rto_initial - INTEGER
 	The initial round trip timeout value in milliseconds that will be used
