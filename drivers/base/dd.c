@@ -258,7 +258,7 @@ int device_attach(struct device *dev)
 		pm_runtime_put_sync(dev);
 	}
 out_unlock:
-	device_unlock(dev);
+	up(&dev->sem);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(device_attach);
