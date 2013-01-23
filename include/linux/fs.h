@@ -10,7 +10,6 @@
 #include <linux/ioctl.h>
 #include <linux/blk_types.h>
 #include <linux/types.h>
-#include <linux/percpu-rwsem.h>
 
 /*
  * It's silly to have NR_OPEN bigger than NR_FILE, but you can change
@@ -410,6 +409,7 @@ struct inodes_stat_t {
 #include <linux/capability.h>
 #include <linux/semaphore.h>
 #include <linux/fiemap.h>
+#include <linux/percpu-rwsem.h>
 
 #include <asm/atomic.h>
 #include <asm/byteorder.h>
@@ -718,8 +718,10 @@ struct block_device {
 	int			bd_fsfreeze_count;
 	/* Mutex for freeze */
 	struct mutex		bd_fsfreeze_mutex;
+#ifndef __GENKSYMS__
 	/* A semaphore that prevents I/O while block size is being changed */
 	struct percpu_rw_semaphore	bd_block_size_semaphore;
+#endif
 };
 
 /*
