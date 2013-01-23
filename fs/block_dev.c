@@ -87,14 +87,14 @@ int set_blocksize(struct block_device *bdev, int size)
 
 	/* Check that the block device is not memory mapped */
 	mapping = bdev->bd_inode->i_mapping;
-	mutex_lock(&mapping->i_mmap_mutex);
+	spin_lock(&mapping->i_mmap_lock);
 	if (!prio_tree_empty(&mapping->i_mmap) ||
 	    !list_empty(&mapping->i_mmap_nonlinear)) {
-		mutex_unlock(&mapping->i_mmap_mutex);
+		spin_unlock(&mapping->i_mmap_lock);
 		percpu_up_write(&bdev->bd_block_size_semaphore);
 		return -EBUSY;
 	}
-	mutex_unlock(&mapping->i_mmap_mutex);
+	spin_unlock(&mapping->i_mmap_lock);
 
 	/* Don't change the size if it is same as current */
 	if (bdev->bd_block_size != size) {
@@ -1511,7 +1511,7 @@ ssize_t blkdev_aio_write(struct kiocb *iocb, const struct iovec *iov,
 }
 EXPORT_SYMBOL_GPL(blkdev_aio_write);
 
-int blkdev_mmap(struct file *file, struct vm_area_struct *vma)
+static int blkdev_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	int ret;
 	struct block_device *bdev = I_BDEV(file->f_mapping->host);
