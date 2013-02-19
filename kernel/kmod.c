@@ -287,6 +287,7 @@ static void __call_usermodehelper(struct work_struct *work)
 	pid_t pid;
 
 	BUG_ON(atomic_read(&sub_info->cred->usage) != 1);
+
 	if (wait != UMH_NO_WAIT)
 		wait &= ~UMH_KILLABLE;
 
